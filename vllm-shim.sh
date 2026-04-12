@@ -8,7 +8,8 @@ set -euo pipefail
 #
 # Architecture:
 #   haproxy on the vLLM port (front door)
-#     /metrics → 200 empty response
+#     /metrics → 200 empty (stub)
+#     /health  → 200 if SGLang backend is up, 503 if not (instant)
 #     /*       → proxy to SGLang on port+1
 #   SGLang on port+1 (internal)
 # ============================================================
@@ -62,7 +63,7 @@ done
 SGLANG_PORT=$((PORT + 1))
 
 echo "Launching SGLang on ${HOST}:${SGLANG_PORT} (internal)"
-echo "Launching haproxy on ${HOST}:${PORT} (front door, /metrics stub)"
+echo "Launching haproxy on ${HOST}:${PORT} (front door, /metrics + /health stub)"
 echo ""
 
 # Write haproxy config
@@ -80,11 +81,23 @@ defaults
 
 frontend proxy
   bind ${HOST}:${PORT}
+
+  # /metrics stub — instant 200 empty (vLLm stack expects this)
   http-request return status 200 content-type text/plain "" if { path /metrics }
+
+  # /health — instant response based on SGLang backend state
+  # haproxy health-checks SGLang in the background; this avoids
+  # the 1s k8s probe timeout racing SGLang's ~1.001s /health response
+  acl sglang_up nbsrv(sglang) gt 0
+  http-request return status 200 content-type text/plain "" if { path /health } sglang_up
+  http-request return status 503 content-type text/plain "SGLang not ready" if { path /health }
+
   default_backend sglang
 
 backend sglang
-  server s1 127.0.0.1:${SGLANG_PORT}
+  option httpchk GET /health
+  http-check expect status 200
+  server s1 127.0.0.1:${SGLANG_PORT} check inter 5s fall 3 rise 2 timeout check 3s
 EOF
 
 echo "haproxy config written to ${HAPROXY_CFG}" >> "$LOG_PATH"

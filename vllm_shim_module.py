@@ -5,14 +5,15 @@ and launches SGLang behind haproxy instead.
 
 Architecture:
   haproxy on the vLLM port (front door)
-    /metrics → 200 empty response
+    /metrics → 200 empty (stub)
+    /health  → 200 if SGLang backend is up, 503 if not (instant)
     /*       → proxy to SGLang on port+1
   SGLang on port+1 (internal)
 """
 import os
 import sys
 import subprocess
-import signal
+import time
 
 def main():
     args = sys.argv[1:]
@@ -63,7 +64,7 @@ def main():
     sglang_port = str(int(port) + 1)
 
     print(f"Launching SGLang on {host}:{sglang_port} (internal)")
-    print(f"Launching haproxy on {host}:{port} (front door, /metrics stub)")
+    print(f"Launching haproxy on {host}:{port} (front door, /metrics + /health stub)")
     print()
 
     # Write haproxy config
@@ -81,11 +82,23 @@ defaults
 
 frontend proxy
   bind {host}:{port}
+
+  # /metrics stub — instant 200 empty (vLLM stack expects this)
   http-request return status 200 content-type text/plain "" if {{ path /metrics }}
+
+  # /health — instant response based on SGLang backend state
+  # haproxy health-checks SGLang in the background; this avoids
+  # the 1s k8s probe timeout racing SGLang's ~1.001s /health response
+  acl sglang_up nbsrv(sglang) gt 0
+  http-request return status 200 content-type text/plain "" if {{ path /health }} sglang_up
+  http-request return status 503 content-type text/plain "SGLang not ready" if {{ path /health }}
+
   default_backend sglang
 
 backend sglang
-  server s1 127.0.0.1:{sglang_port}
+  option httpchk GET /health
+  http-check expect status 200
+  server s1 127.0.0.1:{sglang_port} check inter 5s fall 3 rise 2 timeout check 3s
 """)
 
     with open(log_path, "a") as f:
@@ -105,7 +118,6 @@ backend sglang
     )
 
     # Give SGLang a moment before haproxy starts routing
-    import time
     time.sleep(2)
 
     # Start haproxy in the background
