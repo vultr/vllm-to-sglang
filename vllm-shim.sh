@@ -73,7 +73,7 @@ echo ""
 # haproxy errorfile format: HTTP/1.x status_code reason\r\nheaders\r\n\r\nbody
 mkdir -p /tmp/haproxy-errors
 printf "HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" > /tmp/haproxy-errors/200-empty.http
-printf "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 15\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready" > /tmp/haproxy-errors/503-sglang.http
+printf "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 16\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready" > /tmp/haproxy-errors/503-sglang.http
 
 # Write haproxy config (compatible with haproxy 2.4)
 HAPROXY_CFG="/tmp/haproxy-shim.cfg"
@@ -109,7 +109,7 @@ frontend proxy
 backend sglang
   option httpchk GET /health
   http-check expect status 200
-  server s1 127.0.0.1:${SGLANG_PORT} check inter 5s fall 3 rise 2 timeout check 3s
+  server s1 127.0.0.1:${SGLANG_PORT} check inter 5s fall 3 rise 2
 EOF
 
 echo "haproxy config written to ${HAPROXY_CFG}" >> "$LOG_PATH"
