@@ -18,6 +18,7 @@ import json
 import os
 import asyncio
 import httpx
+from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, Response
 import uvicorn
@@ -87,6 +88,47 @@ async def health():
         return Response(content="SGLang not ready", status_code=503)
 
 
+ERROR_LOG = os.environ.get("VLLM_SHIM_LOG", "/tmp/vllm-shim.log")
+
+
+def _dump_error(request_body: bytes, status_code: int, resp_headers: dict, resp_body_raw: bytes, path: str = ""):
+    """Log full request + response payload when SGLang returns an error (4xx/5xx)."""
+    try:
+        ts = datetime.now().isoformat()
+        req_json = None
+        try:
+            req_json = json.loads(request_body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+        resp_text = resp_body_raw.decode("utf-8", errors="replace")[:4000]
+        resp_json = None
+        try:
+            resp_json = json.loads(resp_text)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+        with open(ERROR_LOG, "a") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"[{ts}] ERROR DUMP — SGLang returned HTTP {status_code}\n")
+            f.write(f"Path: {path}\n")
+            f.write(f"--- Request Body ---\n")
+            if req_json:
+                f.write(json.dumps(req_json, indent=2, ensure_ascii=False)[:8000])
+            else:
+                f.write(request_body.decode("utf-8", errors="replace")[:8000])
+            f.write(f"\n--- Response (HTTP {status_code}) ---\n")
+            if resp_json:
+                f.write(json.dumps(resp_json, indent=2, ensure_ascii=False)[:4000])
+            else:
+                f.write(resp_text)
+            f.write(f"\n{'='*60}\n")
+
+        print(f"[{ts}] ERROR DUMP: HTTP {status_code} on {path} — full payload written to {ERROR_LOG}")
+    except Exception as e:
+        print(f"_dump_error failed: {e}")
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy(path: str, request: Request):
     body = await request.body()
@@ -123,6 +165,17 @@ async def proxy(path: str, request: Request):
             req = client.build_request(request.method, url, content=body, headers=fwd_headers)
             resp = await client.send(req, stream=True)
 
+            # Dump on error for streaming responses
+            if resp.status_code >= 400:
+                error_body = await resp.aread()
+                _dump_error(body, resp.status_code, resp_headers=dict(resp.headers), resp_body_raw=error_body, path=path)
+                await resp.aclose()
+                return Response(
+                    content=error_body,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"),
+                )
+
             async def stream_body():
                 try:
                     async for chunk in resp.aiter_bytes():
@@ -137,6 +190,11 @@ async def proxy(path: str, request: Request):
             )
         else:
             resp = await client.request(request.method, url, content=body, headers=fwd_headers)
+
+            # Dump on error
+            if resp.status_code >= 400:
+                _dump_error(body, resp.status_code, resp_headers=dict(resp.headers), resp_body_raw=resp.content, path=path)
+
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
