@@ -10,6 +10,16 @@ import subprocess
 def main():
     args = sys.argv[1:]
 
+    log_path = os.environ.get("VLLM_SHIM_LOG", "/tmp/vllm-shim.log")
+    with open(log_path, "a") as f:
+        import datetime
+        f.write(f"\n{datetime.datetime.now().isoformat()} vLLM -> SGLang Shim (Python module)\n")
+        f.write(f"  Invoked as: python -m {__name__} {' '.join(args)}\n")
+        f.write("  All arguments received:\n")
+        for i, arg in enumerate(args, 1):
+            f.write(f"    [{i}] {arg}\n")
+        f.write("\n")
+
     print()
     print("==========================================")
     print("  vLLM -> SGLang Shim (Python module)")
