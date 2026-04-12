@@ -9,6 +9,9 @@ Architecture:
     /health  → 200 if SGLang backend is up, 503 if not (instant)
     /*       → proxy to SGLang on port+1
   SGLang on port+1 (internal)
+
+haproxy 2.4 compat: uses errorfile for stub responses instead
+of http-request return (which needs 2.8+ for payload syntax).
 """
 import os
 import sys
@@ -67,11 +70,18 @@ def main():
     print(f"Launching haproxy on {host}:{port} (front door, /metrics + /health stub)")
     print()
 
-    # Write haproxy config
+    # Prepare error files for haproxy stub responses
+    # haproxy errorfile format: HTTP/1.x status_code reason\r\nheaders\r\n\r\nbody
+    os.makedirs("/tmp/haproxy-errors", exist_ok=True)
+    with open("/tmp/haproxy-errors/200-empty.http", "w") as f:
+        f.write("HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    with open("/tmp/haproxy-errors/503-sglang.http", "w") as f:
+        f.write("HTTP/1.0 503 Service Unavailable\r\nContent-Length: 15\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready")
+
+    # Write haproxy config (compatible with haproxy 2.4)
     haproxy_cfg = "/tmp/haproxy-shim.cfg"
     with open(haproxy_cfg, "w") as f:
         f.write(f"""global
-  log /dev/log local0
   maxconn 4096
 
 defaults
@@ -84,14 +94,18 @@ frontend proxy
   bind {host}:{port}
 
   # /metrics stub — instant 200 empty (vLLM stack expects this)
-  http-request return status 200 content-type text/plain "" if {{ path /metrics }}
+  acl is_metrics path /metrics
+  http-request deny deny_status 200 if is_metrics
+  errorfile 200 /tmp/haproxy-errors/200-empty.http
 
   # /health — instant response based on SGLang backend state
   # haproxy health-checks SGLang in the background; this avoids
   # the 1s k8s probe timeout racing SGLang's ~1.001s /health response
+  acl is_health path /health
   acl sglang_up nbsrv(sglang) gt 0
-  http-request return status 200 content-type text/plain "" if {{ path /health }} sglang_up
-  http-request return status 503 content-type text/plain "SGLang not ready" if {{ path /health }}
+  http-request deny deny_status 200 if is_health sglang_up
+  http-request deny deny_status 503 if is_health
+  errorfile 503 /tmp/haproxy-errors/503-sglang.http
 
   default_backend sglang
 
