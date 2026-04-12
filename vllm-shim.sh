@@ -63,9 +63,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # SGLang runs one port higher; haproxy binds the original port
+# Middleware runs two ports higher (strips vLLM-only params)
 SGLANG_PORT=$((PORT + 1))
+MIDDLEWARE_PORT=$((PORT + 2))
 
 echo "Launching SGLang on ${HOST}:${SGLANG_PORT} (internal)"
+echo "Launching middleware on ${HOST}:${MIDDLEWARE_PORT} (strips logprobs)"
 echo "Launching haproxy on ${HOST}:${PORT} (front door, /metrics + /health stub)"
 echo ""
 
@@ -109,7 +112,7 @@ frontend proxy
 backend sglang
   option httpchk GET /health
   http-check expect status 200
-  server s1 127.0.0.1:${SGLANG_PORT} check inter 5s fall 3 rise 2
+  server s1 127.0.0.1:${MIDDLEWARE_PORT} check inter 5s fall 3 rise 2
 EOF
 
 echo "haproxy config written to ${HAPROXY_CFG}" >> "$LOG_PATH"
@@ -124,6 +127,12 @@ python -m sglang.launch_server \
 
 SGLANG_PID=$!
 
+# Start the middleware (strips vLLM-only params like logprobs)
+SGLANG_PORT=$SGLANG_PORT MIDDLEWARE_PORT=$MIDDLEWARE_PORT \
+  python /opt/vllm-shim/vllm_middleware.py &
+
+MIDDLEWARE_PID=$!
+
 # Give SGLang a moment to start before haproxy starts routing
 sleep 2
 
@@ -132,11 +141,11 @@ haproxy -f "$HAPROXY_CFG" &
 
 HAPROXY_PID=$!
 
-echo "SGLang PID: ${SGLANG_PID}, haproxy PID: ${HAPROXY_PID}" >> "$LOG_PATH"
+echo "SGLang PID: ${SGLANG_PID}, middleware PID: ${MIDDLEWARE_PID}, haproxy PID: ${HAPROXY_PID}" >> "$LOG_PATH"
 
 # Wait for whichever dies first — if either goes, we go
-wait -n "$SGLANG_PID" "$HAPROXY_PID"
+wait -n "$SGLANG_PID" "$MIDDLEWARE_PID" "$HAPROXY_PID"
 EXIT_CODE=$?
 echo "A process exited (code ${EXIT_CODE}), shutting down" >> "$LOG_PATH"
-kill "$SGLANG_PID" "$HAPROXY_PID" 2>/dev/null || true
+kill "$SGLANG_PID" "$MIDDLEWARE_PID" "$HAPROXY_PID" 2>/dev/null || true
 exit $EXIT_CODE

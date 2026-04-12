@@ -27,6 +27,14 @@ Rather than launching SGLang directly on the vLLM port, the shim runs **haproxy*
 
 2. **`/health` probe timing** — SGLang's `/health` endpoint takes ~1.001s to respond, which races the 1s k8s probe timeout and causes repeated `Startup probe failed: context deadline exceeded`. haproxy health-checks SGLang in the background (every 5s, with a 3s timeout) and responds to `/health` probes **instantly** — 200 if the backend is up, 503 if it's not. No more timeout roulette.
 
+### middleware layer
+
+A Python middleware (FastAPI) sits between haproxy and SGLang on **port+2**. It strips vLLM-only request parameters that SGLang rejects with 422 errors:
+
+- **`logprobs`** / **`top_logprobs`** — vLLM accepts these on chat completion requests; SGLang's Mistral tool-call parser rejects them. OpenClaw and other vLLM clients send them by default.
+
+The middleware only touches `POST /v1/chat/completions` request bodies and passes everything else through unchanged. To strip additional params, add them to the `STRIP_PARAMS` set in `vllm_middleware.py`.
+
 ```
 ┌─────────────────────────────────────────────┐
 │  k8s probes / vLLM stack                    │
@@ -36,7 +44,12 @@ Rather than launching SGLang directly on the vLLM port, the shim runs **haproxy*
 │    /metrics ──► 200 empty (stub)            │
 │    /health  ──► 200/503 instant (backend    │
 │                 health-checked in bg)        │
-│    /*       ──► proxy to SGLang             │
+│    /*       ──► proxy to middleware          │
+│                       │                     │
+│                       ▼                     │
+│  middleware (port 8002)                      │
+│    strips logprobs/top_logprobs             │
+│    forwards to SGLang                       │
 │                       │                     │
 │                       ▼                     │
 │              SGLang (port 8001)             │
@@ -86,5 +99,6 @@ To adapt for a different model, change `--model-path`, `--tp`, and `--tool-call-
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Builds the image: ROCm SGLang base + haproxy + shims + MI300X env |
-| `vllm-shim.sh` | Shell shim — replaces the `vllm` binary, launches SGLang + haproxy |
-| `vllm_shim_module.py` | Python shim — shadows `vllm.*` module imports, launches SGLang + haproxy |
+| `vllm-shim.sh` | Shell shim — replaces the `vllm` binary, launches SGLang + middleware + haproxy |
+| `vllm_shim_module.py` | Python shim — shadows `vllm.*` module imports, launches SGLang + middleware + haproxy |
+| `vllm_middleware.py` | FastAPI middleware — strips vLLM-only params (logprobs) before forwarding to SGLang |

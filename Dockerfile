@@ -18,6 +18,7 @@ RUN mkdir -p /opt/vllm-shim/vllm/entrypoints/openai \
 COPY vllm_shim_module.py /opt/vllm-shim/vllm/__main__.py
 COPY vllm_shim_module.py /opt/vllm-shim/vllm/entrypoints/openai/api_server.py
 COPY vllm_shim_module.py /opt/vllm-shim/vllm/entrypoints/cli/main.py
+COPY vllm_middleware.py /opt/vllm-shim/vllm_middleware.py
 RUN touch /opt/vllm-shim/vllm/__init__.py \
           /opt/vllm-shim/vllm/entrypoints/__init__.py \
           /opt/vllm-shim/vllm/entrypoints/openai/__init__.py \

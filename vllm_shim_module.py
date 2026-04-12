@@ -63,10 +63,12 @@ def main():
         else:
             i += 1
 
-    # SGLang runs one port higher; haproxy binds the original port
+    # SGLang runs one port higher; middleware two ports higher
     sglang_port = str(int(port) + 1)
+    middleware_port = str(int(port) + 2)
 
     print(f"Launching SGLang on {host}:{sglang_port} (internal)")
+    print(f"Launching middleware on {host}:{middleware_port} (strips logprobs)")
     print(f"Launching haproxy on {host}:{port} (front door, /metrics + /health stub)")
     print()
 
@@ -112,12 +114,12 @@ frontend proxy
 backend sglang
   option httpchk GET /health
   http-check expect status 200
-  server s1 127.0.0.1:{sglang_port} check inter 5s fall 3 rise 2
+  server s1 127.0.0.1:{middleware_port} check inter 5s fall 3 rise 2
 """)
 
     with open(log_path, "a") as f:
         f.write(f"haproxy config written to {haproxy_cfg}\n")
-        f.write(f"SGLang port: {sglang_port}, haproxy port: {port}\n")
+        f.write(f"SGLang port: {sglang_port}, middleware port: {middleware_port}, haproxy port: {port}\n")
 
     # Start SGLang in the background
     sglang_proc = subprocess.Popen(
@@ -131,6 +133,15 @@ backend sglang
         ],
     )
 
+    # Start the middleware (strips vLLM-only params like logprobs)
+    middleware_env = os.environ.copy()
+    middleware_env["SGLANG_PORT"] = sglang_port
+    middleware_env["MIDDLEWARE_PORT"] = middleware_port
+    middleware_proc = subprocess.Popen(
+        [sys.executable, "/opt/vllm-shim/vllm_middleware.py"],
+        env=middleware_env,
+    )
+
     # Give SGLang a moment before haproxy starts routing
     time.sleep(2)
 
@@ -138,19 +149,27 @@ backend sglang
     haproxy_proc = subprocess.Popen(["haproxy", "-f", haproxy_cfg])
 
     with open(log_path, "a") as f:
-        f.write(f"SGLang PID: {sglang_proc.pid}, haproxy PID: {haproxy_proc.pid}\n")
+        f.write(f"SGLang PID: {sglang_proc.pid}, middleware PID: {middleware_proc.pid}, haproxy PID: {haproxy_proc.pid}\n")
 
     # Wait for whichever dies first
     while True:
         sglang_ret = sglang_proc.poll()
+        middleware_ret = middleware_proc.poll()
         haproxy_ret = haproxy_proc.poll()
         if sglang_ret is not None:
             print(f"SGLang exited (code {sglang_ret}), shutting down")
+            middleware_proc.terminate()
             haproxy_proc.terminate()
             os._exit(sglang_ret)
+        if middleware_ret is not None:
+            print(f"Middleware exited (code {middleware_ret}), shutting down")
+            sglang_proc.terminate()
+            haproxy_proc.terminate()
+            os._exit(middleware_ret)
         if haproxy_ret is not None:
             print(f"haproxy exited (code {haproxy_ret}), shutting down")
             sglang_proc.terminate()
+            middleware_proc.terminate()
             os._exit(haproxy_ret)
         time.sleep(1)
 
