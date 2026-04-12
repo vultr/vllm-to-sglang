@@ -143,6 +143,16 @@ async def proxy(path: str, request: Request):
                 if key in data:
                     del data[key]
                     stripped_any = True
+
+            # Fix tool function parameters: must be object, not array/null/missing
+            tools = data.get("tools")
+            if isinstance(tools, list):
+                for tool in tools:
+                    func = tool.get("function") if isinstance(tool, dict) else None
+                    if isinstance(func, dict) and not isinstance(func.get("parameters"), dict):
+                        func["parameters"] = {"type": "object", "properties": {}}
+                        stripped_any = True
+
             if stripped_any:
                 body = json.dumps(data).encode()
         except (json.JSONDecodeError, UnicodeDecodeError):
