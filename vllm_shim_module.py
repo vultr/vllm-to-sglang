@@ -1,18 +1,25 @@
 """
 vLLM -> SGLang Python shim.
 Catches `python -m vllm.entrypoints.openai.api_server` (and similar)
-and launches SGLang instead.
+and launches SGLang behind haproxy instead.
+
+Architecture:
+  haproxy on the vLLM port (front door)
+    /metrics → 200 empty response
+    /*       → proxy to SGLang on port+1
+  SGLang on port+1 (internal)
 """
 import os
 import sys
 import subprocess
+import signal
 
 def main():
     args = sys.argv[1:]
 
     log_path = os.environ.get("VLLM_SHIM_LOG", "/tmp/vllm-shim.log")
+    import datetime
     with open(log_path, "a") as f:
-        import datetime
         f.write(f"\n{datetime.datetime.now().isoformat()} vLLM -> SGLang Shim (Python module)\n")
         f.write(f"  Invoked as: python -m {__name__} {' '.join(args)}\n")
         f.write("  All arguments received:\n")
@@ -52,20 +59,74 @@ def main():
         else:
             i += 1
 
-    print(f"Launching SGLang on {host}:{port}")
+    # SGLang runs one port higher; haproxy binds the original port
+    sglang_port = str(int(port) + 1)
+
+    print(f"Launching SGLang on {host}:{sglang_port} (internal)")
+    print(f"Launching haproxy on {host}:{port} (front door, /metrics stub)")
     print()
 
-    os.execvp(
-        sys.executable,
+    # Write haproxy config
+    haproxy_cfg = "/tmp/haproxy-shim.cfg"
+    with open(haproxy_cfg, "w") as f:
+        f.write(f"""global
+  log /dev/log local0
+  maxconn 4096
+
+defaults
+  mode http
+  timeout connect 5s
+  timeout client 300s
+  timeout server 300s
+
+frontend proxy
+  bind {host}:{port}
+  http-request return status 200 content-type text/plain "" if {{ path /metrics }}
+  default_backend sglang
+
+backend sglang
+  server s1 127.0.0.1:{sglang_port}
+""")
+
+    with open(log_path, "a") as f:
+        f.write(f"haproxy config written to {haproxy_cfg}\n")
+        f.write(f"SGLang port: {sglang_port}, haproxy port: {port}\n")
+
+    # Start SGLang in the background
+    sglang_proc = subprocess.Popen(
         [
             sys.executable, "-m", "sglang.launch_server",
             "--model-path", "mistralai/Devstral-2-123B-Instruct-2512",
             "--host", host,
-            "--port", port,
+            "--port", sglang_port,
             "--tp", "8",
             "--tool-call-parser", "mistral",
         ],
     )
+
+    # Give SGLang a moment before haproxy starts routing
+    import time
+    time.sleep(2)
+
+    # Start haproxy in the background
+    haproxy_proc = subprocess.Popen(["haproxy", "-f", haproxy_cfg])
+
+    with open(log_path, "a") as f:
+        f.write(f"SGLang PID: {sglang_proc.pid}, haproxy PID: {haproxy_proc.pid}\n")
+
+    # Wait for whichever dies first
+    while True:
+        sglang_ret = sglang_proc.poll()
+        haproxy_ret = haproxy_proc.poll()
+        if sglang_ret is not None:
+            print(f"SGLang exited (code {sglang_ret}), shutting down")
+            haproxy_proc.terminate()
+            os._exit(sglang_ret)
+        if haproxy_ret is not None:
+            print(f"haproxy exited (code {haproxy_ret}), shutting down")
+            sglang_proc.terminate()
+            os._exit(haproxy_ret)
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,12 @@
 FROM lmsysorg/sglang-rocm:v0.5.10rc0-rocm700-mi30x-20260411
 
 # ---------------------------------------------------------------
+# haproxy: routes /metrics stub, proxies everything else to SGLang
+# ---------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends haproxy \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------
 # Replace the vllm binary with our shim
 # ---------------------------------------------------------------
 COPY vllm-shim.sh /usr/local/bin/vllm
