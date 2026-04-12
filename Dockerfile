@@ -1,21 +1,18 @@
 FROM lmsysorg/sglang-rocm:v0.5.10rc0-rocm700-mi30x-20260411
 
 # ---------------------------------------------------------------
-# Fix aiter — try pip upgrade first, fall back to source build
+# Nuke the broken aiter and rebuild from source
+# The baked-in version is missing dynamic_per_tensor_quant etc.
 # ---------------------------------------------------------------
-RUN pip install --upgrade aiter || \
-    ( \
-      echo "=== pip upgrade failed, building aiter from source ===" && \
-      pip uninstall -y aiter || true && \
-      pip install psutil pybind11 flydsl==0.0.1.dev95158637 && \
-      git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter && \
-      cd /tmp/aiter && \
-      git checkout v0.1.11.post1 && \
-      git submodule sync && \
-      git submodule update --init --recursive && \
-      PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py install && \
-      cd / && rm -rf /tmp/aiter \
-    )
+RUN pip uninstall -y aiter && \
+    pip install psutil pybind11 flydsl==0.0.1.dev95158637 && \
+    git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter && \
+    cd /tmp/aiter && \
+    git checkout v0.1.11.post1 && \
+    git submodule sync && \
+    git submodule update --init --recursive && \
+    PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py install && \
+    cd / && rm -rf /tmp/aiter
 
 # ---------------------------------------------------------------
 # Replace the vllm binary with our shim
