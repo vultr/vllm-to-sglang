@@ -29,7 +29,7 @@ LISTEN_PORT = int(os.environ.get("MIDDLEWARE_PORT", "8002"))
 
 # Params that vLLM accepts but SGLang rejects.
 # Extend this set as more incompatibilities are discovered.
-STRIP_PARAMS = {"logprobs", "top_logprobs", "chat_template_kwargs"}
+STRIP_PARAMS = {"logprobs", "top_logprobs", "chat_template_kwargs", "guided_json", "guided_regex"}
 
 client: httpx.AsyncClient | None = None
 _sglang_ready = False
