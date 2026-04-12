@@ -1,104 +1,115 @@
-# vLLM → SGLang Shim
+# vllm-to-sglang
 
 Drop-in replacement that makes a vLLM production stack (e.g. the [k8s operator](https://github.com/vllm-project/production-stack)) actually run [SGLang](https://github.com/sgl-project/sglang) instead.
 
-## Why?
+## How it works
 
-The vLLM production stack handles model lifecycle, scaling, and routing — but some models work better (or only work) on SGLang. Rather than rewriting your deployment infra, this shim intercepts every vLLM invocation and launches SGLang with equivalent arguments.
-
-## How It Works
-
-### Invocation interception
-
-Two interception paths catch however the vLLM stack tries to start the server:
-
-| What the stack calls | What happens |
-|---|---|
-| `vllm serve <model> [flags]` | Shell shim (`vllm-shim.sh`) replaces the `vllm` binary |
-| `python -m vllm.entrypoints.openai.api_server` | Python shim (shadow module on `PYTHONPATH`) intercepts the import |
-
-Both extract `--host` and `--port` from whatever the stack sends.
-
-### haproxy proxy layer
-
-Rather than launching SGLang directly on the vLLM port, the shim runs **haproxy** on the original port and **SGLang on port+1**. This solves two critical problems:
-
-1. **`/metrics` stub** — The vLLM stack expects a Prometheus metrics endpoint at `/metrics`. SGLang doesn't serve one. haproxy intercepts `/metrics` and returns an empty 200 response instantly.
-
-2. **`/health` probe timing** — SGLang's `/health` endpoint takes ~1.001s to respond, which races the 1s k8s probe timeout and causes repeated `Startup probe failed: context deadline exceeded`. haproxy health-checks SGLang in the background (every 5s, with a 3s timeout) and responds to `/health` probes **instantly** — 200 if the backend is up, 503 if it's not. No more timeout roulette.
-
-### middleware layer
-
-A Python middleware (FastAPI) sits between haproxy and SGLang on **port+2**. It strips vLLM-only request parameters that SGLang rejects with 422 errors:
-
-- **`logprobs`** / **`top_logprobs`** — vLLM accepts these on chat completion requests; SGLang's Mistral tool-call parser rejects them. OpenClaw and other vLLM clients send them by default.
-
-The middleware only touches `POST /v1/chat/completions` request bodies and passes everything else through unchanged. To strip additional params, add them to the `STRIP_PARAMS` set in `vllm_middleware.py`.
+The k8s vLLM production stack calls `vllm serve <model> [flags]`. This project intercepts that call and instead launches SGLang behind haproxy + a middleware layer.
 
 ```
-┌─────────────────────────────────────────────┐
-│  k8s probes / vLLM stack                    │
-│         │                                   │
-│         ▼                                   │
-│  haproxy (port 8000)                        │
-│    /metrics ──► 200 empty (stub)            │
-│    /health  ──► 200/503 instant (backend    │
-│                 health-checked in bg)        │
-│    /*       ──► proxy to middleware          │
-│                       │                     │
-│                       ▼                     │
-│  middleware (port 8002)                      │
-│    strips logprobs/top_logprobs             │
-│    forwards to SGLang                       │
-│                       │                     │
-│                       ▼                     │
-│              SGLang (port 8001)             │
-└─────────────────────────────────────────────┘
+k8s vLLM stack
+  │
+  │  vllm serve mistralai/Devstral-2-123B-Instruct-2512 \
+  │    --host 0.0.0.0 --port 8000 --tensor-parallel-size 8 ...
+  │
+  ▼
+┌─────────────────────────────────────────────────────────┐
+│  vllm-shim.sh (replaces the `vllm` binary)             │
+│  or vllm_shim_module.py (shadows python -m vllm.*)     │
+│                                                         │
+│  Parses vLLM args, translates to SGLang equivalents,   │
+│  then launches three processes:                         │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ haproxy :8000 (front door)                       │  │
+│  │   /metrics → 200 empty (stub)                    │  │
+│  │   /health  → 200/503 based on backend state      │  │
+│  │   /*       → proxy to middleware :8002            │  │
+│  └──────────────────────────────────────────────────┘  │
+│                        │                                │
+│                        ▼                                │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ middleware :8002 (FastAPI)                        │  │
+│  │   Strips vLLM-only params from request bodies    │  │
+│  │   Recursively fixes tool JSON schemas            │  │
+│  │   Forwards to SGLang :8001                       │  │
+│  └──────────────────────────────────────────────────┘  │
+│                        │                                │
+│                        ▼                                │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ SGLang :8001 (internal)                          │  │
+│  │   The actual inference server                    │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-haproxy 2.4 compat: uses `errorfile` + `http-request deny deny_status` for stub responses (the `http-request return` payload syntax requires haproxy 2.8+).
+## Argument translation
 
-## Current State
+The shim dynamically translates vLLM CLI args to SGLang equivalents — no hardcoded model names or tensor-parallel sizes.
 
-**Running in production — `mistralai/Devstral-2-123B-Instruct-2512` on 8× MI300X.**
+| vLLM flag | SGLang equivalent | Notes |
+|-----------|-------------------|-------|
+| `serve` | *(skipped)* | Subcommand only |
+| `<model>` (positional) | `--model-path <model>` | |
+| `--host` | Used for all three processes | |
+| `--port` | haproxy binds this port | SGLang gets +1, middleware +2 |
+| `--tensor-parallel-size` | `--tp` | |
+| `--gpu_memory_utilization` | `--mem-fraction-static` | |
+| `--trust-remote-code` | `--trust-remote-code` | |
+| `--no-enable-prefix-caching` | *(skipped)* | No SGLang equivalent |
+| `--enable-chunked-prefill` | *(skipped)* | No SGLang equivalent |
+| `--tool-call-parser` | `--tool-call-parser` | Defaults to `mistral` |
 
-- Model path, `--tp 8`, and `--tool-call-parser mistral` are baked into both shims
-- The Dockerfile builds on `lmsysorg/sglang-rocm` and patches a broken `aiter` build from the base image
-- MI300X tuning env vars are set (`HIP_FORCE_DEV_KERNARG`, `NCCL_MIN_NCHANNELS`, etc.)
-- All received args are logged to `/tmp/vllm-shim.log` (configurable via `VLLM_SHIM_LOG` env var)
+Unknown flags are passed through as-is — they may be valid SGLang args.
 
-## Building
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SGLANG_TOOL_CALL_PARSER` | `mistral` | Override the tool-call-parser |
+| `VLLM_SHIM_LOG` | `/tmp/vllm-shim.log` | Log file path |
+
+## Middleware: request body fixes
+
+SGLang rejects certain parameters and schemas that vLLM (and OpenClaw) send. The middleware fixes these automatically:
+
+### Stripped parameters
+
+These vLLM-only parameters are removed from request bodies before forwarding to SGLang:
+
+- `logprobs` / `top_logprobs` — SGLang's Mistral tool-call parser rejects these
+- `chat_template_kwargs` — OpenClaw sends this for reasoning models; SGLang doesn't support it
+- `guided_json` / `guided_regex` — vLLM-only guided decoding params
+
+### Schema fixes
+
+OpenClaw (and some vLLM configurations) send tool schemas with `properties: []` instead of `properties: {}`. SGLang requires `properties` to be an object at **every level** of the schema, including nested `items` and sub-objects.
+
+The middleware recursively walks the entire JSON Schema tree and fixes:
+- `properties: []` → `properties: {}` (at any depth)
+- `required: <non-list>` → removed
+- `parameters: <non-object>` → `{"type": "object", "properties": {}}`
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Builds on `lmsysorg/sglang-rocm`, installs haproxy, copies shim files |
+| `Jenkinsfile` | CI/CD: builds and pushes to Vultr container registry |
+| `vllm-shim.sh` | Shell shim — replaces the `vllm` binary, translates args |
+| `vllm_shim_module.py` | Python shim — shadows `vllm.*` module imports, translates args |
+| `vllm_middleware.py` | FastAPI middleware — strips bad params, fixes tool schemas |
+| `README.md` | This file |
+
+## Deploy
 
 ```bash
 docker build -t vllm-to-sglang .
 ```
 
-Or use the Jenkins pipeline:
+Or via Jenkins:
 
 ```bash
 curl -X POST "https://jenkins.sweetapi.com/job/vllm-to-sglang/buildWithParameters" \
-  -u "${JENKINS_USER}:${JENKINS_PASS}" \
-  -d "BRANCH=metrics" \
-  -d "TAG=nightly3"
+  -d TAG=nightly
 ```
-
-Then use this image anywhere the vLLM stack expects its server image.
-
-## Making It Work For Other Models
-
-Right now the model config is hardcoded in three places:
-
-- `vllm-shim.sh` — the `python -m sglang.launch_server` line
-- `vllm_shim_module.py` — the `subprocess.Popen()` call
-- `Dockerfile` — base image and ROCm-specific patches
-
-To adapt for a different model, change `--model-path`, `--tp`, and `--tool-call-parser` in both shim files. A future pass will make this configurable via env vars or args so you don't have to edit source.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `Dockerfile` | Builds the image: ROCm SGLang base + haproxy + shims + MI300X env |
-| `vllm-shim.sh` | Shell shim — replaces the `vllm` binary, launches SGLang + middleware + haproxy |
-| `vllm_shim_module.py` | Python shim — shadows `vllm.*` module imports, launches SGLang + middleware + haproxy |
-| `vllm_middleware.py` | FastAPI middleware — strips vLLM-only params (logprobs) before forwarding to SGLang |

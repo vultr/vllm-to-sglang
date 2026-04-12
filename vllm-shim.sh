@@ -1,20 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # ============================================================
-# vLLM -> SGLang shim
+# vLLM -> SGLang shim (shell version)
 # This script replaces the vllm binary. The k8s production stack
 # calls `vllm serve <model> [flags]`, and we intercept everything.
+#
+# Dynamically translates vLLM args to SGLang equivalents.
+# No hardcoded model or tensor-parallel size.
 #
 # Architecture:
 #   haproxy on the vLLM port (front door)
 #     /metrics → 200 empty (stub)
-#     /health  → 200 if SGLang backend is up, 503 if not (instant)
-#     /*       → proxy to SGLang on port+1
+#     /health  → 200 if SGLang backend is up, 503 if not
+#     /*       → proxy to middleware on port+2
+#   middleware on port+2 (strips vLLM-only params, fixes schemas)
 #   SGLang on port+1 (internal)
-#
-# haproxy 2.4 compat: uses errorfile for stub responses instead
-# of http-request return (which needs 2.8+ for payload syntax).
 # ============================================================
 
 echo ""
@@ -46,39 +47,107 @@ LOG_PATH="${VLLM_SHIM_LOG:-/tmp/vllm-shim.log}"
   echo ""
 } >> "$LOG_PATH"
 
-# Defaults
+# ── Parse vLLM args → extract model, host, port, translate the rest ──
+
+MODEL=""
 HOST="0.0.0.0"
 PORT="8000"
+SGLANG_ARGS=()
+SKIPPED_ARGS=()
 
-# Parse host and port from whatever the stack sends
+# Default tool-call-parser; override with SGLANG_TOOL_CALL_PARSER env var
+TOOL_CALL_PARSER="${SGLANG_TOOL_CALL_PARSER:-mistral}"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    serve)        shift ;;  # skip the 'serve' subcommand
+    # Skip 'serve' subcommand
+    serve)        shift ;;
+
+    # ── Extracted for infrastructure (not passed to SGLang) ──
     --host)       HOST="$2"; shift 2 ;;
     --host=*)     HOST="${1#*=}"; shift ;;
     --port)       PORT="$2"; shift 2 ;;
     --port=*)     PORT="${1#*=}"; shift ;;
-    *)            shift ;;  # ignore everything else
+
+    # ── Positional model name ──
+    --model|--model-name)
+      MODEL="$2"; shift 2 ;;
+    --model=*|--model-name=*)
+      MODEL="${1#*=}"; shift ;;
+
+    # ── Direct renames (vLLM → SGLang) ──
+    --tensor-parallel-size)
+      SGLANG_ARGS+=("--tp" "$2"); shift 2 ;;
+    --tensor-parallel-size=*)
+      SGLANG_ARGS+=("--tp" "${1#*=}"); shift ;;
+    --gpu_memory_utilization)
+      SGLANG_ARGS+=("--mem-fraction-static" "$2"); shift 2 ;;
+    --gpu_memory_utilization=*)
+      SGLANG_ARGS+=("--mem-fraction-static" "${1#*=}"); shift ;;
+    --trust_remote_code|--trust-remote-code)
+      SGLANG_ARGS+=("--trust-remote-code"); shift ;;
+
+    # ── vLLM flags with no SGLang equivalent → skip ──
+    --no-enable-prefix-caching|--enable-prefix-caching)
+      SKIPPED_ARGS+=("$1"); shift ;;
+    --enable-chunked-prefill|--no-enable-chunked-prefill)
+      SKIPPED_ARGS+=("$1"); shift ;;
+    --disable-log-requests|--disable-log-stats)
+      SKIPPED_ARGS+=("$1"); shift ;;
+    --swap-space|--block-size|--max-num-seqs|--max-num-batched-tokens)
+      SKIPPED_ARGS+=("$1" "$2"); shift 2 ;;
+    --swap-space=*|--block-size=*|--max-num-seqs=*|--max-num-batched-tokens=*)
+      SKIPPED_ARGS+=("$1"); shift ;;
+    --distributed-executor-backend|--pipeline-parallel-size|--data-parallel-size)
+      SKIPPED_ARGS+=("$1" "$2"); shift 2 ;;
+    --quantization|--dtype|--revision|--tokenizer-revision|--tokenizer-mode)
+      SKIPPED_ARGS+=("$1" "$2"); shift 2 ;;
+    --quantization=*|--dtype=*|--revision=*|--tokenizer-revision=*|--tokenizer-mode=*)
+      SKIPPED_ARGS+=("$1"); shift ;;
+
+    # ── Pass through to SGLang as-is ──
+    --tool-call-parser)
+      TOOL_CALL_PARSER="$2"; shift 2 ;;
+    --tool-call-parser=*)
+      TOOL_CALL_PARSER="${1#*=}"; shift ;;
+    *)
+      # Positional arg = model name (first non-flag)
+      if [[ ! "$1" =~ ^- ]] && [[ -z "$MODEL" ]]; then
+        MODEL="$1"; shift
+      else
+        # Unknown — pass through, might be valid for SGLang
+        SGLANG_ARGS+=("$1"); shift
+      fi ;;
   esac
 done
 
-# SGLang runs one port higher; haproxy binds the original port
-# Middleware runs two ports higher (strips vLLM-only params)
+if [[ -z "$MODEL" ]]; then
+  echo "ERROR: No model specified in vLLM args!"
+  exit 1
+fi
+
+# ── Port scheme: haproxy=original, SGLang=+1, middleware=+2 ──
 SGLANG_PORT=$((PORT + 1))
 MIDDLEWARE_PORT=$((PORT + 2))
 
-echo "Launching SGLang on ${HOST}:${SGLANG_PORT} (internal)"
-echo "Launching middleware on ${HOST}:${MIDDLEWARE_PORT} (strips logprobs)"
-echo "Launching haproxy on ${HOST}:${PORT} (front door, /metrics + /health stub)"
+echo "Model: ${MODEL}"
+echo "SGLang:  ${HOST}:${SGLANG_PORT}"
+echo "Middleware: ${HOST}:${MIDDLEWARE_PORT}"
+echo "haproxy: ${HOST}:${PORT}"
+if [[ ${#SGLANG_ARGS[@]} -gt 0 ]]; then
+  echo "Translated args: ${SGLANG_ARGS[*]}"
+fi
+if [[ ${#SKIPPED_ARGS[@]} -gt 0 ]]; then
+  echo "Skipped (no SGLang equivalent): ${SKIPPED_ARGS[*]}"
+fi
 echo ""
 
-# Prepare error files for haproxy stub responses
-# haproxy errorfile format: HTTP/1.x status_code reason\r\nheaders\r\n\r\nbody
+# ── haproxy setup ───────────────────────────────────────────
+
 mkdir -p /tmp/haproxy-errors
 printf "HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" > /tmp/haproxy-errors/200-empty.http
 printf "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 16\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready" > /tmp/haproxy-errors/503-sglang.http
 
-# Write haproxy config (compatible with haproxy 2.4)
 HAPROXY_CFG="/tmp/haproxy-shim.cfg"
 cat > "$HAPROXY_CFG" <<EOF
 global
@@ -93,14 +162,10 @@ defaults
 frontend proxy
   bind ${HOST}:${PORT}
 
-  # /metrics stub — instant 200 empty (vLLM stack expects this)
   acl is_metrics path /metrics
   http-request deny deny_status 200 if is_metrics
   errorfile 200 /tmp/haproxy-errors/200-empty.http
 
-  # /health — instant response based on SGLang backend state
-  # haproxy health-checks SGLang in the background; this avoids
-  # the 1s k8s probe timeout racing SGLang's ~1.001s /health response
   acl is_health path /health
   acl sglang_up nbsrv(sglang) gt 0
   http-request deny deny_status 200 if is_health sglang_up
@@ -115,35 +180,49 @@ backend sglang
   server s1 127.0.0.1:${MIDDLEWARE_PORT} check inter 5s fall 3 rise 2
 EOF
 
-echo "haproxy config written to ${HAPROXY_CFG}" >> "$LOG_PATH"
+# ── Build and launch SGLang ─────────────────────────────────
 
-# Start SGLang in the background
-python -m sglang.launch_server \
-  --model-path mistralai/Devstral-2-123B-Instruct-2512 \
-  --host "$HOST" \
-  --port "$SGLANG_PORT" \
-  --tp 8 \
-  --tool-call-parser mistral &
+SGLANG_CMD=(
+  python -m sglang.launch_server
+  --model-path "$MODEL"
+  --host "$HOST"
+  --port "$SGLANG_PORT"
+)
+if [[ -n "$TOOL_CALL_PARSER" ]]; then
+  SGLANG_CMD+=(--tool-call-parser "$TOOL_CALL_PARSER")
+fi
+SGLANG_CMD+=("${SGLANG_ARGS[@]}")
 
+echo "SGLang command: ${SGLANG_CMD[*]}"
+echo ""
+
+{
+  echo "haproxy config written to ${HAPROXY_CFG}"
+  echo "Model: ${MODEL}, SGLang port: ${SGLANG_PORT}, middleware port: ${MIDDLEWARE_PORT}, haproxy port: ${PORT}"
+  echo "SGLang command: ${SGLANG_CMD[*]}"
+  if [[ ${#SKIPPED_ARGS[@]} -gt 0 ]]; then
+    echo "Skipped vLLM args: ${SKIPPED_ARGS[*]}"
+  fi
+} >> "$LOG_PATH"
+
+# Launch SGLang
+"${SGLANG_CMD[@]}" &
 SGLANG_PID=$!
 
-# Start the middleware (strips vLLM-only params like logprobs)
-SGLANG_PORT=$SGLANG_PORT MIDDLEWARE_PORT=$MIDDLEWARE_PORT \
+# Launch middleware
+SGLANG_HOST="$HOST" SGLANG_PORT="$SGLANG_PORT" MIDDLEWARE_PORT="$MIDDLEWARE_PORT" \
   python /opt/vllm-shim/vllm_middleware.py &
-
 MIDDLEWARE_PID=$!
 
-# Give SGLang a moment to start before haproxy starts routing
 sleep 2
 
-# Start haproxy in the foreground (this is now PID 1 for the container)
+# Launch haproxy (front door on the original port)
 haproxy -f "$HAPROXY_CFG" &
-
 HAPROXY_PID=$!
 
 echo "SGLang PID: ${SGLANG_PID}, middleware PID: ${MIDDLEWARE_PID}, haproxy PID: ${HAPROXY_PID}" >> "$LOG_PATH"
 
-# Wait for whichever dies first — if either goes, we go
+# Wait for whichever dies first
 wait -n "$SGLANG_PID" "$MIDDLEWARE_PID" "$HAPROXY_PID"
 EXIT_CODE=$?
 echo "A process exited (code ${EXIT_CODE}), shutting down" >> "$LOG_PATH"
