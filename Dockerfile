@@ -1,20 +1,6 @@
 FROM lmsysorg/sglang-rocm:v0.5.10rc0-rocm700-mi30x-20260411
 
 # ---------------------------------------------------------------
-# Nuke the broken aiter and rebuild from source
-# The baked-in version is missing dynamic_per_tensor_quant etc.
-# ---------------------------------------------------------------
-RUN pip uninstall -y aiter && \
-    pip install psutil pybind11 flydsl==0.0.1.dev95158637 && \
-    git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter && \
-    cd /tmp/aiter && \
-    git checkout v0.1.11.post1 && \
-    git submodule sync && \
-    git submodule update --init --recursive && \
-    PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py install && \
-    cd / && rm -rf /tmp/aiter
-
-# ---------------------------------------------------------------
 # Replace the vllm binary with our shim
 # ---------------------------------------------------------------
 COPY vllm-shim.sh /usr/local/bin/vllm
@@ -31,7 +17,13 @@ RUN touch /opt/vllm-shim/vllm/__init__.py \
           /opt/vllm-shim/vllm/entrypoints/openai/__init__.py \
           /opt/vllm-shim/vllm/entrypoints/cli/__init__.py
 
-ENV PYTHONPATH="/opt/vllm-shim:${PYTHONPATH}"
+# ---------------------------------------------------------------
+# PYTHONPATH: two fixes in one
+#   1. /sgl-workspace/aiter — use the source-built aiter instead
+#      of the broken pip version in site-packages
+#   2. /opt/vllm-shim — shadow vllm for python -m invocations
+# ---------------------------------------------------------------
+ENV PYTHONPATH="/sgl-workspace/aiter:/opt/vllm-shim:${PYTHONPATH}"
 
 # ---------------------------------------------------------------
 # MI300X tuning
