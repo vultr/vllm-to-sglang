@@ -69,7 +69,7 @@ ARG_MAP = {
 }
 
 # Default tool-call-parser; override with SGLANG_TOOL_CALL_PARSER env var
-DEFAULT_TOOL_CALL_PARSER = "mistral"
+DEFAULT_TOOL_CALL_PARSER = "qwen3_coder"
 
 
 def parse_vllm_args(args):
