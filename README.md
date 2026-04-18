@@ -22,7 +22,6 @@ k8s vLLM stack
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐  │
 │  │ haproxy :8000 (front door)                       │  │
-│  │   /metrics → 200 empty (stub)                    │  │
 │  │   /health  → 200/503 based on backend state      │  │
 │  │   /*       → proxy to middleware :8002            │  │
 │  └──────────────────────────────────────────────────┘  │
@@ -30,6 +29,8 @@ k8s vLLM stack
 │                        ▼                                │
 │  ┌──────────────────────────────────────────────────┐  │
 │  │ middleware :8002 (FastAPI)                        │  │
+│  │   /metrics → fetches SGLang metrics, translates   │  │
+│  │              to vLLM-compatible names             │  │
 │  │   Strips vLLM-only params from request bodies    │  │
 │  │   Recursively fixes tool JSON schemas            │  │
 │  │   Forwards to SGLang :8001                       │  │
@@ -37,8 +38,7 @@ k8s vLLM stack
 │                        │                                │
 │                        ▼                                │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │ SGLang :8001 (internal)                          │  │
-│  │   The actual inference server                    │  │
+│  │ SGLang :8001 (inference + /metrics)              │  │
 │  └──────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -69,6 +69,32 @@ Unknown flags are passed through as-is — they may be valid SGLang args.
 | `SGLANG_TOOL_CALL_PARSER` | `mistral` | Override the tool-call-parser |
 | `VLLM_SHIM_LOG` | `/tmp/vllm-shim.log` | Log file path |
 
+## Metrics translation
+
+The middleware exposes a `/metrics` endpoint that fetches SGLang's native Prometheus metrics and translates them to vLLM-compatible names. This allows existing Grafana dashboards and Prometheus alerts built for vLLM to work without modification.
+
+### Metric mapping
+
+| vLLM metric | SGLang source | Type | Notes |
+|-------------|---------------|------|-------|
+| `vllm:healthy_pods_total` | Synthesized | Gauge | 1 when SGLang is ready, 0 otherwise |
+| `vllm:num_requests_running` | `sglang:num_running_reqs` | Gauge | |
+| `vllm:num_requests_waiting` | `sglang:num_queue_reqs` | Gauge | |
+| `vllm:kv_cache_usage_perc` | `sglang:num_used_tokens / max_total_num_tokens * 100` | Gauge | Derived from two SGLang gauges |
+| `vllm:gpu_prefix_cache_hit_rate` | `sglang:cache_hit_rate` | Gauge | Value is 0.0-1.0 |
+| `vllm:e2e_request_latency_seconds` | `sglang:e2e_request_latency_seconds` | Histogram | |
+| `vllm:request_time_per_output_token_seconds` | `sglang:inter_token_latency_seconds` | Histogram | |
+| `vllm:time_to_first_token_seconds` | `sglang:time_to_first_token_seconds` | Histogram | |
+| `vllm:prompt_tokens_total` | `sglang:prompt_tokens_total` | Counter | |
+| `vllm:generation_tokens_total` | `sglang:generation_tokens_total` | Counter | |
+| `vllm:num_requests_swapped` | N/A | Gauge | Always 0 (SGLang has no swap) |
+| `vllm:request_success_total` | `sglang:num_requests_total` | Counter | |
+| `vllm:prompt_tokens_cached_total` | `sglang:cached_tokens_total` | Counter | |
+
+Unmapped SGLang metrics (e.g. `sglang:spec_accept_rate`, `sglang:gen_throughput`) are passed through with their original `sglang:` prefix.
+
+The metrics endpoint has a 1-second cache to avoid hammering the SGLang metrics server on concurrent scrapes.
+
 ## Middleware: request body fixes
 
 SGLang rejects certain parameters and schemas that vLLM (and OpenClaw) send. The middleware fixes these automatically:
@@ -98,7 +124,7 @@ The middleware recursively walks the entire JSON Schema tree and fixes:
 | `Jenkinsfile` | CI/CD: builds and pushes to Vultr container registry |
 | `vllm-shim.sh` | Shell shim — replaces the `vllm` binary, translates args |
 | `vllm_shim_module.py` | Python shim — shadows `vllm.*` module imports, translates args |
-| `vllm_middleware.py` | FastAPI middleware — strips bad params, fixes tool schemas |
+| `vllm_middleware.py` | FastAPI middleware — strips bad params, fixes tool schemas, translates metrics |
 | `README.md` | This file |
 
 ## Deploy

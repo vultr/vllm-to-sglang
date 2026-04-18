@@ -145,7 +145,6 @@ echo ""
 # ── haproxy setup ───────────────────────────────────────────
 
 mkdir -p /tmp/haproxy-errors
-printf "HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" > /tmp/haproxy-errors/200-empty.http
 printf "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 16\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready" > /tmp/haproxy-errors/503-sglang.http
 
 HAPROXY_CFG="/tmp/haproxy-shim.cfg"
@@ -161,10 +160,6 @@ defaults
 
 frontend proxy
   bind ${HOST}:${PORT}
-
-  acl is_metrics path /metrics
-  http-request deny deny_status 200 if is_metrics
-  errorfile 200 /tmp/haproxy-errors/200-empty.http
 
   acl is_health path /health
   acl sglang_up nbsrv(sglang) gt 0
@@ -187,6 +182,7 @@ SGLANG_CMD=(
   --model-path "$MODEL"
   --host "$HOST"
   --port "$SGLANG_PORT"
+  --enable-metrics
 )
 if [[ -n "$TOOL_CALL_PARSER" ]]; then
   SGLANG_CMD+=(--tool-call-parser "$TOOL_CALL_PARSER")

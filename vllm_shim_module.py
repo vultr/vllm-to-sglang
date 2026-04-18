@@ -9,12 +9,12 @@ No hardcoded model name or tensor-parallel size.
 
 Architecture:
   haproxy on the vLLM port (front door)
-    /metrics → 200 empty (stub)
     /health  → 200 if SGLang backend is up, 503 if not (instant)
-    /*       → proxy to middleware on port+2
-  middleware on port+2 (strips vLLM-only params, fixes tool schemas)
-  SGLang on port+1 (internal)
+    /*       → proxy to middleware on port+2 (including /metrics)
+  middleware on port+2 (strips vLLM-only params, fixes tool schemas, translates metrics)
+  SGLang on port+1 (internal, also serves /metrics when --enable-metrics is passed)
 """
+
 import os
 import sys
 import subprocess
@@ -27,45 +27,47 @@ import datetime
 # has_value=False means it's a boolean flag (e.g. --no-enable-prefix-caching)
 ARG_MAP = {
     # Direct renames (vLLM name → SGLang name)
-    "--tensor-parallel-size":    ("--tp",                  True),
-    "--gpu_memory_utilization":  ("--mem-fraction-static", True),
-    "--max_model_len":           ("--max-running-requests", True),  # approximate
-    "--max-model-len":           ("--max-running-requests", True),  # kebab variant
-    "--enforce_eager":           ("--enable-torch-compile", False),  # opposite intent, skip by default
-    "--trust_remote_code":       ("--trust-remote-code",   False),
-    "--trust-remote-code":       ("--trust-remote-code",   False),
-
+    "--tensor-parallel-size": ("--tp", True),
+    "--gpu_memory_utilization": ("--mem-fraction-static", True),
+    "--max_model_len": ("--max-running-requests", True),  # approximate
+    "--max-model-len": ("--max-running-requests", True),  # kebab variant
+    "--enforce_eager": (
+        "--enable-torch-compile",
+        False,
+    ),  # opposite intent, skip by default
+    "--trust_remote_code": ("--trust-remote-code", False),
+    "--trust-remote-code": ("--trust-remote-code", False),
     # vLLM flags with no SGLang equivalent → skip
     "--no-enable-prefix-caching": (None, False),
-    "--enable-prefix-caching":    (None, False),
-    "--enable-chunked-prefill":   (None, False),
-    "--no-enable-chunked-prefill":(None, False),
-    "--disable-log-requests":     (None, False),
-    "--disable-log-stats":        (None, False),
-    "--swap-space":               (None, True),
-    "--block-size":               (None, True),
-    "--num-gpu-blocks-override":  (None, True),
-    "--num-cpu-blocks-override":  (None, True),
-    "--max-num-seqs":             (None, True),
-    "--max-num-batched-tokens":   (None, True),
+    "--enable-prefix-caching": (None, False),
+    "--enable-chunked-prefill": (None, False),
+    "--no-enable-chunked-prefill": (None, False),
+    "--disable-log-requests": (None, False),
+    "--disable-log-stats": (None, False),
+    "--swap-space": (None, True),
+    "--block-size": (None, True),
+    "--num-gpu-blocks-override": (None, True),
+    "--num-cpu-blocks-override": (None, True),
+    "--max-num-seqs": (None, True),
+    "--max-num-batched-tokens": (None, True),
     "--distributed-executor-backend": (None, True),
-    "--pipeline-parallel-size":   (None, True),
-    "--data-parallel-size":       (None, True),
-    "--revision":                 (None, True),
-    "--code-revision":            (None, True),
-    "--tokenizer-revision":       (None, True),
-    "--tokenizer-mode":           (None, True),
-    "--quantization":             (None, True),
-    "--dtype":                    (None, True),
-    "--max-seq-len-to-capture":   (None, True),
-    "--enable-lora":              (None, False),
-    "--max-lora-rank":            (None, True),
-    "--max-cpu-loras":            (None, True),
-    "--lora-dtype":               (None, True),
-    "--enable-prompt-adapter":    (None, False),
-    "--scheduler-delay-factor":   (None, True),
-    "--enable-multi-modal":       (None, False),
-    "--limit-mm-per-prompt":      (None, True),
+    "--pipeline-parallel-size": (None, True),
+    "--data-parallel-size": (None, True),
+    "--revision": (None, True),
+    "--code-revision": (None, True),
+    "--tokenizer-revision": (None, True),
+    "--tokenizer-mode": (None, True),
+    "--quantization": (None, True),
+    "--dtype": (None, True),
+    "--max-seq-len-to-capture": (None, True),
+    "--enable-lora": (None, False),
+    "--max-lora-rank": (None, True),
+    "--max-cpu-loras": (None, True),
+    "--lora-dtype": (None, True),
+    "--enable-prompt-adapter": (None, False),
+    "--scheduler-delay-factor": (None, True),
+    "--enable-multi-modal": (None, False),
+    "--limit-mm-per-prompt": (None, True),
 }
 
 # Default tool-call-parser; override with SGLANG_TOOL_CALL_PARSER env var
@@ -82,7 +84,7 @@ def parse_vllm_args(args):
     host = "0.0.0.0"
     port = "8000"
     sglang_extra = []  # translated args for SGLang
-    skipped = []       # vLLM args we're ignoring
+    skipped = []  # vLLM args we're ignoring
 
     i = 0
     while i < len(args):
@@ -163,7 +165,11 @@ def parse_vllm_args(args):
             continue
 
         # Unknown flag — pass through if it takes a value, might be valid for SGLang
-        if arg.startswith("--") and i + 1 < len(args) and not args[i + 1].startswith("-"):
+        if (
+            arg.startswith("--")
+            and i + 1 < len(args)
+            and not args[i + 1].startswith("-")
+        ):
             sglang_extra.extend([arg, args[i + 1]])
             i += 2
         elif arg.startswith("--"):
@@ -183,7 +189,9 @@ def main():
 
     log_path = os.environ.get("VLLM_SHIM_LOG", "/tmp/vllm-shim.log")
     with open(log_path, "a") as f:
-        f.write(f"\n{datetime.datetime.now().isoformat()} vLLM -> SGLang Shim (Python module)\n")
+        f.write(
+            f"\n{datetime.datetime.now().isoformat()} vLLM -> SGLang Shim (Python module)\n"
+        )
         f.write(f"  Invoked as: python -m {__name__} {' '.join(args)}\n")
         f.write("  All arguments received:\n")
         for i, arg in enumerate(args, 1):
@@ -214,10 +222,16 @@ def main():
 
     # Build SGLang command
     sglang_cmd = [
-        sys.executable, "-m", "sglang.launch_server",
-        "--model-path", model,
-        "--host", host,
-        "--port", sglang_port,
+        sys.executable,
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        model,
+        "--host",
+        host,
+        "--port",
+        sglang_port,
+        "--enable-metrics",
     ]
 
     # Add tool-call-parser (env override or default)
@@ -243,10 +257,10 @@ def main():
     # ── haproxy setup ────────────────────────────────────────
 
     os.makedirs("/tmp/haproxy-errors", exist_ok=True)
-    with open("/tmp/haproxy-errors/200-empty.http", "w") as f:
-        f.write("HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
     with open("/tmp/haproxy-errors/503-sglang.http", "w") as f:
-        f.write("HTTP/1.0 503 Service Unavailable\r\nContent-Length: 16\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready")
+        f.write(
+            "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 16\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nSGLang not ready"
+        )
 
     haproxy_cfg = "/tmp/haproxy-shim.cfg"
     with open(haproxy_cfg, "w") as f:
@@ -262,12 +276,6 @@ defaults
 frontend proxy
   bind {host}:{port}
 
-  # /metrics stub — instant 200 empty (vLLM stack expects this)
-  acl is_metrics path /metrics
-  http-request deny deny_status 200 if is_metrics
-  errorfile 200 /tmp/haproxy-errors/200-empty.http
-
-  # /health — instant response based on SGLang backend state
   acl is_health path /health
   acl sglang_up nbsrv(sglang) gt 0
   http-request deny deny_status 200 if is_health sglang_up
@@ -284,7 +292,9 @@ backend sglang
 
     with open(log_path, "a") as f:
         f.write(f"haproxy config written to {haproxy_cfg}\n")
-        f.write(f"Model: {model}, SGLang port: {sglang_port}, middleware port: {middleware_port}, haproxy port: {port}\n")
+        f.write(
+            f"Model: {model}, SGLang port: {sglang_port}, middleware port: {middleware_port}, haproxy port: {port}\n"
+        )
         f.write(f"SGLang command: {' '.join(sglang_cmd)}\n")
         if skipped:
             f.write(f"Skipped vLLM args: {' '.join(skipped)}\n")
@@ -307,7 +317,9 @@ backend sglang
     haproxy_proc = subprocess.Popen(["haproxy", "-f", haproxy_cfg])
 
     with open(log_path, "a") as f:
-        f.write(f"SGLang PID: {sglang_proc.pid}, middleware PID: {middleware_proc.pid}, haproxy PID: {haproxy_proc.pid}\n")
+        f.write(
+            f"SGLang PID: {sglang_proc.pid}, middleware PID: {middleware_proc.pid}, haproxy PID: {haproxy_proc.pid}\n"
+        )
 
     # Wait for whichever dies first
     while True:
@@ -330,6 +342,7 @@ backend sglang
             middleware_proc.terminate()
             os._exit(haproxy_ret)
         time.sleep(1)
+
 
 if __name__ == "__main__":
     main()

@@ -16,6 +16,8 @@ This middleware only touches the proxied request bodies.
 
 import json
 import os
+import re
+import time
 import asyncio
 import httpx
 from datetime import datetime
@@ -26,6 +28,24 @@ import uvicorn
 SGLANG_HOST = os.environ.get("SGLANG_HOST", "127.0.0.1")
 SGLANG_PORT = int(os.environ.get("SGLANG_PORT", "8001"))
 LISTEN_PORT = int(os.environ.get("MIDDLEWARE_PORT", "8002"))
+METRICS_CACHE_SECONDS = 1.0
+
+SGLANG_TO_VLLM = {
+    "sglang:num_running_reqs": "vllm:num_requests_running",
+    "sglang:num_queue_reqs": "vllm:num_requests_waiting",
+    "sglang:cache_hit_rate": "vllm:gpu_prefix_cache_hit_rate",
+    "sglang:e2e_request_latency_seconds": "vllm:e2e_request_latency_seconds",
+    "sglang:inter_token_latency_seconds": "vllm:request_time_per_output_token_seconds",
+    "sglang:time_to_first_token_seconds": "vllm:time_to_first_token_seconds",
+    "sglang:prompt_tokens_total": "vllm:prompt_tokens_total",
+    "sglang:generation_tokens_total": "vllm:generation_tokens_total",
+    "sglang:num_requests_total": "vllm:request_success_total",
+    "sglang:num_aborted_requests_total": "vllm:request_success_total",
+    "sglang:cached_tokens_total": "vllm:prompt_tokens_cached_total",
+}
+
+_RE_METRIC_LINE = re.compile(r"^(#\s+(?:HELP|TYPE)\s+)?(\w[\w:]*)(.*)")
+_RE_SAMPLE_LINE = re.compile(r"^(\w[\w:]*)(\{[^}]*\})?\s+(.+)$")
 
 # Params that vLLM accepts but SGLang rejects.
 # Extend this set as more incompatibilities are discovered.
@@ -162,6 +182,104 @@ def _dump_error(request_body: bytes, status_code: int, resp_headers: dict, resp_
     except Exception as e:
         print(f"_dump_error failed: {e}")
 
+
+_metrics_cache: tuple[float, str] | None = None
+
+
+def _translate_metrics_line(line: str) -> list[str]:
+    m = _RE_SAMPLE_LINE.match(line)
+    if m:
+        name, labels_str, value = m.group(1), m.group(2) or "", m.group(3)
+        vllm_name = SGLANG_TO_VLLM.get(name)
+        if vllm_name:
+            return [f"{vllm_name}{labels_str} {value}"]
+        return [line]
+
+    m = _RE_METRIC_LINE.match(line)
+    if m:
+        prefix, name, rest = m.group(1) or "", m.group(2), m.group(3)
+        vllm_name = SGLANG_TO_VLLM.get(name)
+        if vllm_name:
+            return [f"{prefix}{vllm_name}{rest}"]
+        return [line]
+
+    return [line]
+
+
+def _build_vllm_metrics(raw: str) -> str:
+    gauges: dict[str, dict[str, float]] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _RE_SAMPLE_LINE.match(line)
+        if not m:
+            continue
+        name, labels_str, value_str = m.group(1), m.group(2) or "", m.group(3)
+        if name in ("sglang:num_used_tokens", "sglang:max_total_num_tokens"):
+            try:
+                val = float(value_str.split()[0])
+            except (ValueError, IndexError):
+                continue
+            gauges.setdefault(name, {})[labels_str] = val
+
+    output_lines: list[str] = []
+    for line in raw.splitlines():
+        translated = _translate_metrics_line(line)
+        output_lines.extend(translated)
+
+    used = gauges.get("sglang:num_used_tokens", {})
+    capacity = gauges.get("sglang:max_total_num_tokens", {})
+    if used and capacity:
+        output_lines.append("# HELP vllm:kv_cache_usage_perc KV cache usage percentage")
+        output_lines.append("# TYPE vllm:kv_cache_usage_perc gauge")
+        all_labels = set(used.keys()) | set(capacity.keys())
+        for lbl in sorted(all_labels):
+            u = used.get(lbl, 0.0)
+            c = capacity.get(lbl, 0.0)
+            pct = (u / c * 100.0) if c > 0 else 0.0
+            output_lines.append(f"vllm:kv_cache_usage_perc{lbl} {pct:.4f}")
+
+    output_lines.append("# HELP vllm:healthy_pods_total Number of healthy vLLM pods")
+    output_lines.append("# TYPE vllm:healthy_pods_total gauge")
+    if _sglang_ready:
+        output_lines.append('vllm:healthy_pods_total{endpoint="default"} 1')
+    else:
+        output_lines.append('vllm:healthy_pods_total{endpoint="default"} 0')
+
+    output_lines.append("# HELP vllm:num_requests_swapped Number of swapped requests")
+    output_lines.append("# TYPE vllm:num_requests_swapped gauge")
+    output_lines.append("vllm:num_requests_swapped 0")
+
+    return "\n".join(output_lines) + "\n"
+
+
+@app.get("/metrics")
+async def metrics():
+    global _metrics_cache
+    if _metrics_cache and (time.monotonic() - _metrics_cache[0]) < METRICS_CACHE_SECONDS:
+        return Response(content=_metrics_cache[1], media_type="text/plain; version=0.0.4; charset=utf-8")
+
+    if not _sglang_ready:
+        return Response(content="SGLang not ready", status_code=503)
+
+    try:
+        resp = await client.get(
+            f"http://{SGLANG_HOST}:{SGLANG_PORT}/metrics",
+            timeout=httpx.Timeout(10.0, connect=5.0),
+        )
+        if resp.status_code != 200:
+            return Response(content=resp.content, status_code=resp.status_code,
+                            media_type=resp.headers.get("content-type"))
+        translated = _build_vllm_metrics(resp.text)
+        _metrics_cache = (time.monotonic(), translated)
+        return Response(content=translated, media_type="text/plain; version=0.0.4; charset=utf-8")
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return Response(
+            content=f"SGLang metrics backend unavailable: {e}",
+            status_code=503,
+            media_type="text/plain",
+        )
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy(path: str, request: Request):
