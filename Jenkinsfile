@@ -9,7 +9,7 @@ pipeline {
     environment {
         REGISTRY_URL = 'atl.vultrcr.com/vllm/vllm-to-sglang'
         CRED_ID = 'ATL_VCR_VLLM'
-        REPO_URL = 'https://sweetapi.com/biondizzle/vllm-to-sglang.git'
+        REPO_URL = 'https://github.com/vultr/vllm-to-sglang.git'
     }
 
     stages {
