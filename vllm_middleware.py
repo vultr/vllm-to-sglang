@@ -193,6 +193,11 @@ def _translate_metrics_line(line: str) -> list[str]:
         vllm_name = SGLANG_TO_VLLM.get(name)
         if vllm_name:
             return [f"{vllm_name}{labels_str} {value}"]
+        for suffix in ("_bucket", "_sum", "_count"):
+            if name.endswith(suffix):
+                vllm_base = SGLANG_TO_VLLM.get(name[: -len(suffix)])
+                if vllm_base:
+                    return [f"{vllm_base}{suffix}{labels_str} {value}"]
         return [line]
 
     m = _RE_METRIC_LINE.match(line)
