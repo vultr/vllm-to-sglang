@@ -1,4 +1,4 @@
-FROM lmsysorg/sglang-rocm:v0.5.10.post1-rocm720-mi30x-20260423
+FROM lmsysorg/sglang-rocm:v0.5.10.post1-rocm700-mi30x-20260427
 
 # ---------------------------------------------------------------
 # haproxy: proxies everything to middleware (including /metrics)
@@ -51,3 +51,6 @@ ENV PYTHONPATH="/sgl-workspace/aiter:/opt/vllm-shim:${PYTHONPATH}"
 RUN pip install --no-cache-dir apache-tvm-ffi && \
     pip install --no-cache-dir --force-reinstall --no-deps \
     'xgrammar @ git+https://github.com/mlc-ai/xgrammar.git@main'
+
+# --- Upgrade transformers to latest for newest model support ---
+RUN pip install --no-cache-dir --upgrade transformers
