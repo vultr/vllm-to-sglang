@@ -53,4 +53,4 @@ RUN pip install --no-cache-dir apache-tvm-ffi && \
     'xgrammar @ git+https://github.com/mlc-ai/xgrammar.git@main'
 
 # --- Upgrade transformers to latest for newest model support ---
-#RUN pip install --no-cache-dir --upgrade transformers
+RUN pip install --no-cache-dir --upgrade transformers
