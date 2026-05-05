@@ -1,4 +1,4 @@
-FROM lmsysorg/sglang-rocm:v0.5.10.post1-rocm700-mi30x-20260427
+FROM lmsysorg/sglang-rocm:v0.5.10.post1-rocm720-mi30x-20260505
 
 # ---------------------------------------------------------------
 # haproxy: proxies everything to middleware (including /metrics)
@@ -43,7 +43,6 @@ ENV SGLANG_USE_AITER=1
 ENV PYTORCH_ROCM_ARCH=gfx942
 ENV AITER_ROCM_ARCH=gfx942
 ENV GPU_ARCHS=gfx942
-#ENV VLLM_ROCM_USE_AITER=1
 
 # --- Upgrade xgrammar to bleeding edge for tool-call constrained decoding ---
 # Kimi K2 drops optional tool-call params with older xgrammar; upgrading fixes
