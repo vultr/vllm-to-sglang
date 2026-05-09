@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 
+from vllm_shim.backend._shared import translate_with_arg_map
 from vllm_shim.backend.base.args import ArgTranslator
 
 # vLLM flag => (sglang_flag_or_None, has_value)
@@ -53,61 +54,4 @@ class SGLangArgTranslator(ArgTranslator):
     """Pure function over argv: rename, drop, or pass through each token per ARG_MAP."""
 
     def translate(self, vllm_args: Sequence[str]) -> tuple[list[str], list[str]]:
-        out: list[str] = []
-        dropped: list[str] = []
-        i = 0
-        args = list(vllm_args)
-        while i < len(args):
-            arg = args[i]
-
-            # --flag=value form
-            if arg.startswith("--") and "=" in arg:
-                flag, val = arg.split("=", 1)
-                mapping = ARG_MAP.get(flag)
-                if mapping is None:
-                    out.append(arg)
-                else:
-                    sglang_flag, has_val = mapping
-                    if sglang_flag is None:
-                        dropped.append(arg)
-                    elif has_val:
-                        out.extend([sglang_flag, val])
-                    else:
-                        out.append(sglang_flag)
-                i += 1
-                continue
-
-            # --flag (with possible separate value)
-            mapping = ARG_MAP.get(arg)
-            if mapping is None:
-                # Pass through. If next token looks like a value, take it too.
-                if (
-                    i + 1 < len(args)
-                    and not args[i + 1].startswith("-")
-                    and arg.startswith("--")
-                ):
-                    out.extend([arg, args[i + 1]])
-                    i += 2
-                else:
-                    out.append(arg)
-                    i += 1
-                continue
-
-            sglang_flag, has_val = mapping
-            if sglang_flag is None:
-                dropped.append(arg)
-                if has_val and i + 1 < len(args):
-                    dropped.append(args[i + 1])
-                    i += 2
-                else:
-                    i += 1
-            elif has_val:
-                if i + 1 < len(args):
-                    out.extend([sglang_flag, args[i + 1]])
-                    i += 2
-                else:
-                    i += 1
-            else:
-                out.append(sglang_flag)
-                i += 1
-        return out, dropped
+        return translate_with_arg_map(vllm_args, ARG_MAP)

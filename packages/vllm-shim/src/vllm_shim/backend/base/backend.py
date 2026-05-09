@@ -15,6 +15,7 @@ class Backend(ABC):
 
     name: ClassVar[str]
     health_path: ClassVar[str] = "/health"
+    metrics_path: ClassVar[str] = "/metrics"
 
     args: ArgTranslator
     metrics: MetricsTranslator

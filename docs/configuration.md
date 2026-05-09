@@ -17,7 +17,7 @@ There are two reasons something is an env var rather than a flag:
 | Read by | `vllm_shim.backend.registry.select` (called from supervisor and middleware) |
 | Effect | Selects which `Backend` subclass to instantiate. |
 
-Currently the only valid value is `sglang`; anything else raises `ValueError("Unknown backend: ...")`. Reserved for future backends. See `docs/backends.md`.
+Valid values are `sglang` and `trtllm`; anything else raises `ValueError("Unknown backend: ...")`. See `docs/backends.md`.
 
 ### `SGLANG_TOOL_CALL_PARSER`
 
@@ -58,6 +58,32 @@ Set automatically by the supervisor (computed as `--port + 1`). Same role as `SG
 | Effect | The port the middleware listens on. |
 
 Set automatically by the supervisor (computed as `--port + 2`). The middleware binds `0.0.0.0:{MIDDLEWARE_PORT}`; haproxy connects via `127.0.0.1:{MIDDLEWARE_PORT}`.
+
+### TRT-LLM env vars
+
+### `TRTLLM_BACKEND`
+
+| | |
+|---|---|
+| Default | `pytorch` |
+| Read by | `vllm_shim.backend.trtllm.launcher.TRTLLMLauncher.build_command` |
+| Effect | Sets `--backend` on `trtllm-serve`. Override to `tensorrt` when running pre-compiled engines, or `_autodeploy` for the autodeploy backend. |
+
+### `TRTLLM_TOOL_PARSER`
+
+| | |
+|---|---|
+| Default | `qwen3_coder` |
+| Read by | `vllm_shim.backend.trtllm.launcher.TRTLLMLauncher.build_command` |
+| Effect | Sets `--tool_parser`. The default matches `SGLANG_TOOL_CALL_PARSER` for cross-backend consistency on Qwen3 deployments. |
+
+### `TRTLLM_REASONING_PARSER`
+
+| | |
+|---|---|
+| Default | unset |
+| Read by | `vllm_shim.backend.trtllm.launcher.TRTLLMLauncher.build_command` |
+| Effect | If set, appends `--reasoning_parser <value>` to the launcher argv. TRT-LLM-only feature; SGLang has no equivalent. |
 
 ### `VLLM_SHIM_LOG`
 

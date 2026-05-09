@@ -1,8 +1,8 @@
 # vllm-shim
 
-Drop-in replacement for the vLLM serving container that runs [SGLang](https://github.com/sgl-project/sglang) underneath.
+Drop-in replacement for the vLLM serving container that runs [SGLang](https://github.com/sgl-project/sglang) or [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) underneath.
 
-The intended deployment target is the [vLLM Production Stack](https://github.com/vllm-project/production-stack) (the official k8s operator) and similar setups built around vLLM's CLI, `/health`, `/metrics`, and OpenAI-compatible API contract. Production Stack expects to launch `vllm serve <model> [flags]` and probe a vLLM-shaped pod; the shim satisfies that contract while delegating actual inference to SGLang. Existing manifests, dashboards, and alerts continue to work unchanged.
+The intended deployment target is the [vLLM Production Stack](https://github.com/vllm-project/production-stack) (the official k8s operator) and similar setups built around vLLM's CLI, `/health`, `/metrics`, and OpenAI-compatible API contract. Production Stack expects to launch `vllm serve <model> [flags]` and probe a vLLM-shaped pod; the shim satisfies that contract while delegating actual inference to SGLang or TensorRT-LLM. Existing manifests, dashboards, and alerts continue to work unchanged.
 
 ## What it does
 
@@ -49,6 +49,9 @@ docker build -f docker/sglang/Dockerfile.cuda -t vllm-shim:sglang-cuda .
 
 # ROCm + SGLang
 docker build -f docker/sglang/Dockerfile.rocm -t vllm-shim:sglang-rocm .
+
+# CUDA + TensorRT-LLM
+docker build -f docker/trtllm/Dockerfile.cuda -t vllm-shim:trtllm-cuda .
 ```
 
 Run it the way Production Stack would:
@@ -81,7 +84,7 @@ Topic docs under `docs/`:
 
 | Path | Purpose |
 |------|---------|
-| `packages/vllm-shim/` | The implementation (`vllm_shim`): CLI, supervisor, middleware, backend abstraction, SGLang backend. |
+| `packages/vllm-shim/` | The implementation (`vllm_shim`): CLI, supervisor, middleware, backend abstraction, SGLang and TRT-LLM backends. |
 | `packages/vllm-entrypoints/` | Stub `vllm/` namespace so `python -m vllm.X` invocations route through the shim. |
 | `docker/<backend>/Dockerfile.<platform>` | Per-backend, per-platform image build (e.g. `docker/sglang/Dockerfile.rocm`). |
 | `docs/` | Topic documentation. |

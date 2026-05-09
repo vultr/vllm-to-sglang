@@ -78,3 +78,31 @@ The handler always returns `Content-Type: text/plain; version=0.0.4; charset=utf
 ## Health vs. metrics
 
 `/health` and `/metrics` are independent code paths. A failing `/health` does not affect `/metrics` and vice versa. `MetricsHandler` falls back to a 503 only when SGLang's `/metrics` itself is unreachable, not based on health state. This keeps Prometheus scrapes informative even during transient backend issues.
+
+## TRT-LLM metrics translator
+
+TRT-LLM exposes Prometheus exposition at `/prometheus/metrics`, not `/metrics`. The `Backend.metrics_path` ClassVar carries this difference: SGLang inherits the default `/metrics`; `TRTLLMBackend` overrides to `/prometheus/metrics`. The `MetricsHandler` reads `backend.metrics_path` when constructing the upstream scrape URL.
+
+Translation is text-rename, parallel to SGLang's. The canonical `TRTLLM_TO_VLLM` map lives in `vllm_shim.backend.trtllm.metrics`.
+
+| TRT-LLM name | vLLM name |
+|---|---|
+| `trtllm_request_success_total` | `vllm:request_success_total` |
+| `trtllm_e2e_request_latency_seconds` | `vllm:e2e_request_latency_seconds` |
+| `trtllm_time_to_first_token_seconds` | `vllm:time_to_first_token_seconds` |
+| `trtllm_request_queue_time_seconds` | `vllm:request_queue_time_seconds` |
+| `trtllm_kv_cache_hit_rate` | `vllm:gpu_prefix_cache_hit_rate` |
+
+Histogram suffix handling (`_bucket`, `_sum`, `_count`) is reused from the SGLang trick: strip suffix, look up base, reattach.
+
+Pass-through (no clean vLLM equivalent today): `trtllm_kv_cache_reused_blocks_total`, `trtllm_kv_cache_missed_blocks_total`, `trtllm_kv_cache_utilization`. They keep their `trtllm_` prefix.
+
+Synthesized series at the end of the output, mirroring SGLang:
+
+| vLLM series | Source | Logic |
+|---|---|---|
+| `vllm:kv_cache_usage_perc` | Derived | `trtllm_kv_cache_utilization` (a 0-to-1 ratio) multiplied by 100. Skipped if the source series is absent. |
+| `vllm:healthy_pods_total` | Synthesized | Always `1` with `endpoint="default"`. |
+| `vllm:num_requests_swapped` | Synthesized | Always `0`. TRT-LLM has no swap. |
+
+JSON `/metrics` (the per-iteration inflight-batching stats) is unused. Surfacing those would require a second HTTP fetch per scrape and a `metrics_aux_path` ABC extension, deferred to a follow-up if operators report missing series.

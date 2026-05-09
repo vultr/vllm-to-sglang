@@ -1,8 +1,8 @@
 # Backends
 
-A "backend" in this codebase is everything that's specific to a particular inference engine: how its CLI is shaped, how its metrics are named, how its API quirks differ from vLLM's. Today the only backend is SGLang, but the abstraction exists so adding (say) a TensorRT-LLM or LMDeploy backend is a contained change.
+A "backend" in this codebase is everything that's specific to a particular inference engine: how its CLI is shaped, how its metrics are named, how its API quirks differ from vLLM's. Today the implemented backends are SGLang and TensorRT-LLM, with the abstraction structured to admit further engines (e.g., LMDeploy) as contained changes.
 
-The contract is in `packages/vllm-shim/src/vllm_shim/backend/base/`. The dispatch is in `vllm_shim.backend.registry`. The only concrete implementation is `vllm_shim.backend.sglang`.
+The contract is in `packages/vllm-shim/src/vllm_shim/backend/base/`. The dispatch is in `vllm_shim.backend.registry`. Concrete implementations are `vllm_shim.backend.sglang` and `vllm_shim.backend.trtllm`.
 
 ## The `Backend` ABC
 
@@ -10,6 +10,7 @@ The contract is in `packages/vllm-shim/src/vllm_shim/backend/base/`. The dispatc
 class Backend(ABC):
     name: ClassVar[str]
     health_path: ClassVar[str] = "/health"
+    metrics_path: ClassVar[str] = "/metrics"
 
     args: ArgTranslator
     metrics: MetricsTranslator
@@ -35,6 +36,8 @@ All four are intentionally stateless or self-contained. The supervisor and middl
 
 `health_path` is a class-level constant for the upstream `/health` URL. SGLang exposes `/health`; another backend might use `/v1/health` or `/healthz` and would override this. haproxy's `httpchk` and the middleware's `HealthHandler` both read it.
 
+`metrics_path` works the same way for the upstream `/metrics` URL: SGLang inherits the `/metrics` default; TRT-LLM overrides to `/prometheus/metrics`. The middleware's `MetricsHandler` reads this when scraping.
+
 `name` is a class-level identifier (`"sglang"`) used as the registry key.
 
 ## The registry
@@ -43,6 +46,7 @@ All four are intentionally stateless or self-contained. The supervisor and middl
 # packages/vllm-shim/src/vllm_shim/backend/registry.py
 _BACKENDS: dict[str, type[Backend]] = {
     "sglang": SGLangBackend,
+    "trtllm": TRTLLMBackend,
 }
 
 def select() -> Backend:

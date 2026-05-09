@@ -15,6 +15,10 @@ def test_health_path_default() -> None:
     assert SGLangBackend.health_path == "/health"
 
 
+def test_metrics_path_default() -> None:
+    assert SGLangBackend.metrics_path == "/metrics"
+
+
 def test_components_match_protocols() -> None:
     b = SGLangBackend()
     assert isinstance(b.args, ArgTranslator)

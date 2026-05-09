@@ -149,3 +149,38 @@ async def test_streaming_response_passes_through(app, httpx_mock, path):  # type
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
     assert b"[DONE]" in r.content
+
+
+class FakeBackendCustomMetrics(Backend):
+    """Variant of FakeBackend with metrics_path overridden, mirroring TRTLLMBackend."""
+
+    name: ClassVar[str] = "fake-trtllm"
+    metrics_path: ClassVar[str] = "/prometheus/metrics"
+
+    def __init__(self) -> None:
+        self.args = _NoopArgs()
+        self.metrics = _PassMetrics()
+        self.launcher = _NoopLauncher()
+        self.filters = ()
+
+
+@pytest.fixture
+def app_custom_metrics(backend_address: ServiceAddress):  # type: ignore[no-untyped-def]
+    return create_app(FakeBackendCustomMetrics(), backend_address)
+
+
+@pytest.mark.asyncio
+async def test_metrics_uses_backend_metrics_path(  # type: ignore[no-untyped-def]
+    app_custom_metrics, httpx_mock,
+) -> None:
+    httpx_mock.add_response(
+        method="GET",
+        url="http://backend.test:9001/prometheus/metrics",
+        text="raw_metric 1\n",
+        status_code=200,
+    )
+    transport = httpx.ASGITransport(app=app_custom_metrics)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/metrics")
+    assert r.status_code == 200
+    assert "vllm:fake 1" in r.text

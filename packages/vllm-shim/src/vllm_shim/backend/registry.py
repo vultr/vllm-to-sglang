@@ -4,9 +4,11 @@ import os
 
 from vllm_shim.backend.base.backend import Backend
 from vllm_shim.backend.sglang.backend import SGLangBackend
+from vllm_shim.backend.trtllm.backend import TRTLLMBackend
 
 _BACKENDS: dict[str, type[Backend]] = {
     "sglang": SGLangBackend,
+    "trtllm": TRTLLMBackend,
 }
 
 

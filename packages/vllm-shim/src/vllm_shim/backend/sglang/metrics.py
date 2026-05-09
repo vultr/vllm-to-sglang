@@ -3,6 +3,7 @@ synthesizes vLLM-only series."""
 
 import re
 
+from vllm_shim.backend._shared import translate_prom_line, vllm_synthesized_tail
 from vllm_shim.backend.base.metrics import MetricsTranslator
 
 SGLANG_TO_VLLM: dict[str, str] = {
@@ -19,8 +20,7 @@ SGLANG_TO_VLLM: dict[str, str] = {
     "sglang:cached_tokens_total": "vllm:prompt_tokens_cached_total",
 }
 
-_RE_METRIC_LINE = re.compile(r"^(#\s+(?:HELP|TYPE)\s+)?(\w[\w:]*)(.*)")
-_RE_SAMPLE_LINE = re.compile(r"^(\w[\w:]*)(\{[^}]*\})?\s+(.+)$")
+_RE_FIRST_PASS = re.compile(r"^(\w[\w:]*)(\{[^}]*\})?\s+(.+)$")
 
 
 class SGLangMetricsTranslator(MetricsTranslator):
@@ -34,7 +34,7 @@ class SGLangMetricsTranslator(MetricsTranslator):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            m = _RE_SAMPLE_LINE.match(line)
+            m = _RE_FIRST_PASS.match(line)
             if not m:
                 continue
             name, labels, value_str = m.group(1), m.group(2) or "", m.group(3)
@@ -50,7 +50,7 @@ class SGLangMetricsTranslator(MetricsTranslator):
 
         output: list[str] = []
         for line in prom_text.splitlines():
-            output.extend(self._translate_line(line))
+            output.extend(translate_prom_line(line, SGLANG_TO_VLLM))
 
         if used and capacity:
             output.append("# HELP vllm:kv_cache_usage_perc KV cache usage percentage")
@@ -61,35 +61,6 @@ class SGLangMetricsTranslator(MetricsTranslator):
                 pct = (u / c * 100.0) if c > 0 else 0.0
                 output.append(f"vllm:kv_cache_usage_perc{lbl} {pct:.4f}")
 
-        output.append("# HELP vllm:healthy_pods_total Number of healthy vLLM pods")
-        output.append("# TYPE vllm:healthy_pods_total gauge")
-        output.append('vllm:healthy_pods_total{endpoint="default"} 1')
-
-        output.append("# HELP vllm:num_requests_swapped Number of swapped requests")
-        output.append("# TYPE vllm:num_requests_swapped gauge")
-        output.append("vllm:num_requests_swapped 0")
+        output.extend(vllm_synthesized_tail())
 
         return "\n".join(output) + "\n"
-
-    @staticmethod
-    def _translate_line(line: str) -> list[str]:
-        m = _RE_SAMPLE_LINE.match(line)
-        if m:
-            name, labels, value = m.group(1), m.group(2) or "", m.group(3)
-            vllm_name = SGLANG_TO_VLLM.get(name)
-            if vllm_name:
-                return [f"{vllm_name}{labels} {value}"]
-            for suffix in ("_bucket", "_sum", "_count"):
-                if name.endswith(suffix):
-                    base = SGLANG_TO_VLLM.get(name[: -len(suffix)])
-                    if base:
-                        return [f"{base}{suffix}{labels} {value}"]
-            return [line]
-
-        m = _RE_METRIC_LINE.match(line)
-        if m:
-            prefix, name, rest = m.group(1) or "", m.group(2), m.group(3)
-            vllm_name = SGLANG_TO_VLLM.get(name)
-            if vllm_name:
-                return [f"{prefix}{vllm_name}{rest}"]
-        return [line]

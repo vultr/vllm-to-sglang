@@ -27,7 +27,7 @@ class MetricsHandler:
             return Response(content=self._cache[1], media_type=PROM_MEDIA_TYPE)
         try:
             resp = await get_client().get(
-                self._address.url() + "/metrics",
+                self._address.url() + self._backend.metrics_path,
                 timeout=httpx.Timeout(10.0, connect=5.0),
             )
         except (httpx.ConnectError, httpx.TimeoutException) as e:

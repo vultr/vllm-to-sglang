@@ -108,3 +108,13 @@ Add a unit test in `packages/vllm-shim/tests/unit/backend/sglang/test_args.py` c
 - `serve` may appear anywhere, not just as the first token (the parser skips it wherever it is).
 - A bare positional after `--model …` is *not* re-captured as a model; the first one wins.
 - `--port` with an `=`-form coexists with `--port` followed by a separate value; both are accepted.
+
+## TRT-LLM ARG_MAP
+
+The TRT-LLM backend uses a parallel `ARG_MAP` in `vllm_shim.backend.trtllm.args`. Same shape, different contents: TRT-LLM's CLI uses underscores (`--tp_size`, `--max_seq_len`, `--kv_cache_free_gpu_memory_fraction`) where vLLM uses dashes. Both dash and underscore variants of vLLM flags appear as explicit map keys (no normalization layer), matching the SGLang convention.
+
+The canonical, current list lives in `vllm_shim.backend.trtllm.args.ARG_MAP`.
+
+One semantic mismatch worth flagging: `--gpu-memory-utilization` maps to `--kv_cache_free_gpu_memory_fraction`, but the two values mean different things. vLLM's value is the fraction of total GPU memory the engine is allowed to use; TRT-LLM's is the fraction of free GPU memory reserved for KV cache after weights and activations are allocated. The numeric value is forwarded unchanged. Same pragmatic compromise SGLang carries.
+
+YAML config injection is intentionally out of scope. Five vLLM flags (`--seed`, `--enable-prefix-caching`, `--no-enable-prefix-caching`, `--enforce-eager`, `--max-cpu-loras`) have clean YAML equivalents in TRT-LLM's `--config <yaml>` extra-llm-api-options surface. Honoring them via the shim would require an ABC change or breaking the translator's pure-function property; operators who need them pass `--config their.yaml` directly through the shim's pass-through.
