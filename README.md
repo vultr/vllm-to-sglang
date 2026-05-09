@@ -144,8 +144,7 @@ The middleware recursively walks the entire JSON Schema tree and fixes:
 |------|---------|
 | `packages/vllm-shim/` | Main package (`vllm_shim`): CLI, supervisor, middleware, backend abstraction, SGLang implementation |
 | `packages/vllm-entrypoints/` | Stub package that ships a top-level `vllm/` so `python -m vllm.X` invocations dispatch to the shim |
-| `Dockerfile` | ROCm image, installs both wheels via uv |
-| `Dockerfile.cuda` | CUDA image, installs both wheels via uv |
+| `docker/<backend>/Dockerfile.<platform>` | Per-backend, per-platform image build (e.g. `docker/sglang/Dockerfile.rocm`) |
 | `Jenkinsfile` | CI/CD: builds and pushes to Vultr container registry |
 
 ## Development
@@ -161,13 +160,21 @@ The `vllm` console script replaces the previous bash binary. `python -m vllm.ent
 
 ## Deploy
 
+Each `(backend, platform)` pair is its own Dockerfile under `docker/`. Build from the repo root so the build context sees `pyproject.toml`, `uv.lock`, and `packages/`:
+
 ```bash
-docker build -t vllm-to-sglang .
+# ROCm + SGLang
+docker build -f docker/sglang/Dockerfile.rocm -t vllm-to-sglang:sglang-rocm .
+
+# CUDA + SGLang
+docker build -f docker/sglang/Dockerfile.cuda -t vllm-to-sglang:sglang-cuda .
 ```
 
-Or via Jenkins:
+Or via Jenkins (default `BACKEND=sglang`, `PLATFORM=rocm`; final image tag is `${TAG}-${BACKEND}-${PLATFORM}`):
 
 ```bash
 curl -X POST "https://jenkins.sweetapi.com/job/vllm-to-sglang/buildWithParameters" \
-  -d TAG=nightly
+  -d TAG=nightly \
+  -d BACKEND=sglang \
+  -d PLATFORM=rocm
 ```

@@ -1,0 +1,15 @@
+ARG BASE_IMAGE=lmsysorg/sglang:v0.5.11-cu130-runtime
+
+FROM ${BASE_IMAGE}
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.11 /uv /uvx /bin/
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends haproxy && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock /src/
+COPY packages /src/packages
+RUN uv pip install --system --no-cache \
+        /src/packages/vllm-shim \
+        /src/packages/vllm-entrypoints
