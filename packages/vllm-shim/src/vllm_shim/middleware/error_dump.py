@@ -1,3 +1,5 @@
+"""Structured error log dump used when SGLang returns 4xx/5xx."""
+
 import json
 from datetime import datetime
 from pathlib import Path

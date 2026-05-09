@@ -1,3 +1,5 @@
+"""End-to-end FastAPI app tests using a FakeBackend and pytest-httpx."""
+
 import json
 from typing import ClassVar
 

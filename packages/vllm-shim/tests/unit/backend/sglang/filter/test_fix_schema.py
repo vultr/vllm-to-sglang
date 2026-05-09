@@ -1,3 +1,5 @@
+"""Tests for the FixToolSchemas request filter."""
+
 import json
 
 from vllm_shim.backend.sglang.filter.fix_schema import FixToolSchemas

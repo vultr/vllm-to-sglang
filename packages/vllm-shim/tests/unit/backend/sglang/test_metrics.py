@@ -1,3 +1,5 @@
+"""Tests for the SGLang Prometheus exposition translator."""
+
 from vllm_shim.backend.sglang.metrics import SGLangMetricsTranslator
 
 

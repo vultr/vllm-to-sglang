@@ -1,3 +1,5 @@
+"""CLI entry point: parses vLLM args, spawns haproxy + middleware + backend, runs the supervisor."""
+
 import os
 import subprocess
 import sys
@@ -15,6 +17,7 @@ HAPROXY_CONFIG_PATH = Path("/tmp/haproxy-shim.cfg")
 
 
 def main() -> int:
+    """Spawn the three child processes and block in the supervisor until one exits."""
     parsed = ArgParser().parse(sys.argv[1:])
     backend = registry.select()
 
@@ -27,6 +30,8 @@ def main() -> int:
     backend_cmd = backend.launcher.build_command(parsed.model, backend_addr, backend_args)
     backend_proc = subprocess.Popen(backend_cmd)
 
+    # Middleware reads its config from env, not argv, so it can be launched independently
+    # (e.g. via the vllm-shim-middleware console script in tests).
     middleware_env = os.environ.copy()
     middleware_env["SGLANG_HOST"] = backend_addr.host
     middleware_env["SGLANG_PORT"] = str(backend_addr.port)
@@ -40,6 +45,7 @@ def main() -> int:
     HAProxyConfig(listen=listen_addr, upstream=middleware_addr).write_to(HAPROXY_CONFIG_PATH)
     haproxy_proc = launch_haproxy(HAPROXY_CONFIG_PATH)
 
+    # Order matters for shutdown drain quality (haproxy first, backend last); see Supervisor.
     return Supervisor(
         [
             ManagedProcess("haproxy", haproxy_proc),

@@ -1,3 +1,5 @@
+"""Tests for SGLangLauncher.build_command and the SGLANG_TOOL_CALL_PARSER override."""
+
 import sys
 
 from vllm_shim.backend.sglang.launcher import SGLangLauncher

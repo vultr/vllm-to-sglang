@@ -1,3 +1,5 @@
+"""GET /health handler: forwards to the backend's health endpoint with a short timeout."""
+
 import httpx
 from fastapi import Response
 
@@ -7,6 +9,8 @@ from vllm_shim.values.service_address import ServiceAddress
 
 
 class HealthHandler:
+    """Proxies /health to the backend; turns connection failures into a 503."""
+
     def __init__(self, backend: Backend, address: ServiceAddress) -> None:
         self._backend = backend
         self._address = address

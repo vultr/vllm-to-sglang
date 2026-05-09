@@ -1,3 +1,5 @@
+"""ArgTranslator ABC: rewrite vLLM CLI flags into a backend's CLI."""
+
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 

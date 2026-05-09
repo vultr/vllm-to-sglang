@@ -1,3 +1,5 @@
+"""Tests for the ParsedArgs value object."""
+
 from vllm_shim.values.parsed_args import ParsedArgs
 
 

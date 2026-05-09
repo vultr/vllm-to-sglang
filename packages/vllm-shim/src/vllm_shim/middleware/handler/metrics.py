@@ -1,3 +1,5 @@
+"""GET /metrics handler: fetches, translates, caches; serves Prometheus exposition."""
+
 import time
 
 import httpx
@@ -12,6 +14,9 @@ PROM_MEDIA_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 
 class MetricsHandler:
+    """Scrapes the backend's /metrics, translates with the backend's MetricsTranslator,
+    and caches the result for CACHE_SECONDS to absorb concurrent scrapes."""
+
     def __init__(self, backend: Backend, address: ServiceAddress) -> None:
         self._backend = backend
         self._address = address

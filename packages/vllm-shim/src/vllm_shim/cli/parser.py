@@ -1,3 +1,5 @@
+"""vLLM CLI parser: extracts model/host/port; everything else passes through."""
+
 from collections.abc import Sequence
 
 from vllm_shim.values.parsed_args import ParsedArgs
@@ -9,6 +11,7 @@ class ArgParser:
     ArgTranslator to handle."""
 
     def parse(self, argv: Sequence[str]) -> ParsedArgs:
+        """Walk argv once. Raises ValueError if no model is found."""
         model: str | None = None
         host = "0.0.0.0"
         port = 8000

@@ -1,3 +1,5 @@
+"""Backend ABC: the four-component contract every concrete backend implements."""
+
 from abc import ABC, abstractmethod
 from typing import ClassVar
 

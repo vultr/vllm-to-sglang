@@ -1,3 +1,5 @@
+"""Multi-process supervisor: live together, die together."""
+
 import signal
 import subprocess
 import threading
@@ -8,6 +10,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ManagedProcess:
+    """A named, already-spawned subprocess managed by the Supervisor."""
+
     name: str
     proc: subprocess.Popen[bytes]
 
@@ -29,6 +33,7 @@ class Supervisor:
         self._shutdown = threading.Event()
 
     def run(self) -> int:
+        """Block until a child exits or shutdown is signalled. Returns first exit code seen."""
         self._install_signal_handlers()
 
         rc = 0
@@ -46,6 +51,7 @@ class Supervisor:
         return rc
 
     def shutdown(self) -> None:
+        """Cooperative shutdown trigger: behaves like a SIGTERM to the supervisor."""
         self._shutdown.set()
 
     def _install_signal_handlers(self) -> None:
@@ -68,7 +74,7 @@ class Supervisor:
         # haproxy exits in milliseconds, and waiting on it first lets in-flight
         # requests drain through the middleware before the backend dies. Do
         # not split this into "terminate one, wait one" or restructure the
-        # loops — the simultaneous SIGTERM is what bounds total shutdown time
+        # loops; the simultaneous SIGTERM is what bounds total shutdown time
         # to grace_seconds.
         for mp in self._procs:
             if mp.proc.poll() is None:

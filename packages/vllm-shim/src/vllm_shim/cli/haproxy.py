@@ -1,3 +1,5 @@
+"""haproxy frontend: config templating, static error file, launch helper."""
+
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,10 +45,13 @@ backend sglang
 
 @dataclass(frozen=True, slots=True)
 class HAProxyConfig:
+    """haproxy config inputs: the public listen address and the upstream middleware address."""
+
     listen: ServiceAddress
     upstream: ServiceAddress
 
     def render(self) -> str:
+        """Render the templated haproxy config to a string."""
         return _TEMPLATE.format(
             listen_host=self.listen.host,
             listen_port=self.listen.port,
@@ -56,6 +61,7 @@ class HAProxyConfig:
         )
 
     def write_to(self, path: Path) -> None:
+        """Render and write the config to disk."""
         path.write_text(self.render())
 
 
@@ -67,4 +73,5 @@ def write_error_file() -> None:
 
 
 def launch(config_path: Path) -> subprocess.Popen[bytes]:
+    """Spawn haproxy with the given config file; caller is responsible for the process."""
     return subprocess.Popen(["haproxy", "-f", str(config_path)])

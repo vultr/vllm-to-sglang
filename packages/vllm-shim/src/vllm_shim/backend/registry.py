@@ -1,3 +1,5 @@
+"""Backend registry: maps env-var names to Backend classes."""
+
 import os
 
 from vllm_shim.backend.base.backend import Backend

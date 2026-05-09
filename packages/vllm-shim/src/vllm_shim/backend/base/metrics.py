@@ -1,3 +1,5 @@
+"""MetricsTranslator ABC: rewrite a backend's Prometheus exposition into vLLM-named series."""
+
 from abc import ABC, abstractmethod
 
 

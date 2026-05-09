@@ -1,3 +1,5 @@
+"""Supervisor integration tests using real short-lived subprocesses."""
+
 import subprocess
 import sys
 import time

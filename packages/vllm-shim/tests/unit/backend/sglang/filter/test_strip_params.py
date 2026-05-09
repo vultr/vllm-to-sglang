@@ -1,3 +1,5 @@
+"""Tests for the StripVLLMParams request filter."""
+
 import json
 
 from vllm_shim.backend.sglang.filter.strip_params import StripVLLMParams

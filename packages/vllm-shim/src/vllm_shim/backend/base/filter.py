@@ -1,3 +1,5 @@
+"""RequestFilter ABC: mutate request bodies before they reach the backend."""
+
 from abc import ABC, abstractmethod
 
 

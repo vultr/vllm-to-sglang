@@ -1,3 +1,6 @@
+"""Smoke tests: confirm both workspace packages import cleanly."""
+
+
 def test_vllm_shim_importable() -> None:
     import vllm_shim  # noqa: F401
 

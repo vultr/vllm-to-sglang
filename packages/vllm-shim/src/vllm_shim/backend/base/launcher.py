@@ -1,3 +1,5 @@
+"""Launcher ABC: build the subprocess argv that spawns a backend."""
+
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 

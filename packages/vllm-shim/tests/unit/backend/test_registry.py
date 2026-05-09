@@ -1,3 +1,5 @@
+"""Tests for the env-driven backend registry."""
+
 import pytest
 from vllm_shim.backend import registry
 from vllm_shim.backend.sglang.backend import SGLangBackend

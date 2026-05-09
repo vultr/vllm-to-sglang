@@ -1,3 +1,5 @@
+"""Tests for the structured error-dump helper."""
+
 from pathlib import Path
 
 from vllm_shim.middleware.error_dump import dump_error

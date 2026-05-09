@@ -1,3 +1,6 @@
+"""SGLang Prometheus exposition translator: renames series, derives kv-cache usage,
+synthesizes vLLM-only series."""
+
 import re
 
 from vllm_shim.backend.base.metrics import MetricsTranslator
@@ -21,7 +24,10 @@ _RE_SAMPLE_LINE = re.compile(r"^(\w[\w:]*)(\{[^}]*\})?\s+(.+)$")
 
 
 class SGLangMetricsTranslator(MetricsTranslator):
+    """Translates SGLang's Prometheus output into vLLM-named series."""
+
     def translate(self, prom_text: str) -> str:
+        # Two-pass walk: first to collect inputs for kv_cache_usage_perc, then to rewrite lines.
         used: dict[str, float] = {}
         capacity: dict[str, float] = {}
         for line in prom_text.splitlines():

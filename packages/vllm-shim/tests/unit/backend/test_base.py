@@ -1,3 +1,5 @@
+"""Tests for the backend base ABCs (instantiation guard)."""
+
 import pytest
 from vllm_shim.backend.base.args import ArgTranslator
 from vllm_shim.backend.base.backend import Backend

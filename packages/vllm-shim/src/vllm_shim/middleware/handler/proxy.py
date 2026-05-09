@@ -1,3 +1,5 @@
+"""Catch-all proxy handler: runs request filters, forwards to the backend, dumps on error."""
+
 import json
 import os
 from collections.abc import AsyncIterator
@@ -36,11 +38,14 @@ def _forward_headers(headers: httpx.Headers) -> dict[str, str]:
 
 
 class ProxyHandler:
+    """Forwards arbitrary HTTP requests to the backend after running the filter chain."""
+
     def __init__(self, backend: Backend, address: ServiceAddress) -> None:
         self._backend = backend
         self._address = address
 
     async def handle(self, path: str, request: Request) -> Response:
+        """Run filters, forward, and stream or buffer the response based on the request shape."""
         body = await request.body()
         is_streaming = self._is_streaming(request.method, path, body)
 

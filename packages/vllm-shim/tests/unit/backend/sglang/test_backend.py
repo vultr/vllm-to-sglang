@@ -1,3 +1,5 @@
+"""Tests for the SGLangBackend wiring (component types and filter order)."""
+
 from vllm_shim.backend.base.args import ArgTranslator
 from vllm_shim.backend.base.filter import RequestFilter
 from vllm_shim.backend.base.launcher import Launcher

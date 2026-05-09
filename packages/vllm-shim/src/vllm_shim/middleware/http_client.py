@@ -1,3 +1,6 @@
+"""Process-global httpx.AsyncClient managed by the FastAPI lifespan, with a lazy
+fallback for tests."""
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -22,6 +25,8 @@ def get_client() -> httpx.AsyncClient:
 
 
 def make_lifespan() -> object:
+    """Return a FastAPI lifespan that owns the process-global httpx client."""
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         global _client

@@ -1,3 +1,5 @@
+"""Tests for SGLangArgTranslator (vLLM-to-SGLang flag rewriting)."""
+
 import pytest
 from vllm_shim.backend.sglang.args import SGLangArgTranslator
 

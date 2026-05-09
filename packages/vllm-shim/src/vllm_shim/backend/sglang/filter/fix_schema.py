@@ -1,3 +1,5 @@
+"""FixToolSchemas filter: repair JSON-Schema fragments SGLang's strict parser would reject."""
+
 import json
 from typing import Any
 

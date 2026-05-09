@@ -1,3 +1,5 @@
+"""SGLangLauncher: builds the `python -m sglang.launch_server` argv."""
+
 import os
 import sys
 from collections.abc import Sequence
@@ -9,6 +11,8 @@ DEFAULT_TOOL_CALL_PARSER = "qwen3_coder"
 
 
 class SGLangLauncher(Launcher):
+    """Builds the SGLang server command line; honors SGLANG_TOOL_CALL_PARSER override."""
+
     def build_command(
         self,
         model: str,

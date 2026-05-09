@@ -1,3 +1,5 @@
+"""SGLang ArgTranslator: rewrites vLLM flags using ARG_MAP."""
+
 from collections.abc import Sequence
 
 from vllm_shim.backend.base.args import ArgTranslator
@@ -48,6 +50,8 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
 
 
 class SGLangArgTranslator(ArgTranslator):
+    """Pure function over argv: rename, drop, or pass through each token per ARG_MAP."""
+
     def translate(self, vllm_args: Sequence[str]) -> tuple[list[str], list[str]]:
         out: list[str] = []
         dropped: list[str] = []

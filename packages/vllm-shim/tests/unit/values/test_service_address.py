@@ -1,3 +1,5 @@
+"""Tests for the ServiceAddress value object."""
+
 import pytest
 from vllm_shim.values.service_address import ServiceAddress
 

@@ -1,3 +1,5 @@
+"""StripVLLMParams filter: drop vLLM-only request keys that SGLang rejects."""
+
 import json
 
 from vllm_shim.backend.base.filter import RequestFilter

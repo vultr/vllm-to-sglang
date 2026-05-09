@@ -1,3 +1,5 @@
+"""Tests for the vLLM CLI parser (model/host/port extraction, passthrough)."""
+
 import pytest
 from vllm_shim.cli.parser import ArgParser
 

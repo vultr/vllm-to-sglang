@@ -1,3 +1,5 @@
+"""FastAPI app factory and process entry point for the middleware."""
+
 import os
 
 import uvicorn
@@ -13,6 +15,7 @@ from vllm_shim.values.service_address import ServiceAddress
 
 
 def create_app(backend: Backend, backend_address: ServiceAddress) -> FastAPI:
+    """Wire the three handlers and the catch-all proxy onto a fresh FastAPI app."""
     app = FastAPI(lifespan=make_lifespan())  # type: ignore[arg-type]
 
     health = HealthHandler(backend, backend_address)

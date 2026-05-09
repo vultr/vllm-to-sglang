@@ -1,3 +1,5 @@
+"""Tests for the haproxy config templating and write helper."""
+
 from pathlib import Path
 
 from vllm_shim.cli.haproxy import HAProxyConfig

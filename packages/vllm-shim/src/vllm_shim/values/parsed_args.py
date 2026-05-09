@@ -1,3 +1,5 @@
+"""ParsedArgs: structured output of vLLM CLI parsing."""
+
 from dataclasses import dataclass
 
 
