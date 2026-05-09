@@ -47,20 +47,42 @@ k8s vLLM stack
 
 The shim dynamically translates vLLM CLI args to SGLang equivalents — no hardcoded model names or tensor-parallel sizes.
 
-| vLLM flag | SGLang equivalent | Notes |
-|-----------|-------------------|-------|
-| `serve` | *(skipped)* | Subcommand only |
-| `<model>` (positional) | `--model-path <model>` | |
-| `--host` | Used for all three processes | |
-| `--port` | haproxy binds this port | SGLang gets +1, middleware +2 |
-| `--tensor-parallel-size` | `--tp` | |
-| `--gpu_memory_utilization` | `--mem-fraction-static` | |
-| `--trust-remote-code` | `--trust-remote-code` | |
-| `--no-enable-prefix-caching` | *(skipped)* | No SGLang equivalent |
-| `--enable-chunked-prefill` | *(skipped)* | No SGLang equivalent |
-| `--tool-call-parser` | `--tool-call-parser` | Defaults to `mistral` |
+### Infrastructure (extracted, not forwarded)
 
-Unknown flags are passed through as-is — they may be valid SGLang args.
+| vLLM flag | Behavior |
+|-----------|----------|
+| `serve` | Subcommand, dropped |
+| `<model>` (positional) | Becomes `--model-path <model>` |
+| `--host` | Used for haproxy, middleware, and SGLang |
+| `--port` | haproxy binds this; SGLang gets +1, middleware +2 |
+
+### Renames
+
+| vLLM flag | SGLang equivalent |
+|-----------|-------------------|
+| `--tensor-parallel-size` | `--tp` |
+| `--gpu-memory-utilization` | `--mem-fraction-static` |
+| `--max-model-len` | `--context-length` |
+| `--max-num-seqs` | `--max-running-requests` |
+| `--max-num-batched-tokens` | `--chunked-prefill-size` |
+| `--seed` | `--random-seed` |
+| `--distributed-timeout-seconds` | `--dist-timeout` |
+| `--lora-modules` | `--lora-paths` |
+| `--enable-multi-modal` | `--enable-multimodal` |
+| `--enforce-eager` | `--disable-cuda-graph` |
+| `--no-enable-prefix-caching` | `--disable-radix-cache` |
+
+### Pass-through (same name on both sides)
+
+These vLLM flags are forwarded verbatim — SGLang accepts the same name and semantics:
+
+`--trust-remote-code`, `--dtype`, `--quantization`, `--kv-cache-dtype`, `--revision`, `--load-format`, `--model-impl`, `--tokenizer-mode`, `--skip-tokenizer-init`, `--download-dir`, `--pipeline-parallel-size`, `--data-parallel-size`, `--nnodes`, `--node-rank`, `--enable-lora`, `--max-lora-rank`, `--lora-target-modules`, `--attention-backend`, `--served-model-name`, `--chat-template`, `--api-key`, `--reasoning-parser`, `--tool-call-parser`, `--tool-server`, `--otlp-traces-endpoint`, `--kv-events-config`, `--enable-mfu-metrics`, `--enable-eplb`, `--cpu-offload-gb`, `--ssl-keyfile`, `--ssl-certfile`, `--ssl-ca-certs`, `--enable-ssl-refresh`, …
+
+Any other unknown flag is also passed through — it may be a valid SGLang flag.
+
+### Dropped (no SGLang equivalent, or vLLM-default behavior already matches)
+
+`--enable-prefix-caching`, `--enable-chunked-prefill`, `--no-enable-chunked-prefill`, `--disable-log-requests`, `--disable-log-stats`, `--swap-space`, `--block-size`, `--num-gpu-blocks-override`, `--num-cpu-blocks-override`, `--distributed-executor-backend`, `--code-revision`, `--tokenizer-revision`, `--max-seq-len-to-capture`, `--max-cpu-loras`, `--lora-dtype`, `--enable-prompt-adapter`, `--scheduler-delay-factor`, `--limit-mm-per-prompt`
 
 ### Environment variables
 
@@ -116,16 +138,26 @@ The middleware recursively walks the entire JSON Schema tree and fixes:
 - `required: <non-list>` → removed
 - `parameters: <non-object>` → `{"type": "object", "properties": {}}`
 
-## Files
+## Layout
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `Dockerfile` | Builds on `lmsysorg/sglang-rocm`, installs haproxy, copies shim files |
+| `packages/vllm-shim/` | Main package (`vllm_shim`): CLI, supervisor, middleware, backend abstraction, SGLang implementation |
+| `packages/vllm-entrypoints/` | Stub package that ships a top-level `vllm/` so `python -m vllm.X` invocations dispatch to the shim |
+| `Dockerfile` | ROCm image, installs both wheels via uv |
+| `Dockerfile.cuda` | CUDA image, installs both wheels via uv |
 | `Jenkinsfile` | CI/CD: builds and pushes to Vultr container registry |
-| `vllm-shim.sh` | Shell shim — replaces the `vllm` binary, translates args |
-| `vllm_shim_module.py` | Python shim — shadows `vllm.*` module imports, translates args |
-| `vllm_middleware.py` | FastAPI middleware — strips bad params, fixes tool schemas, translates metrics |
-| `README.md` | This file |
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+uv run mypy
+uv run ruff check .
+```
+
+The `vllm` console script replaces the previous bash binary. `python -m vllm.entrypoints.openai.api_server` and similar invocations are intercepted by the `vllm-entrypoints` stubs.
 
 ## Deploy
 

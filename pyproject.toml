@@ -1,0 +1,43 @@
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+vllm-shim = { workspace = true }
+vllm-entrypoints = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-httpx>=0.30",
+    "mypy>=1.10",
+    "ruff>=0.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = [
+    "packages/vllm-shim/src",
+    "packages/vllm-shim/tests",
+    "packages/vllm-entrypoints/src",
+    "packages/vllm-entrypoints/tests",
+]
+
+[[tool.mypy.overrides]]
+module = ["vllm"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["packages/vllm-shim/tests", "packages/vllm-entrypoints/tests"]
+asyncio_mode = "auto"

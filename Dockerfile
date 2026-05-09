@@ -1,60 +1,38 @@
 FROM lmsysorg/sglang-rocm:v0.5.10.post1-rocm720-mi30x-20260505
 
 # ---------------------------------------------------------------
-# haproxy: proxies everything to middleware (including /metrics)
+# haproxy: front door to middleware (including /metrics)
 # ---------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends haproxy \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------
-# Replace the vllm binary with our shim
+# Install uv (small static binary)
 # ---------------------------------------------------------------
-COPY vllm-shim.sh /usr/local/bin/vllm
-RUN chmod +x /usr/local/bin/vllm
-
-# Shadow `python -m vllm.*` invocations
-RUN mkdir -p /opt/vllm-shim/vllm/entrypoints/openai \
-             /opt/vllm-shim/vllm/entrypoints/cli
-COPY vllm_shim_module.py /opt/vllm-shim/vllm/__main__.py
-COPY vllm_shim_module.py /opt/vllm-shim/vllm/entrypoints/openai/api_server.py
-COPY vllm_shim_module.py /opt/vllm-shim/vllm/entrypoints/cli/main.py
-COPY vllm_middleware.py /opt/vllm-shim/vllm_middleware.py
-RUN touch /opt/vllm-shim/vllm/__init__.py \
-          /opt/vllm-shim/vllm/entrypoints/__init__.py \
-          /opt/vllm-shim/vllm/entrypoints/openai/__init__.py \
-          /opt/vllm-shim/vllm/entrypoints/cli/__init__.py
+RUN pip install --no-cache-dir uv
 
 # ---------------------------------------------------------------
-# PYTHONPATH: two fixes in one
-#   1. /sgl-workspace/aiter — use the source-built aiter instead
-#      of the broken pip version in site-packages
-#   2. /opt/vllm-shim — shadow vllm for python -m invocations
+# Install vllm-shim and vllm-entrypoints from the workspace.
+# After install:
+#   - `vllm` is a console script in /usr/local/bin replacing the bash shim
+#   - `python -m vllm.entrypoints.openai.api_server` resolves to the stub
+#     in the vllm-entrypoints wheel via site-packages
 # ---------------------------------------------------------------
-ENV PYTHONPATH="/sgl-workspace/aiter:/opt/vllm-shim:${PYTHONPATH}"
+COPY pyproject.toml uv.lock /src/
+COPY packages /src/packages
+RUN uv pip install --system --no-cache /src/packages/vllm-shim /src/packages/vllm-entrypoints
+
+# ---------------------------------------------------------------
+# PYTHONPATH: only the source-built aiter override remains.
+# ---------------------------------------------------------------
+ENV PYTHONPATH="/sgl-workspace/aiter:${PYTHONPATH}"
 
 # ---------------------------------------------------------------
 # MI300X tuning
 # ---------------------------------------------------------------
 ENV HIP_FORCE_DEV_KERNARG=1
-#ENV NCCL_MIN_NCHANNELS=112
-#ENV GPU_MAX_HW_QUEUES=2
 ENV SGLANG_USE_AITER=1
 
 ENV PYTORCH_ROCM_ARCH=gfx942
 ENV AITER_ROCM_ARCH=gfx942
 ENV GPU_ARCHS=gfx942
-
-# --- Upgrade xgrammar to bleeding edge for tool-call constrained decoding ---
-# Kimi K2 drops optional tool-call params with older xgrammar; upgrading fixes
-# the grammar matcher so it doesn't prematurely terminate optional fields.
-#
-# IMPORTANT: --no-deps prevents pip from nuking the ROCm torch build and
-# other vLLM-pinned dependencies. xgrammar's only runtime deps that matter
-# (torch, numpy, etc.) are already in the image. Build from git main for
-# nightly; pin to a release (e.g. xgrammar==0.1.33) if preferred.
-#RUN pip install --no-cache-dir apache-tvm-ffi && \
-#    pip install --no-cache-dir --force-reinstall --no-deps \
-#    'xgrammar @ git+https://github.com/mlc-ai/xgrammar.git@main'
-
-# --- Upgrade transformers to latest for newest model support ---
-#RUN pip install --no-cache-dir --upgrade transformers
