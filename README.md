@@ -1,4 +1,4 @@
-# vllm-to-sglang
+# vllm-shim
 
 Drop-in replacement that makes a vLLM production stack (e.g. the [k8s operator](https://github.com/vllm-project/production-stack)) actually run [SGLang](https://github.com/sgl-project/sglang) instead.
 
@@ -164,16 +164,16 @@ Each `(backend, platform)` pair is its own Dockerfile under `docker/`. Build fro
 
 ```bash
 # ROCm + SGLang
-docker build -f docker/sglang/Dockerfile.rocm -t vllm-to-sglang:sglang-rocm .
+docker build -f docker/sglang/Dockerfile.rocm -t vllm-shim:sglang-rocm .
 
 # CUDA + SGLang
-docker build -f docker/sglang/Dockerfile.cuda -t vllm-to-sglang:sglang-cuda .
+docker build -f docker/sglang/Dockerfile.cuda -t vllm-shim:sglang-cuda .
 ```
 
 Or via Jenkins (default `BACKEND=sglang`, `PLATFORM=rocm`; final image tag is `${TAG}-${BACKEND}-${PLATFORM}`):
 
 ```bash
-curl -X POST "https://jenkins.sweetapi.com/job/vllm-to-sglang/buildWithParameters" \
+curl -X POST "https://jenkins.sweetapi.com/job/vllm-shim/buildWithParameters" \
   -d TAG=nightly \
   -d BACKEND=sglang \
   -d PLATFORM=rocm
