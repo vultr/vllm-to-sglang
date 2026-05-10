@@ -26,6 +26,13 @@ from vllm_shim.backend.base.args import ArgTranslator
 ARG_MAP: dict[str, tuple[str | None, bool]] = {
     # === Renames: vLLM concept → SGLang concept, value forwarded unchanged ===
     "--tensor-parallel-size": ("--tp", True),
+    # Semantic mismatch (forwarded value-as-is anyway): vLLM's gpu-memory-utilization is
+    # a cap on TOTAL GPU usage (weights + KV + activations + everything), with the
+    # remainder left as untouched headroom. SGLang's mem-fraction-static is the
+    # static-only fraction (weights + KV pool); 1 - it is the dynamic budget for
+    # activations, CUDA graphs, NCCL buffers, etc. Identical numeric values therefore
+    # under-budget the dynamic pool relative to vLLM, especially at high TP, long
+    # contexts, or large running batches. See docs/argument-translation.md.
     "--gpu-memory-utilization": ("--mem-fraction-static", True),
     "--gpu_memory_utilization": ("--mem-fraction-static", True),
     "--max-model-len": ("--context-length", True),
