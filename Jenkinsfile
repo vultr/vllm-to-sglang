@@ -12,7 +12,7 @@ pipeline {
         REGISTRY_HOST = 'atl.vultrcr.com'
         REGISTRY_URL  = 'atl.vultrcr.com/vllm/vllm-shim'
         CRED_ID       = 'ATL_VCR_VLLM'
-        REPO_URL      = 'https://github.com/vultr/vllm-shim.git'
+        REPO_URL      = 'https://github.com/vultr/vllm-to-sglang.git'
     }
 
     stages {
