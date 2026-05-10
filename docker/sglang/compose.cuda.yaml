@@ -1,0 +1,23 @@
+services:
+  vllm-shim:
+    build:
+      context: ../..
+      dockerfile: docker/sglang/Dockerfile.cuda
+    image: vultr/vllm-shim:sglang-cuda
+    command: ["vllm", "serve", "${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    ipc: host
+    shm_size: "16gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      VLLM_SHIM_BACKEND: sglang
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${HOME:-${USERPROFILE:-/tmp}}/.cache/huggingface:/root/.cache/huggingface

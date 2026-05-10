@@ -1,0 +1,26 @@
+services:
+  vllm-shim:
+    build:
+      context: ../..
+      dockerfile: docker/sglang/Dockerfile.rocm
+    image: vultr/vllm-shim:sglang-rocm
+    command: ["vllm", "serve", "${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    ipc: host
+    shm_size: "16gb"
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      VLLM_SHIM_BACKEND: sglang
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${HOME:-${USERPROFILE:-/tmp}}/.cache/huggingface:/root/.cache/huggingface
