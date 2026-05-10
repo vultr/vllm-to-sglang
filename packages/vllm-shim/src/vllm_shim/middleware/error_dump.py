@@ -1,4 +1,4 @@
-"""Structured error log dump used when SGLang returns 4xx/5xx."""
+"""Structured error log dump used when the backend returns 4xx/5xx."""
 
 import json
 from datetime import datetime
@@ -10,6 +10,7 @@ _RESP_TRUNC = 4000
 
 def dump_error(
     log_path: Path,
+    backend_name: str,
     request_body: bytes,
     status_code: int,
     response_body: bytes,
@@ -23,7 +24,7 @@ def dump_error(
         resp_text = _format(response_body, _RESP_TRUNC)
         with log_path.open("a") as f:
             f.write(f"\n{'=' * 60}\n")
-            f.write(f"[{ts}] ERROR DUMP: SGLang returned HTTP {status_code}\n")
+            f.write(f"[{ts}] ERROR DUMP: {backend_name} returned HTTP {status_code}\n")
             f.write(f"Path: {path}\n")
             f.write("--- Request Body ---\n")
             f.write(req_text)

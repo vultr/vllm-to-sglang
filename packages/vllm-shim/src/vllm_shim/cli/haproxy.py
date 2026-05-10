@@ -8,10 +8,10 @@ from vllm_shim.values.service_address import ServiceAddress
 
 ERROR_503_BODY = (
     "HTTP/1.0 503 Service Unavailable\r\n"
-    "Content-Length: 16\r\n"
+    "Content-Length: 17\r\n"
     "Connection: close\r\n"
     "Content-Type: text/plain\r\n\r\n"
-    "SGLang not ready"
+    "Backend not ready"
 )
 
 ERROR_503_PATH = "/tmp/haproxy-errors/503-sglang.http"
@@ -66,7 +66,7 @@ class HAProxyConfig:
 
 
 def write_error_file() -> None:
-    """Drops the static 503 errorfile haproxy serves when SGLang is down."""
+    """Drops the static 503 errorfile haproxy serves when the backend is down."""
     path = Path(ERROR_503_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(ERROR_503_BODY)

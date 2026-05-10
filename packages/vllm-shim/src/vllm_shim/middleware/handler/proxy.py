@@ -73,6 +73,7 @@ class ProxyHandler:
                     error = await resp.aread()
                     dump_error(
                         log_path=ERROR_LOG_PATH,
+                        backend_name=self._backend.name,
                         request_body=body,
                         status_code=resp.status_code,
                         response_body=error,
@@ -102,6 +103,7 @@ class ProxyHandler:
             if resp.status_code >= 400:
                 dump_error(
                     log_path=ERROR_LOG_PATH,
+                    backend_name=self._backend.name,
                     request_body=body,
                     status_code=resp.status_code,
                     response_body=resp.content,

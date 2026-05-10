@@ -7,7 +7,10 @@ from vllm_shim.values.service_address import ServiceAddress
 
 
 def test_uses_console_script_when_on_path(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr("vllm_shim.backend.sglang.launcher.shutil.which", lambda _: "/usr/local/bin/sglang")
+    monkeypatch.setattr(
+        "vllm_shim.backend.sglang.launcher.shutil.which",
+        lambda _: "/usr/local/bin/sglang",
+    )
     cmd = SGLangLauncher().build_command("org/m", ServiceAddress("0.0.0.0", 8001), [])
     assert cmd[:2] == ["sglang", "serve"]
 
