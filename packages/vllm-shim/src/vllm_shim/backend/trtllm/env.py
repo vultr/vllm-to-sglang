@@ -2,7 +2,7 @@
 
 The set is deliberately conservative: only env vars where the underlying
 concept is identical and the names are clearly aligned (cross-checked against
-``TLLM_*`` / ``TRTLLM_*`` env names referenced in repos/TensorRT-LLM/). The
+``TLLM_*`` / ``TRTLLM_*`` env names referenced in repos/trtllm/). The
 remaining vLLM env vars are inherited by the backend subprocess as-is and
 ignored - trtllm-serve doesn't trip over names it doesn't recognise.
 

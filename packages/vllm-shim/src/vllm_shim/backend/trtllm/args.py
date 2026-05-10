@@ -3,7 +3,7 @@
 Coverage: every vLLM `serve` flag from repos/vllm/vllm/engine/arg_utils.py and
 repos/vllm/vllm/entrypoints/openai/cli_args.py has an explicit decision below.
 The set of flags `trtllm-serve` understands is much smaller than SGLang's (see
-the click options in repos/TensorRT-LLM/tensorrt_llm/commands/serve.py) - ~40
+the click options in repos/trtllm/tensorrt_llm/commands/serve.py) - ~40
 flags, all underscore-cased - so almost everything vLLM-side gets dropped.
 A few well-known concepts have the obvious dash↔underscore rename.
 
