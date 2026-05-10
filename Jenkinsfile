@@ -25,9 +25,11 @@ pipeline {
         stage('Discover matrix') {
             steps {
                 script {
-                    def combos = findFiles(glob: 'docker/*/Dockerfile.*').collect { f ->
-                        [backend: f.path.split('/')[1], platform: f.name - 'Dockerfile.']
-                    }
+                    def lines = sh(returnStdout: true, script: 'ls docker/*/Dockerfile.* 2>/dev/null || true').trim()
+                    def combos = lines ? lines.split('\n').collect { p ->
+                        def parts = p.split('/')
+                        [backend: parts[1], platform: parts[2] - 'Dockerfile.']
+                    } : []
                     if (params.BACKEND?.trim())  { combos = combos.findAll { it.backend  == params.BACKEND.trim()  } }
                     if (params.PLATFORM?.trim()) { combos = combos.findAll { it.platform == params.PLATFORM.trim() } }
                     if (combos.isEmpty()) {
