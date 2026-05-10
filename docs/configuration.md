@@ -121,12 +121,11 @@ Operators porting from vLLM Production Stack manifests typically have a k8s `env
 
 What gets translated:
 
-- **SGLang** (`vllm_shim.backend.sglang.env.ENV_MAP`): suffix-aligned pairs where SGLang and vLLM agree on the underlying concept - `VLLM_HOST_IP`, `VLLM_DP_RANK`, `VLLM_NCCL_SO_PATH`, `VLLM_LOGGING_CONFIG_PATH`, `VLLM_PP_LAYER_PARTITION`, `VLLM_USE_MODELSCOPE`, `VLLM_SKIP_P2P_CHECK`, `VLLM_RINGBUFFER_WARNING_INTERVAL`, `VLLM_CPU_OMP_THREADS_BIND` - plus four ROCm renames (`VLLM_ROCM_USE_AITER` and the three `VLLM_ROCM_QUICK_REDUCE_*` aliases that map to the un-prefixed upstream names AMD's quickreduce library reads).
+- **SGLang** (`vllm_shim.backend.sglang.env.ENV_MAP`): suffix-aligned pairs where SGLang and vLLM agree on the underlying concept - `VLLM_HOST_IP`, `VLLM_DP_RANK`, `VLLM_PORT` (the base port for internal service-port allocation, not the listen port - both engines use this for the same thing), `VLLM_NCCL_SO_PATH`, `VLLM_LOGGING_CONFIG_PATH`, `VLLM_PP_LAYER_PARTITION`, `VLLM_USE_MODELSCOPE`, `VLLM_SKIP_P2P_CHECK`, `VLLM_RINGBUFFER_WARNING_INTERVAL`, `VLLM_CPU_OMP_THREADS_BIND` - plus four ROCm renames (`VLLM_ROCM_USE_AITER` and the three `VLLM_ROCM_QUICK_REDUCE_*` aliases that map to the un-prefixed upstream names AMD's quickreduce library reads).
 - **TRT-LLM** (`vllm_shim.backend.trtllm.env.ENV_MAP`): five renames - `VLLM_ALLOW_LONG_MAX_MODEL_LEN`, `VLLM_NO_USAGE_STATS`, `VLLM_USAGE_STATS_SERVER`, `VLLM_RAY_BUNDLE_INDICES`, `VLLM_RAY_PER_WORKER_GPUS` - all mapped to the matching `TLLM_*` / `TRTLLM_*` names. TRT-LLM has no ROCm support, so no ROCm vars apply.
 
 Notable non-translations:
 
-- **`VLLM_PORT`** is intentionally NOT mapped to `SGLANG_PORT`: the supervisor sets the backend's listen port via the `--port` CLI arg, and putting `SGLANG_PORT` in the env on top of that would race the CLI value and confuse the port-allocation arithmetic.
 - **Per-feature `VLLM_ROCM_USE_AITER_*` toggles** (MLA, MOE, MHA, RMSNORM, etc.) are not translated. SGLang's per-feature AITER granularity is much coarser, and the semantics don't line up cleanly. The master `VLLM_ROCM_USE_AITER` toggle is the one that translates safely.
 - **Operator overrides win.** If the user has already set the backend-side name explicitly (e.g. both `VLLM_USE_MODELSCOPE=1` and `SGLANG_USE_MODELSCOPE=0`), the translator does NOT overwrite the existing value.
 

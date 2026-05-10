@@ -23,6 +23,10 @@ ENV_MAP: dict[str, str] = {
     "VLLM_HOST_IP": "SGLANG_HOST_IP",
     "VLLM_LOGGING_CONFIG_PATH": "SGLANG_LOGGING_CONFIG_PATH",
     "VLLM_NCCL_SO_PATH": "SGLANG_NCCL_SO_PATH",
+    # Both engines use this as a base port for internal service-port allocation
+    # (vllm/envs.py:get_vllm_port + the :578 comment; sglang/srt/utils/network.py:get_open_port).
+    # NOT the listen port; that comes from --port on the CLI in both engines.
+    "VLLM_PORT": "SGLANG_PORT",
     "VLLM_PP_LAYER_PARTITION": "SGLANG_PP_LAYER_PARTITION",
     "VLLM_RINGBUFFER_WARNING_INTERVAL": "SGLANG_RINGBUFFER_WARNING_INTERVAL",
     "VLLM_SKIP_P2P_CHECK": "SGLANG_SKIP_P2P_CHECK",
@@ -41,9 +45,6 @@ ENV_MAP: dict[str, str] = {
 }
 
 # Notable non-translations and why:
-# - VLLM_PORT -> SGLANG_PORT: skipped. SGLang's listen port is set explicitly
-#   via the --port CLI arg the supervisor passes; routing VLLM_PORT into the
-#   env would race the CLI value and confuse the port-allocation arithmetic.
 # - Per-feature VLLM_ROCM_USE_AITER_* toggles (MLA, MOE, MHA, RMSNORM, ...):
 #   SGLang's per-feature AITER granularity is much coarser and the semantics
 #   don't line up cleanly (e.g. VLLM_ROCM_USE_AITER_MLA = "engage AITER for

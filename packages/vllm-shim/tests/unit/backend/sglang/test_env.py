@@ -90,12 +90,14 @@ def test_pure_function_does_not_mutate_input(translator: SGLangEnvTranslator) ->
 
 # === Notable non-translations ==================================================
 
-def test_vllm_port_is_not_translated(translator: SGLangEnvTranslator) -> None:
-    """SGLANG_PORT is a real SGLang env var but the supervisor sets the
-    backend's listen port via --port; auto-translating VLLM_PORT into env
-    would race the CLI value and confuse the port-allocation arithmetic."""
+def test_vllm_port_translates_to_sglang_port(translator: SGLangEnvTranslator) -> None:
+    """Both engines use this as a base port for internal service-port
+    allocation (NOT the listen port, which comes from --port). The shim
+    used to squat on SGLANG_PORT for its own supervisor->middleware IPC,
+    which is what previously made this translation unsafe; the IPC env
+    var has since been renamed to VLLM_SHIM_BACKEND_PORT."""
     out = translator.translate({"VLLM_PORT": "9999"})
-    assert "SGLANG_PORT" not in out
+    assert out["SGLANG_PORT"] == "9999"
 
 
 def test_per_feature_aiter_toggles_not_translated(
