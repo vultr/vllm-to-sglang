@@ -4,6 +4,7 @@ from typing import ClassVar
 
 from vllm_shim.backend.base.backend import Backend
 from vllm_shim.backend.trtllm.args import TRTLLMArgTranslator
+from vllm_shim.backend.trtllm.env import TRTLLMEnvTranslator
 from vllm_shim.backend.trtllm.launcher import TRTLLMLauncher
 from vllm_shim.backend.trtllm.metrics import TRTLLMMetricsTranslator
 
@@ -17,6 +18,7 @@ class TRTLLMBackend(Backend):
 
     def __init__(self) -> None:
         self.args = TRTLLMArgTranslator()
+        self.env = TRTLLMEnvTranslator()
         self.metrics = TRTLLMMetricsTranslator()
         self.launcher = TRTLLMLauncher()
         self.filters = ()

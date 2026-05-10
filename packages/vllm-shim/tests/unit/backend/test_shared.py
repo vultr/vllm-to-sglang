@@ -2,6 +2,7 @@
 translate_prom_line, vllm_synthesized_tail)."""
 
 from vllm_shim.backend._shared import (
+    translate_env_with_map,
     translate_prom_line,
     translate_with_arg_map,
     vllm_synthesized_tail,
@@ -129,3 +130,33 @@ def test_synthesized_tail_lines() -> None:
 
 def test_synthesized_tail_length() -> None:
     assert len(vllm_synthesized_tail()) == 6
+
+
+# ---------- translate_env_with_map ----------
+
+
+def test_translate_env_renames_when_target_absent() -> None:
+    out = translate_env_with_map({"FOO": "1"}, {"FOO": "BAR"})
+    assert out == {"FOO": "1", "BAR": "1"}
+
+
+def test_translate_env_preserves_existing_target() -> None:
+    out = translate_env_with_map(
+        {"FOO": "1", "BAR": "0"},
+        {"FOO": "BAR"},
+    )
+    assert out["BAR"] == "0"
+    assert out["FOO"] == "1"
+
+
+def test_translate_env_skips_when_source_absent() -> None:
+    out = translate_env_with_map({"OTHER": "x"}, {"FOO": "BAR"})
+    assert "BAR" not in out
+    assert out == {"OTHER": "x"}
+
+
+def test_translate_env_does_not_mutate_input() -> None:
+    parent = {"FOO": "1"}
+    snapshot = dict(parent)
+    translate_env_with_map(parent, {"FOO": "BAR"})
+    assert parent == snapshot

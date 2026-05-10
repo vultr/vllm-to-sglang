@@ -28,7 +28,12 @@ def main() -> int:
     listen_addr = ServiceAddress(parsed.host, ports.frontend)
 
     backend_cmd = backend.launcher.build_command(parsed.model, backend_addr, backend_args)
-    backend_proc = subprocess.Popen(backend_cmd)
+    # Auto-translate selected vLLM env vars into the backend's namespace so
+    # operators with vLLM-style k8s env: blocks don't lose those settings on
+    # the SGLang/TRT-LLM side. See the backend's env.ENV_MAP for what's
+    # in scope; vLLM-side names stay in place and are ignored by the backend.
+    backend_env = backend.env.translate(os.environ)
+    backend_proc = subprocess.Popen(backend_cmd, env=backend_env)
 
     # Middleware reads its config from env, not argv, so it can be launched independently
     # (e.g. via the vllm-shim-middleware console script in tests).

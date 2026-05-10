@@ -13,6 +13,7 @@ class Backend(ABC):
     metrics_path: ClassVar[str] = "/metrics"
 
     args: ArgTranslator
+    env: EnvTranslator
     metrics: MetricsTranslator
     launcher: Launcher
     filters: tuple[RequestFilter, ...]
@@ -21,18 +22,19 @@ class Backend(ABC):
     def __init__(self) -> None: ...
 ```
 
-A backend is a bag of four components plus two class-level constants. Subclasses set the four instance attributes in `__init__`. There's no logic on the base class; `Backend` is purely a contract object.
+A backend is a bag of five components plus two class-level constants. Subclasses set the five instance attributes in `__init__`. There's no logic on the base class; `Backend` is purely a contract object.
 
-The four components are each their own ABC:
+The five components are each their own ABC:
 
 | Component | ABC | Role |
 |---|---|---|
 | `args` | `ArgTranslator` | `translate(vllm_args) -> (backend_args, dropped_args)`. Pure function. See `docs/argument-translation.md`. |
+| `env` | `EnvTranslator` | `translate(parent_env) -> dict[str, str]`. Pure function over `os.environ` that adds backend-side renames for selected `VLLM_*` env vars. See `docs/configuration.md`. |
 | `launcher` | `Launcher` | `build_command(model, address, extra_args) -> list[str]`. Builds the subprocess argv. |
 | `metrics` | `MetricsTranslator` | `translate(prom_text) -> str`. Rewrites Prometheus exposition. See `docs/metrics.md`. |
 | `filters` | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. See `docs/middleware.md`. |
 
-All four are intentionally stateless or self-contained. The supervisor and middleware never reach into a backend's internals; they only call these four methods.
+All five are intentionally stateless or self-contained. The supervisor and middleware never reach into a backend's internals; they only call these methods.
 
 `health_path` is a class-level constant for the upstream `/health` URL. SGLang exposes `/health`; another backend might use `/v1/health` or `/healthz` and would override this. haproxy's `httpchk` and the middleware's `HealthHandler` both read it.
 

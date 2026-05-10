@@ -49,11 +49,12 @@ client :N -> haproxy -> :N+2 middleware (FastAPI) -> :N+1 SGLang/TRT-LLM
 
 ### Backend abstraction
 
-A `Backend` (`vllm_shim.backend.base.backend`) is a contract object holding four components plus class constants:
+A `Backend` (`vllm_shim.backend.base.backend`) is a contract object holding five components plus class constants:
 
 | Slot | ABC | Role |
 |---|---|---|
 | `args`     | `ArgTranslator`     | Pure function: `translate(passthrough) -> (backend_argv, dropped)`. |
+| `env`      | `EnvTranslator`     | Pure function: `translate(os.environ) -> dict[str, str]`. Adds backend-side renames for selected `VLLM_*` env vars. |
 | `launcher` | `Launcher`          | Builds the subprocess argv. |
 | `metrics`  | `MetricsTranslator` | Rewrites Prometheus exposition into vLLM-named series. |
 | `filters`  | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. |

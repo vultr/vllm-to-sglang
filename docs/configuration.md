@@ -115,6 +115,23 @@ middleware_env["VLLM_SHIM_MIDDLEWARE_PORT"] = str(middleware_addr.port)
 
 The middleware inherits the rest of the parent environment (so `VLLM_SHIM_BACKEND`, `VLLM_SHIM_LOG`, etc., flow through naturally).
 
+## vLLM env var translation
+
+Operators porting from vLLM Production Stack manifests typically have a k8s `env:` block full of `VLLM_*` variables. Most of those configure vLLM-internal kernels (`VLLM_USE_DEEP_GEMM`, `VLLM_USE_FLASHINFER_*`, `VLLM_DISABLED_KERNELS`, etc.) and have no SGLang or TRT-LLM equivalent; the backend subprocess inherits them and ignores them. A small, conservative subset is auto-translated into the backend's namespace by `Backend.env.translate(os.environ)`, called once before the supervisor spawns the backend in `vllm_shim/cli/entrypoint.py:main`.
+
+What gets translated:
+
+- **SGLang** (`vllm_shim.backend.sglang.env.ENV_MAP`): suffix-aligned pairs where SGLang and vLLM agree on the underlying concept - `VLLM_HOST_IP`, `VLLM_DP_RANK`, `VLLM_NCCL_SO_PATH`, `VLLM_LOGGING_CONFIG_PATH`, `VLLM_PP_LAYER_PARTITION`, `VLLM_USE_MODELSCOPE`, `VLLM_SKIP_P2P_CHECK`, `VLLM_RINGBUFFER_WARNING_INTERVAL`, `VLLM_CPU_OMP_THREADS_BIND` - plus four ROCm renames (`VLLM_ROCM_USE_AITER` and the three `VLLM_ROCM_QUICK_REDUCE_*` aliases that map to the un-prefixed upstream names AMD's quickreduce library reads).
+- **TRT-LLM** (`vllm_shim.backend.trtllm.env.ENV_MAP`): five renames - `VLLM_ALLOW_LONG_MAX_MODEL_LEN`, `VLLM_NO_USAGE_STATS`, `VLLM_USAGE_STATS_SERVER`, `VLLM_RAY_BUNDLE_INDICES`, `VLLM_RAY_PER_WORKER_GPUS` - all mapped to the matching `TLLM_*` / `TRTLLM_*` names. TRT-LLM has no ROCm support, so no ROCm vars apply.
+
+Notable non-translations:
+
+- **`VLLM_PORT`** is intentionally NOT mapped to `SGLANG_PORT`: the supervisor sets the backend's listen port via the `--port` CLI arg, and putting `SGLANG_PORT` in the env on top of that would race the CLI value and confuse the port-allocation arithmetic.
+- **Per-feature `VLLM_ROCM_USE_AITER_*` toggles** (MLA, MOE, MHA, RMSNORM, etc.) are not translated. SGLang's per-feature AITER granularity is much coarser, and the semantics don't line up cleanly. The master `VLLM_ROCM_USE_AITER` toggle is the one that translates safely.
+- **Operator overrides win.** If the user has already set the backend-side name explicitly (e.g. both `VLLM_USE_MODELSCOPE=1` and `SGLANG_USE_MODELSCOPE=0`), the translator does NOT overwrite the existing value.
+
+To add a translation: add an entry to the relevant backend's `ENV_MAP` and a parametrised test in `tests/unit/backend/<backend>/test_env.py`. Drops aren't currently supported; the policy is "rename only, leave unmatched `VLLM_*` in place because the backend ignores them."
+
 ## What's not configurable
 
 Some constants have purposeful homes in code rather than env. If you need to change them, edit the source. That's the intended path:

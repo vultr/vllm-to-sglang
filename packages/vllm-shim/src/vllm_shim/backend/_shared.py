@@ -4,7 +4,7 @@ Lives outside backend/base/ per docs/backends.md ('What stays in base/: ABCs, no
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 # Internal regex constants for Prometheus exposition parsing.
 _RE_METRIC_LINE = re.compile(r"^(#\s+(?:HELP|TYPE)\s+)?(\w[\w:]*)(.*)")
@@ -150,6 +150,27 @@ def strip_optimization_level(args: list[str]) -> tuple[list[str], list[str]]:
         out.append(arg)
         i += 1
     return out, dropped
+
+
+def translate_env_with_map(
+    parent_env: Mapping[str, str],
+    env_map: Mapping[str, str],
+) -> dict[str, str]:
+    """Rename selected env vars from a parent mapping into a child env dict.
+
+    For each ``(vllm_name, backend_name)`` pair in ``env_map``: if the vLLM
+    name is set in ``parent_env`` AND the backend name is NOT already set
+    (i.e. the operator hasn't explicitly overridden it), copy the value into
+    the backend name. The vLLM name itself is left alone; concrete backends
+    ignore env vars they don't recognise.
+
+    Pure function. Returns a fresh dict; ``parent_env`` is not mutated.
+    """
+    out = dict(parent_env)
+    for src, dst in env_map.items():
+        if src in parent_env and dst not in parent_env:
+            out[dst] = parent_env[src]
+    return out
 
 
 def vllm_synthesized_tail() -> list[str]:
