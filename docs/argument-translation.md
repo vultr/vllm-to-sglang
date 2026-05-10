@@ -1,6 +1,6 @@
 # Argument translation
 
-The shim accepts vLLM's CLI grammar (`vllm serve <model> [flags]`) and produces SGLang's CLI grammar (`python -m sglang.launch_server --model-path <model> [flags]`). Two stages do this:
+The shim accepts vLLM's CLI grammar (`vllm serve <model> [flags]`) and produces SGLang's CLI grammar (`sglang serve --model-path <model> [flags]`). Two stages do this:
 
 1. **`ArgParser`** (`packages/vllm-shim/src/vllm_shim/cli/parser.py`): extracts what the supervisor itself needs and packages the rest verbatim.
 2. **`SGLangArgTranslator`** (`packages/vllm-shim/src/vllm_shim/backend/sglang/args.py`): rewrites flags into SGLang's vocabulary.

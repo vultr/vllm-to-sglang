@@ -1,6 +1,7 @@
-"""SGLangLauncher: builds the `python -m sglang.launch_server` argv."""
+"""SGLangLauncher: builds the SGLang server argv with a `python -m` fallback."""
 
 import os
+import shutil
 import sys
 from collections.abc import Sequence
 
@@ -21,9 +22,7 @@ class SGLangLauncher(Launcher):
     ) -> list[str]:
         parser = os.environ.get("SGLANG_TOOL_CALL_PARSER", DEFAULT_TOOL_CALL_PARSER)
         return [
-            sys.executable,
-            "-m",
-            "sglang.launch_server",
+            *self._invocation(),
             "--model-path", model,
             "--host", address.host,
             "--port", str(address.port),
@@ -31,3 +30,17 @@ class SGLangLauncher(Launcher):
             "--tool-call-parser", parser,
             *extra_args,
         ]
+
+    @staticmethod
+    def _invocation() -> list[str]:
+        # Prefer the `sglang` console script when present. The CUDA SGLang
+        # image installs via legacy `setup.py develop`, which writes
+        # entry-point metadata but no wrapper script; in that case fall back
+        # to the module form. The fallback assumes vllm-shim and SGLang share
+        # an interpreter (true on the CUDA image, where both live in
+        # /usr/bin/python); the ROCm image ships the wrapper at
+        # /opt/venv/bin/sglang, whose shebang routes execution back into
+        # SGLang's own venv regardless of what sys.executable is here.
+        if shutil.which("sglang"):
+            return ["sglang", "serve"]
+        return [sys.executable, "-m", "sglang.launch_server"]

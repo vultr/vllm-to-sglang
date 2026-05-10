@@ -100,7 +100,7 @@ The package can be flatter or deeper depending on complexity; `filter/` only exi
 ### 2. Implement the four components
 
 - **`ArgTranslator.translate`**: takes the passthrough flags from `ArgParser`, returns `(backend_argv, dropped_argv)`. Pure function. Build a flag-rewrite map analogous to `ARG_MAP`, plus any custom logic.
-- **`Launcher.build_command`**: takes `(model, ServiceAddress, extra_args)`, returns the full subprocess argv. Use `sys.executable` for Python-launched backends so the venv is respected.
+- **`Launcher.build_command`**: takes `(model, ServiceAddress, extra_args)`, returns the full subprocess argv. Prefer the backend's installed console script (e.g. `sglang serve`, `trtllm-serve`) so the launcher does not need to share a Python interpreter with the backend.
 - **`MetricsTranslator.translate`**: takes Prometheus exposition text, returns Prometheus exposition text. If the backend has no native `/metrics`, you can return synthesized vLLM-format output and skip the rename step.
 - **`RequestFilter`s**: only needed if the backend rejects request shapes vLLM clients send. Each one sets `applies_to(method, path)` to gate when it runs.
 
