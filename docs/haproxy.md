@@ -1,6 +1,6 @@
 # HAProxy frontend
 
-haproxy is the public-facing layer in the shim. Everything entering the container hits haproxy first; the middleware and SGLang are loopback-only.
+haproxy is the public-facing layer in the shim. Everything entering the container hits haproxy first; the middleware and the backend are loopback-only.
 
 The config is templated and written by `vllm_shim.cli.haproxy` at startup. The launch helper just `Popen`s `haproxy -f <config>`.
 
@@ -10,8 +10,8 @@ The shim could in principle expose the FastAPI middleware directly on the public
 
 The vLLM production stack and most k8s deployments probe `/health` on the inference pod and use the result to gate traffic, restart counters, and dashboard "healthy pods" tiles. There are two transient states the middleware alone can't represent:
 
-1. **SGLang still loading weights.** The middleware is up and serving FastAPI, but `localhost:8001` refuses connections. Without haproxy, `/health` would either hang on the connect timeout or return whatever FastAPI synthesizes; neither matches the contract.
-2. **SGLang crashed and is restarting.** Same shape: middleware is fine, backend isn't.
+1. **The backend is still loading weights.** The middleware is up and serving FastAPI, but `localhost:8001` refuses connections. Without haproxy, `/health` would either hang on the connect timeout or return whatever FastAPI synthesizes; neither matches the contract.
+2. **The backend crashed and is restarting.** Same shape: middleware is fine, backend isn't.
 
 haproxy turns these into a clean HTTP-level 503 because TCP-level health checks can drive HTTP-level routing decisions. That's the property the rest of the layering relies on.
 
@@ -61,13 +61,13 @@ http-request deny deny_status 503 if is_health
 Read top-down:
 
 - `is_health` is true when the path is `/health`.
-- `sglang_up` is true when the SGLang backend has at least one healthy server.
-- The first `http-request deny` rule denies `/health` requests with **status 200** when SGLang is up. It's a `deny` because we don't want to forward `/health` to the backend (SGLang's `/health` returns its own body and HTTP version), we just want the status code from the gate itself.
-- The second rule denies `/health` requests with **status 503** when the first rule didn't match (SGLang is not up).
+- `sglang_up` is true when the haproxy backend pool (named `sglang` in the template regardless of which engine is running, see below) has at least one healthy server.
+- The first `http-request deny` rule denies `/health` requests with **status 200** when the backend is up. It's a `deny` because we don't want to forward `/health` to the backend (the backend's `/health` returns its own body and HTTP version), we just want the status code from the gate itself.
+- The second rule denies `/health` requests with **status 503** when the first rule didn't match (the backend is not up).
 
-The clever bit is that "deny with status 200" is a haproxy idiom for "synthesize this response without forwarding upstream." It gives the shim a `/health` endpoint that's purely a function of haproxy's view of SGLang, with no involvement from FastAPI or SGLang itself.
+The clever bit is that "deny with status 200" is a haproxy idiom for "synthesize this response without forwarding upstream." It gives the shim a `/health` endpoint that's purely a function of haproxy's view of the backend, with no involvement from FastAPI or the backend itself.
 
-For non-`/health` paths, the rules don't fire and the request flows through `default_backend sglang` (which actually points at the middleware; the backend stanza is named `sglang` for legacy reasons). When SGLang is down, that path returns the 503 errorfile because the backend has no healthy server to send to.
+For non-`/health` paths, the rules don't fire and the request flows through `default_backend sglang`. The pool name `sglang` is hardcoded in the haproxy template even when the actual engine is TRT-LLM; that's a fixed string, not a backend selector. (Renaming it would require touching every ACL and the `nbsrv()` reference for no functional gain.) When the backend is down, that path returns the 503 errorfile because the pool has no healthy server to send to.
 
 ### The `httpchk` probe
 
@@ -78,13 +78,13 @@ backend sglang
   server s1 {upstream_host}:{upstream_port} check inter 5s fall 3 rise 2
 ```
 
-This is haproxy's view of SGLang's health, used by `nbsrv()` above. It actively probes `GET /health` on the upstream (which in the running config is the middleware, and the middleware proxies to SGLang's real `/health`).
+This is haproxy's view of the backend's health, used by `nbsrv()` above. It actively probes `GET /health` on the upstream (which in the running config is the middleware, and the middleware proxies to the backend's real `/health`).
 
 - `inter 5s`: probe every 5 seconds.
 - `fall 3`: 3 consecutive failures take the server out of rotation.
 - `rise 2`: 2 consecutive successes bring it back.
 
-The `fall 3` window means SGLang has to be down for ~15 seconds before the gate flips. That's intentional; short blips during startup or token-cache warmup don't oscillate the readiness state.
+The `fall 3` window means the backend has to be down for ~15 seconds before the gate flips. That's intentional; short blips during startup or token-cache warmup don't oscillate the readiness state.
 
 ### The 503 errorfile
 
@@ -96,11 +96,11 @@ When haproxy needs to emit a 503 (either via the `is_health` rule above, or beca
 
 ```
 HTTP/1.0 503 Service Unavailable
-Content-Length: 16
+Content-Length: 17
 Connection: close
 Content-Type: text/plain
 
-SGLang not ready
+Backend not ready
 ```
 
 Written by `write_error_file()` at startup; the path is hardcoded as `/tmp/haproxy-errors/503-sglang.http` (and the parent dir is created if missing).
@@ -119,8 +119,8 @@ timeout server 300s
 
 ## What haproxy does not do
 
-- **Auth.** No bearer-token check, no rate limiting, nothing. The vLLM `--api-key` flag passes through to SGLang; auth is the inference engine's problem.
-- **TLS.** No `ssl crt …` lines. TLS termination is handled upstream (k8s ingress, service mesh, or the `--ssl-keyfile`/`--ssl-certfile` flags forwarded to SGLang).
+- **Auth.** No bearer-token check, no rate limiting, nothing. The vLLM `--api-key` flag passes through to the backend; auth is the inference engine's problem.
+- **TLS.** No `ssl crt …` lines. TLS termination is handled upstream (k8s ingress, service mesh, or the `--ssl-keyfile`/`--ssl-certfile` flags forwarded to the backend).
 - **Load balancing across replicas.** The shim is single-replica per pod by definition; haproxy's load-balancing config is left at defaults because there's only one upstream server.
 
 ## Modifying the config

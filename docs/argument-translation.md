@@ -1,11 +1,11 @@
 # Argument translation
 
-The shim accepts vLLM's CLI grammar (`vllm serve <model> [flags]`) and produces SGLang's CLI grammar (`sglang serve --model-path <model> [flags]`). Two stages do this:
+The shim accepts vLLM's CLI grammar (`vllm serve <model> [flags]`) and produces the selected backend's CLI grammar (`sglang serve --model-path <model> [flags]` for SGLang, `trtllm-serve <model> [flags]` for TRT-LLM). Two stages do this:
 
-1. **`ArgParser`** (`packages/vllm-shim/src/vllm_shim/cli/parser.py`): extracts what the supervisor itself needs and packages the rest verbatim.
-2. **`SGLangArgTranslator`** (`packages/vllm-shim/src/vllm_shim/backend/sglang/args.py`): rewrites flags into SGLang's vocabulary.
+1. **`ArgParser`** (`packages/vllm-shim/src/vllm_shim/cli/parser.py`): extracts what the supervisor itself needs and packages the rest verbatim. Backend-agnostic.
+2. **`<Backend>ArgTranslator`**: rewrites flags into the backend's vocabulary. `SGLangArgTranslator` (`vllm_shim.backend.sglang.args`) and `TRTLLMArgTranslator` (`vllm_shim.backend.trtllm.args`) are the two implementations.
 
-Splitting them this way keeps the supervisor backend-agnostic: the parser knows nothing about SGLang, and the translator is just a `Backend.args` slot that another backend could swap out.
+Splitting them this way keeps the supervisor backend-agnostic: the parser knows nothing about either engine, and each translator is just a `Backend.args` slot that another backend could swap out.
 
 ## Stage 1: `ArgParser`
 

@@ -1,24 +1,24 @@
 # Metrics translation
 
-The middleware exposes `/metrics` on the public listener. It scrapes SGLang's native `/metrics` (Prometheus exposition format), rewrites it into vLLM-named series, and serves the result. Existing dashboards and alerts built against vLLM continue to work unchanged.
+The middleware exposes `/metrics` on the public listener. It scrapes the backend's native `/metrics` (Prometheus exposition format), rewrites it into vLLM-named series, and serves the result. Existing dashboards and alerts built against vLLM continue to work unchanged.
 
 The pipeline lives in two files:
 
-- `MetricsHandler` (`packages/vllm-shim/src/vllm_shim/middleware/handler/metrics.py`): fetches, caches, and serves.
-- `SGLangMetricsTranslator` (`packages/vllm-shim/src/vllm_shim/backend/sglang/metrics.py`): the pure text-to-text translation.
+- `MetricsHandler` (`packages/vllm-shim/src/vllm_shim/middleware/handler/metrics.py`): fetches, caches, and serves; reads `backend.metrics_path` to find the upstream endpoint.
+- The per-backend translator: `SGLangMetricsTranslator` (`vllm_shim.backend.sglang.metrics`) or `TRTLLMMetricsTranslator` (`vllm_shim.backend.trtllm.metrics`). Each is a pure text-to-text function selected by `backend.metrics`.
 
 ## Translation pipeline
 
 For each `/metrics` request:
 
 1. Cache check (1-second TTL). On hit, return the cached translation.
-2. `httpx.AsyncClient.get(SGLang/metrics, timeout=10s)`. On connection error or timeout, return a 503 with the error body.
-3. On non-200 from SGLang, forward the response unchanged.
-4. On 200, run `SGLangMetricsTranslator.translate(text)` and cache the result.
+2. `httpx.AsyncClient.get(backend metrics URL, timeout=10s)`. On connection error or timeout, return a 503 with the error body.
+3. On non-200 from the backend, forward the response unchanged.
+4. On 200, run `backend.metrics.translate(text)` and cache the result.
 
-The 1-second cache exists because Prometheus scrape intervals overlap with k8s readiness probes, and SGLang's `/metrics` is non-trivial to compute. Concurrent scrapes share one fetch.
+The 1-second cache exists because Prometheus scrape intervals overlap with k8s readiness probes, and the backend's `/metrics` is non-trivial to compute. Concurrent scrapes share one fetch.
 
-## What the translator does
+## SGLang translator
 
 The translator passes through the SGLang exposition format line-by-line and applies three transformations:
 
@@ -68,7 +68,7 @@ Three series exist in vLLM's exposition format but have no direct SGLang equival
 
 ## Output format
 
-The handler always returns `Content-Type: text/plain; version=0.0.4; charset=utf-8` (the Prometheus exposition format MIME type), regardless of what SGLang sent. This protects against backends that mis-set the content type.
+The handler always returns `Content-Type: text/plain; version=0.0.4; charset=utf-8` (the Prometheus exposition format MIME type), regardless of what the backend sent. This protects against backends that mis-set the content type.
 
 ## What's deliberately not translated
 
@@ -77,7 +77,7 @@ The handler always returns `Content-Type: text/plain; version=0.0.4; charset=utf
 
 ## Health vs. metrics
 
-`/health` and `/metrics` are independent code paths. A failing `/health` does not affect `/metrics` and vice versa. `MetricsHandler` falls back to a 503 only when SGLang's `/metrics` itself is unreachable, not based on health state. This keeps Prometheus scrapes informative even during transient backend issues.
+`/health` and `/metrics` are independent code paths. A failing `/health` does not affect `/metrics` and vice versa. `MetricsHandler` falls back to a 503 only when the backend's `/metrics` itself is unreachable, not based on health state. This keeps Prometheus scrapes informative even during transient backend issues.
 
 ## TRT-LLM metrics translator
 

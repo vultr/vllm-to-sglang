@@ -1,6 +1,6 @@
 # Process supervisor
 
-The shim runs three child processes (haproxy, middleware, SGLang) inside a single container. The `Supervisor` class (`packages/vllm-shim/src/vllm_shim/cli/supervisor.py`) is what keeps them alive together and tears them down together.
+The shim runs three child processes (haproxy, middleware, backend) inside a single container. The `Supervisor` class (`packages/vllm-shim/src/vllm_shim/cli/supervisor.py`) is what keeps them alive together and tears them down together.
 
 It's deliberately small (about 80 lines) because the supervision contract is narrow: if any child dies, all children die; if a signal arrives, all children die.
 
@@ -81,7 +81,7 @@ The supervisor receives processes in declared order: `haproxy, middleware, backe
 
 - haproxy exits in milliseconds (it's a stateless reverse proxy with fast shutdown).
 - The middleware needs a few seconds to drain in-flight requests.
-- SGLang is slowest; it has to flush GPU buffers and tear down the inference engine.
+- The backend (SGLang or TRT-LLM) is slowest; it has to flush GPU buffers and tear down the inference engine.
 
 By `wait()`ing on haproxy first, then the middleware, the supervisor's bookkeeping naturally serializes around the right order. By the time it's waiting on the backend, the middleware has likely already drained whatever requests were in flight. The backend dies last, by which point nothing should still be talking to it.
 
@@ -91,7 +91,7 @@ The source comment makes this explicit and warns against restructuring; it is lo
 
 ## Grace and kill
 
-Each child gets up to (deadline - now) seconds to exit cleanly. If `wait()` times out, `kill()` sends SIGKILL. The default 25-second grace is set to comfortably exceed SGLang's typical clean-shutdown time (which is usually 5 to 15 seconds, dominated by GPU teardown).
+Each child gets up to (deadline - now) seconds to exit cleanly. If `wait()` times out, `kill()` sends SIGKILL. The default 25-second grace is set to comfortably exceed the backend's typical clean-shutdown time (5 to 15 seconds for SGLang, dominated by GPU teardown; TRT-LLM is in the same range).
 
 If you bump it, also consider container-level shutdown grace (`terminationGracePeriodSeconds` in k8s, default 30). The supervisor's grace must be less than or equal to the container grace, or k8s will SIGKILL the supervisor itself before it can kill its children, leading to PID-1 zombies.
 
@@ -99,8 +99,8 @@ If you bump it, also consider container-level shutdown grace (`terminationGraceP
 
 The supervisor's return code is the exit code of the *first* child to exit. That value propagates out of `entrypoint.main` and out of the `vllm` console script. Concretely:
 
-- SGLang exiting cleanly (e.g., on SIGTERM) → 0 → container exits 0.
-- SGLang crashing → its exit code → container exits non-zero → k8s notices.
+- The backend exiting cleanly (e.g., on SIGTERM) → 0 → container exits 0.
+- The backend crashing → its exit code → container exits non-zero → k8s notices.
 - A signal-driven shutdown also returns 0, because the run loop never enters the "first child died" branch; it just runs `_terminate_all` and the initial `rc = 0` survives.
 
 This is the right behavior for a k8s-style restart policy: clean shutdowns don't restart, crashes do.

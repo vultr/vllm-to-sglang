@@ -17,16 +17,17 @@ Today:
 ```
 docker/sglang/Dockerfile.cuda
 docker/sglang/Dockerfile.rocm
+docker/trtllm/Dockerfile.cuda
 ```
 
 Adding a backend or platform means adding a Dockerfile at the right path. Jenkins does the rest.
 
 ## Dockerfile shape
 
-Each Dockerfile follows the same pattern. From `docker/sglang/Dockerfile.rocm`:
+The simplest case is `docker/sglang/Dockerfile.cuda`, which is also the canonical pattern:
 
 ```dockerfile
-ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.11-rocm720-mi30x-20260508
+ARG BASE_IMAGE=lmsysorg/sglang:v0.5.11-cu130-runtime
 
 FROM ${BASE_IMAGE}
 
@@ -38,21 +39,53 @@ RUN apt-get update && \
 
 COPY pyproject.toml uv.lock /src/
 COPY packages /src/packages
-RUN uv pip install --system --no-cache \
+RUN uv pip install --no-cache \
+        --python /usr/bin/python \
+        --python-preference only-system \
+        --break-system-packages \
         /src/packages/vllm-shim \
         /src/packages/vllm-entrypoints \
-        /sgl-workspace/aiter
+        distro
 ```
 
 Five things going on:
 
-1. **`ARG BASE_IMAGE`**: pinned at the top so it's overridable per build (`--build-arg BASE_IMAGE=…`) but has a sane default. The default tracks the upstream SGLang image we're known to work against.
+1. **`ARG BASE_IMAGE`**: pinned at the top so it's overridable per build (`--build-arg BASE_IMAGE=…`) but has a sane default. The default tracks the upstream backend image we're known to work against.
 2. **Multi-stage `COPY --from=ghcr.io/astral-sh/uv:…`**: copies `uv` and `uvx` from the official Astral image. Avoids a curl-and-install dance and keeps the version explicit.
-3. **`apt-get install haproxy`**: the only system dependency. The base image already has CUDA/ROCm + Python + SGLang.
-4. **Source copy.** `pyproject.toml`, `uv.lock`, and `packages/` are dropped into `/src/`. The two workspace packages get installed into the system Python.
-5. **`aiter`** (ROCm only): installed from `/sgl-workspace/aiter` inside the SGLang ROCm image. AMD's attention kernel library; SGLang on ROCm needs it. CUDA's image has its equivalent baked in already.
+3. **`apt-get install haproxy`**: the only system package we add. The base image already has CUDA/ROCm + Python + the inference engine.
+4. **Source copy + targeted install.** `pyproject.toml`, `uv.lock`, and `packages/` go into `/src/`. The `--python /usr/bin/python` flag pins which interpreter receives the install (the SGLang/TRT-LLM CUDA images have other interpreters lying around; without this flag uv may pick the wrong one or download a managed Python). `--python-preference only-system` blocks the managed-Python fallback. `--break-system-packages` is needed because Ubuntu 24.04 marks the system site-packages as PEP 668 externally-managed; uv refuses without it.
+5. **`distro`** (SGLang CUDA only): a required `openai` runtime dependency that the upstream `lmsysorg/sglang:cu130-runtime` image bundles `openai` without. Without it, `import sglang.launch_server` fails. Added at the same install step.
 
-The CUDA Dockerfile is identical except the `BASE_IMAGE` default and no `aiter` install. Convergence is intentional; diverging the two on anything other than the base image is a smell.
+### Per-image divergence
+
+Convergence isn't a goal anymore: each base image has its own quirks the Dockerfile has to absorb.
+
+**`docker/trtllm/Dockerfile.cuda`** is the closest cousin to the canonical example: same install structure, no `distro` (the NVIDIA TRT-LLM image's `openai` install is complete), different `BASE_IMAGE` default (`nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14`).
+
+**`docker/sglang/Dockerfile.rocm`** diverges more substantially because the AMD/ROCm base image's Python is 3.10 and vllm-shim requires 3.12:
+
+```dockerfile
+# AMD's aiter kernels belong with SGLang in its existing 3.10 venv.
+RUN uv pip install --no-cache --python /opt/venv/bin/python /sgl-workspace/aiter
+
+# vllm-shim lives in its own Python 3.12 venv so it can satisfy
+# requires-python without disturbing SGLang's 3.10 environment.
+RUN uv venv /opt/shim --python 3.12
+
+COPY pyproject.toml uv.lock /src/
+COPY packages /src/packages
+RUN uv pip install --no-cache --python /opt/shim/bin/python \
+        /src/packages/vllm-shim \
+        /src/packages/vllm-entrypoints
+
+ENV PATH="/opt/shim/bin:/opt/venv/bin:${PATH}"
+```
+
+Three things to note:
+
+- **`aiter` lands in SGLang's 3.10 `/opt/venv`.** That's where SGLang lives and where it expects to find aiter at import time.
+- **vllm-shim lives in a separate 3.12 venv at `/opt/shim`.** The launcher spawns SGLang via the `sglang` console script (resolved via PATH); the script's shebang routes execution into `/opt/venv/bin/python`, so the two interpreters never need to share a `sys.path`. See `docs/backends.md` for the launcher fallback that makes this work.
+- **PATH ordering is load-bearing.** `/opt/shim/bin` first ensures `vllm` resolves to our entrypoint; `/opt/venv/bin` next ensures `sglang` resolves to upstream's wrapper.
 
 ## Build context
 
@@ -141,7 +174,22 @@ The `Build with Parameters` form exposes `BRANCH`, `TAG`, `BACKEND`, `PLATFORM`.
 
 ## Local builds
 
-For development, build directly without the registry:
+For development the easiest path is the per-backend compose files under `docker/<backend>/`:
+
+```bash
+# CUDA + SGLang
+docker compose -f docker/sglang/compose.cuda.yaml up
+
+# CUDA + TRT-LLM
+docker compose -f docker/trtllm/compose.cuda.yaml up
+
+# ROCm + SGLang
+docker compose -f docker/sglang/compose.rocm.yaml up
+```
+
+Each compose file builds the image, requests a GPU (NVIDIA via `deploy.resources`, AMD via `/dev/kfd` + `/dev/dri` device mounts and the `video`/`render` groups), mounts the host's HuggingFace cache at `/root/.cache/huggingface`, sets `VLLM_SHIM_BACKEND` correctly, and runs `vllm serve ${MODEL:-Qwen/Qwen2.5-0.5B-Instruct} --port 8000`. Override the model with `MODEL=...` in the environment.
+
+The Qwen 0.5B default is small enough to smoke-test on a single consumer GPU (~1 GB weights). For larger models, set `MODEL` and add `--tensor-parallel-size`, `--max-model-len`, etc. via the compose `command:` field or by running directly:
 
 ```bash
 docker build -f docker/sglang/Dockerfile.cuda -t vllm-shim:dev-cuda .
@@ -154,13 +202,14 @@ Note that `vllm serve` is the public CLI; `vllm-shim` doesn't expose its own com
 
 ## Image size
 
-The base SGLang images are large (~15 GB for ROCm, ~10 GB for CUDA). The shim adds:
+The upstream base images are large (SGLang ROCm ~15 GB, SGLang CUDA ~10 GB, TRT-LLM CUDA ~20 GB). The shim adds:
 
 - haproxy (~5 MB).
 - uv (~30 MB).
 - The two workspace packages (~50 KB of Python, plus FastAPI + httpx + uvicorn dependencies, ~20 MB total).
+- ROCm only: a separate Python 3.12 venv at `/opt/shim` (~50 MB for the managed CPython tarball plus the shim's deps).
 
-Total shim overhead: under 100 MB on top of whatever the base image weighs. The base image dominates by two orders of magnitude.
+Total shim overhead: under 100 MB on top of whatever the base image weighs (closer to 150 MB on ROCm). The base image dominates by two orders of magnitude.
 
 ## Adding a new platform or backend
 

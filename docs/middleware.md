@@ -1,14 +1,14 @@
 # Middleware
 
-The middleware is a FastAPI app that sits between haproxy and SGLang. It does three things: serves `/health` and `/metrics` directly, runs request-body filters before forwarding, and dumps full request/response context on backend errors.
+The middleware is a FastAPI app that sits between haproxy and the backend (SGLang or TRT-LLM). It does three things: serves `/health` and `/metrics` directly, runs request-body filters before forwarding, and dumps full request/response context on backend errors.
 
-It runs as its own process (spawned by `vllm_shim.cli.entrypoint`) so SGLang restarts don't take it with them. The entry point is `vllm_shim.middleware.app.run` (also exposed as the `vllm-shim-middleware` console script).
+It runs as its own process (spawned by `vllm_shim.cli.entrypoint`) so backend restarts don't take it with them. The entry point is `vllm_shim.middleware.app.run` (also exposed as the `vllm-shim-middleware` console script).
 
 ## Routes
 
 | Method | Path | Handler |
 |---|---|---|
-| `GET` | `/health` | `HealthHandler`: proxies `GET /health` to SGLang with a 5s timeout. On `ConnectError`/`TimeoutException`, returns `503 backend not ready`. |
+| `GET` | `/health` | `HealthHandler`: proxies `GET /health` to the backend with a 5s timeout. On `ConnectError`/`TimeoutException`, returns `503 backend not ready`. |
 | `GET` | `/metrics` | `MetricsHandler`: see `docs/metrics.md`. |
 | `*` | `/{path:path}` | `ProxyHandler`: catch-all for everything else. |
 
@@ -91,11 +91,11 @@ Subclass `RequestFilter`, implement the two methods, and add an instance to the 
 
 ## Error dumping
 
-Any 4xx/5xx from SGLang triggers `dump_error` (`packages/vllm-shim/src/vllm_shim/middleware/error_dump.py`). The dump is a structured block appended to the log file:
+Any 4xx/5xx from the backend triggers `dump_error` (`packages/vllm-shim/src/vllm_shim/middleware/error_dump.py`). The dump is a structured block appended to the log file; the backend's `name` (e.g. `sglang`, `trtllm`) is included in the header so multi-backend deployments can grep by engine:
 
 ```
 ============================================================
-[2026-05-09T14:23:01.012345] ERROR DUMP: SGLang returned HTTP 422
+[2026-05-09T14:23:01.012345] ERROR DUMP: sglang returned HTTP 422
 Path: /v1/chat/completions
 --- Request Body ---
 {
@@ -119,6 +119,6 @@ Outside a running lifespan (e.g., in tests using `ASGITransport`), `get_client` 
 
 ## What's deliberately not in the middleware
 
-- **No retry logic.** SGLang either responds or it doesn't; haproxy's health-gate handles outages, and vLLM clients handle their own retries.
+- **No retry logic.** The backend either responds or it doesn't; haproxy's health-gate handles outages, and vLLM clients handle their own retries.
 - **No request rewriting beyond filters.** URL paths and query strings are forwarded verbatim. Anything path-shaped goes in haproxy or in a new filter, not in the proxy handler itself.
-- **No response body filters.** All filters operate on requests. SGLang's response shape matches vLLM's well enough that no rewriting has been needed; if that changes, a `ResponseFilter` ABC parallel to `RequestFilter` is the natural extension.
+- **No response body filters.** All filters operate on requests. Both backends' response shapes match vLLM's well enough that no rewriting has been needed; if that changes, a `ResponseFilter` ABC parallel to `RequestFilter` is the natural extension.

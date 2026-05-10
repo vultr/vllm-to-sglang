@@ -1,6 +1,6 @@
 # Architecture
 
-vllm-shim runs three cooperating processes inside a single container, all spawned by one `vllm serve …` invocation. The shim's job is to make that invocation look identical to a stock vLLM container from the outside while internally driving SGLang.
+vllm-shim runs three cooperating processes inside a single container, all spawned by one `vllm serve …` invocation. The shim's job is to make that invocation look identical to a stock vLLM container from the outside while internally driving SGLang or TensorRT-LLM (selected via `VLLM_SHIM_BACKEND`; see `docs/backends.md`).
 
 ## The three processes
 
@@ -19,15 +19,15 @@ client
        │  :8001
        ▼
 ┌─────────────┐
-│   SGLang    │  inference engine + native /metrics
+│   backend   │  SGLang or TRT-LLM, plus native /metrics
 └─────────────┘
 ```
 
 | Process | Role | Why it exists |
 |---|---|---|
-| **haproxy** | Front-door L7 proxy | Turns SGLang-down into a clean 503 instead of a connect failure; gives k8s a `/health` it can probe before SGLang is ready. See `docs/haproxy.md`. |
-| **middleware** | FastAPI app on 127.0.0.1 | Rewrites request bodies, translates SGLang's `/metrics` into vLLM-named series, forwards everything else. See `docs/middleware.md`. |
-| **backend** | SGLang `launch_server` | The actual inference engine. Pluggable via the `Backend` ABC. See `docs/backends.md`. |
+| **haproxy** | Front-door L7 proxy | Turns backend-down into a clean 503 instead of a connect failure; gives k8s a `/health` it can probe before the backend is ready. See `docs/haproxy.md`. |
+| **middleware** | FastAPI app on 127.0.0.1 | Rewrites request bodies, translates the backend's `/metrics` into vLLM-named series, forwards everything else. See `docs/middleware.md`. |
+| **backend** | `sglang serve` or `trtllm-serve` | The actual inference engine. Pluggable via the `Backend` ABC. See `docs/backends.md`. |
 
 All three are children of the shim entrypoint (`vllm_shim.cli.entrypoint.main`). When any one dies, the supervisor tears down the others. See `docs/supervisor.md`.
 
@@ -38,7 +38,7 @@ The caller picks a single port (`--port`, default 8000). The shim derives the ot
 | Port | Role |
 |---|---|
 | `N`     | haproxy (the public listener; what `--port` named) |
-| `N + 1` | SGLang backend |
+| `N + 1` | backend |
 | `N + 2` | middleware |
 
 This is implemented in `PortAllocation.from_listen` (`packages/vllm-shim/src/vllm_shim/values/port_allocation.py`). The two derived ports are loopback-only; only the public port reaches the network.
@@ -49,10 +49,10 @@ The middleware listens on `0.0.0.0` for portability, but haproxy connects to it 
 
 A typical inference request flows like this:
 
-1. **Client → haproxy `:N`.** haproxy checks its `nbsrv(sglang)` ACL. If SGLang's TCP-level health check has failed three times in a row, haproxy returns the static 503 errorfile without ever opening a backend connection. Otherwise it forwards to the middleware.
+1. **Client → haproxy `:N`.** haproxy checks its `nbsrv(sglang)` ACL (the haproxy backend pool is named `sglang` regardless of which engine is actually running; that's a fixed string in the haproxy template, not a backend selector). If the backend's TCP-level health check has failed three times in a row, haproxy returns the static 503 errorfile without ever opening a backend connection. Otherwise it forwards to the middleware.
 2. **haproxy → middleware `:N+2`.** FastAPI routes the request: `/health` and `/metrics` go to dedicated handlers, everything else falls through to the catch-all proxy handler.
-3. **Middleware filter chain.** For `POST /v1/chat/completions`, every `RequestFilter` whose `applies_to(method, path)` returns `True` runs over the body in order: `StripVLLMParams` first, then `FixToolSchemas` (see `SGLangBackend.__init__`).
-4. **Middleware → SGLang `:N+1`.** The middleware uses `httpx.AsyncClient`. If the body indicated `stream: true`, it opens a streaming response and pipes chunks back unchanged.
+3. **Middleware filter chain.** For `POST /v1/chat/completions`, every `RequestFilter` whose `applies_to(method, path)` returns `True` runs over the body in order. The chain is backend-specific: `SGLangBackend.__init__` declares `StripVLLMParams` then `FixToolSchemas`; `TRTLLMBackend.__init__` ships an empty tuple (no body rewriting needed). Order is part of each backend's contract.
+4. **Middleware → backend `:N+1`.** The middleware uses `httpx.AsyncClient`. If the body indicated `stream: true`, it opens a streaming response and pipes chunks back unchanged.
 5. **Response.** Hop-by-hop headers (per RFC 7230 plus `content-length`) are stripped from the backend response before forwarding. A 4xx/5xx triggers `dump_error` to append a structured block to the shim error log.
 
 Health and metrics requests bypass the filter chain and the upstream filtering entirely; they're served by their own handlers (`HealthHandler`, `MetricsHandler`).
@@ -61,10 +61,10 @@ Health and metrics requests bypass the filter chain and the upstream filtering e
 
 The shim has two distinct notions of "healthy":
 
-- **haproxy → SGLang.** haproxy probes SGLang's `/health` directly with `httpchk GET /health` (`fall 3 rise 2`). If three checks in a row fail, the backend is "down" and `nbsrv(sglang) gt 0` becomes false, so haproxy serves the 503 errorfile.
-- **k8s liveness/readiness → haproxy.** k8s probes `/health` on the public port. haproxy's own health rule turns that into 200 when SGLang is up, 503 when it isn't, without ever forwarding the request.
+- **haproxy → backend.** haproxy probes the backend's `/health` directly with `httpchk GET /health` (`fall 3 rise 2`). If three checks in a row fail, the backend is "down" and `nbsrv(sglang) gt 0` becomes false, so haproxy serves the 503 errorfile.
+- **k8s liveness/readiness → haproxy.** k8s probes `/health` on the public port. haproxy's own health rule turns that into 200 when the backend is up, 503 when it isn't, without ever forwarding the request.
 
-This means k8s sees a clean `200`/`503` boundary even during SGLang startup or crash recovery, which is the property the vLLM production stack expects.
+This means k8s sees a clean `200`/`503` boundary even during backend startup or crash recovery, which is the property the vLLM production stack expects.
 
 ## Shutdown
 
@@ -83,7 +83,8 @@ The declared order matters for *drain quality* even though the SIGTERMs go out s
 | `vllm_shim.values` | Frozen dataclasses (`ParsedArgs`, `PortAllocation`, `ServiceAddress`) shared across layers. |
 | `vllm_shim.backend.base` | Backend ABCs: `Backend`, `ArgTranslator`, `Launcher`, `MetricsTranslator`, `RequestFilter`. |
 | `vllm_shim.backend.sglang` | The concrete SGLang backend (args, launcher, metrics, two filters). |
-| `vllm_shim.backend.registry` | `select()`: env-driven backend dispatch. |
+| `vllm_shim.backend.trtllm` | The concrete TensorRT-LLM backend (args, launcher, metrics, no filters). |
+| `vllm_shim.backend.registry` | `select()`: env-driven backend dispatch (`VLLM_SHIM_BACKEND`). |
 | `vllm_shim.middleware` | FastAPI app, three handlers (health, metrics, proxy), shared httpx client, error-dump helper. |
 | `vllm-entrypoints` package | Top-level `vllm/` namespace whose `__main__.py` files redirect `python -m vllm.X` invocations to the shim. See `docs/entrypoints.md`. |
 
@@ -91,8 +92,8 @@ The declared order matters for *drain quality* even though the SIGTERMs go out s
 
 The three-process design isn't a quirk; each layer carries a property the others can't:
 
-- A pure subprocess wrapper around SGLang couldn't translate metrics or rewrite request bodies.
-- A pure FastAPI middleware in front of SGLang couldn't give k8s a clean `/health` during SGLang startup (FastAPI is up while SGLang is still loading weights, which is exactly when the production stack will get angry).
+- A pure subprocess wrapper around the backend couldn't translate metrics or rewrite request bodies.
+- A pure FastAPI middleware in front of the backend couldn't give k8s a clean `/health` during backend startup (FastAPI is up while the backend is still loading weights, which is exactly when the production stack will get angry).
 - haproxy is the only layer that can hold open a TCP listener at the public port while the inference layer is still booting and turn that into a coherent HTTP-level 503.
 
-The middleware handles the OpenAI-protocol-shaped fixes (body rewrites, metric renames). haproxy handles the network-shaped concerns (listener, health gating, errorfile). SGLang handles the tokens.
+The middleware handles the OpenAI-protocol-shaped fixes (body rewrites, metric renames). haproxy handles the network-shaped concerns (listener, health gating, errorfile). The backend handles the tokens.

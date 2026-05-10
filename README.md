@@ -8,11 +8,11 @@ The intended deployment target is the [vLLM Production Stack](https://github.com
 
 When the production stack runs `vllm serve <model> [flags]`, the shim:
 
-- Translates the vLLM CLI into SGLang's CLI (renames, drops, pass-through). See `docs/argument-translation.md`.
-- Launches three cooperating processes inside the container: haproxy, a FastAPI middleware, and SGLang.
-- Exposes `/health` that reflects SGLang's actual readiness, even before SGLang finishes loading weights. See `docs/haproxy.md`.
-- Exposes `/metrics` translated from SGLang's native Prometheus exposition into vLLM-named series, so existing dashboards work unchanged. See `docs/metrics.md`.
-- Rewrites OpenAI request bodies to strip vLLM-only parameters and repair JSON schemas SGLang's strict parser would reject. See `docs/middleware.md`.
+- Translates the vLLM CLI into the backend's CLI (renames, drops, pass-through). See `docs/argument-translation.md`.
+- Launches three cooperating processes inside the container: haproxy, a FastAPI middleware, and the backend (SGLang or TRT-LLM).
+- Exposes `/health` that reflects the backend's actual readiness, even before it finishes loading weights. See `docs/haproxy.md`.
+- Exposes `/metrics` translated from the backend's native Prometheus exposition into vLLM-named series, so existing dashboards work unchanged. See `docs/metrics.md`.
+- Rewrites OpenAI request bodies to strip vLLM-only parameters and repair JSON schemas the backend's strict parser would reject. See `docs/middleware.md`.
 
 What it does *not* do: serve the vLLM Python library API. The shim intercepts the *server launch*, not library imports. See `docs/entrypoints.md`.
 
@@ -33,11 +33,11 @@ client
        │  :N+1 (loopback)
        ▼
 ┌─────────────┐
-│   SGLang    │  inference engine + native /metrics
+│   backend   │  SGLang or TRT-LLM, plus native /metrics
 └─────────────┘
 ```
 
-Three processes, one container, one supervisor. haproxy is the only public listener; the middleware and SGLang are loopback-only. See `docs/architecture.md` for the full picture (port allocation, request lifecycle, shutdown ordering).
+Three processes, one container, one supervisor. haproxy is the only public listener; the middleware and the backend are loopback-only. See `docs/architecture.md` for the full picture (port allocation, request lifecycle, shutdown ordering).
 
 ## Quickstart
 
@@ -61,6 +61,16 @@ docker run --rm --gpus all -p 8000:8000 vllm-shim:sglang-cuda \
     vllm serve mistralai/Mistral-7B-Instruct-v0.3 \
     --tensor-parallel-size 1 --max-model-len 4096
 ```
+
+For local dev there are convenience compose files under `docker/<backend>/`. They build the image, request a GPU, and pre-configure the HF cache mount:
+
+```bash
+docker compose -f docker/sglang/compose.cuda.yaml up
+docker compose -f docker/trtllm/compose.cuda.yaml up
+docker compose -f docker/sglang/compose.rocm.yaml up
+```
+
+Override the model with the `MODEL` env var (defaults to `Qwen/Qwen2.5-0.5B-Instruct`, small enough to smoke-test on a single consumer GPU).
 
 The `vllm` CLI inside the container is the shim, not real vLLM. Drop-in with no changes to the calling stack.
 
