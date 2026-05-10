@@ -60,7 +60,7 @@ pipeline {
                                             --file ${dockerfile} \\
                                             --tag ${imageRef} \\
                                             --cache-from type=registry,ref=${cacheRef} \\
-                                            --cache-to   type=registry,ref=${cacheRef},mode=max \\
+                                            --cache-to   type=registry,ref=${cacheRef},mode=min,ignore-error=true \\
                                             --push \\
                                             .
                                     """
