@@ -91,6 +91,7 @@ The recipe, end to end:
 ```
 __init__.py
 args.py        # XArgTranslator(ArgTranslator)
+env.py         # XEnvTranslator(EnvTranslator)
 launcher.py    # XLauncher(Launcher)
 metrics.py     # XMetricsTranslator(MetricsTranslator)
 backend.py     # XBackend(Backend)
@@ -99,9 +100,10 @@ filter/        # zero or more RequestFilter subclasses
 
 The package can be flatter or deeper depending on complexity; `filter/` only exists if there are filters.
 
-### 2. Implement the four components
+### 2. Implement the five components
 
 - **`ArgTranslator.translate`**: takes the passthrough flags from `ArgParser`, returns `(backend_argv, dropped_argv)`. Pure function. Build a flag-rewrite map analogous to `ARG_MAP`, plus any custom logic.
+- **`EnvTranslator.translate`**: takes a parent env mapping (typically `os.environ`), returns a child env dict. Pure function. Build an `ENV_MAP` of `VLLM_*` -> backend-side renames; the helper `translate_env_with_map` is usually all you need. See `docs/configuration.md` for the rationale.
 - **`Launcher.build_command`**: takes `(model, ServiceAddress, extra_args)`, returns the full subprocess argv. Prefer the backend's installed console script (e.g. `sglang serve`, `trtllm-serve`) so the launcher does not need to share a Python interpreter with the backend.
 - **`MetricsTranslator.translate`**: takes Prometheus exposition text, returns Prometheus exposition text. If the backend has no native `/metrics`, you can return synthesized vLLM-format output and skip the rename step.
 - **`RequestFilter`s**: only needed if the backend rejects request shapes vLLM clients send. Each one sets `applies_to(method, path)` to gate when it runs.
@@ -115,6 +117,7 @@ class XBackend(Backend):
 
     def __init__(self) -> None:
         self.args = XArgTranslator()
+        self.env = XEnvTranslator()
         self.metrics = XMetricsTranslator()
         self.launcher = XLauncher()
         self.filters = (...)

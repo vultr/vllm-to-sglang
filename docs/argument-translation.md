@@ -94,7 +94,7 @@ vLLM accepts `-tp`, `-pp`, `-dp`, `-q`, `-n`, `-r`, `-asc`, `-sc`, `-ac`, `-cc`,
 
 ## Full mapping
 
-For the canonical, current list see `ARG_MAP` itself (`packages/vllm-shim/src/vllm_shim/backend/sglang/args.py`). The README has a hand-curated table grouped by behavior; keep that in sync if you add entries.
+For the canonical, current list see `ARG_MAP` itself in each backend's `args.py` (`packages/vllm-shim/src/vllm_shim/backend/sglang/args.py` and `packages/vllm-shim/src/vllm_shim/backend/trtllm/args.py`).
 
 ## Adding a new translation
 

@@ -79,14 +79,14 @@ The `vllm` CLI inside the container is the shim, not real vLLM. Drop-in with no 
 Topic docs under `docs/`:
 
 - [`architecture.md`](docs/architecture.md): three-process design, port allocation, request lifecycle, shutdown.
-- [`argument-translation.md`](docs/argument-translation.md): vLLM-to-SGLang flag translation, the `ARG_MAP`, edge cases.
+- [`argument-translation.md`](docs/argument-translation.md): vLLM-to-SGLang and vLLM-to-TRT-LLM flag translation, the `ARG_MAP`s, the `-O*` and `--speculative-config` pre-processors, edge cases.
 - [`metrics.md`](docs/metrics.md): Prometheus exposition translation, derived series, caching.
 - [`middleware.md`](docs/middleware.md): FastAPI app, request-body filters, streaming, error dumping.
 - [`haproxy.md`](docs/haproxy.md): the front-door proxy, the `nbsrv()` health-gate trick, 503 errorfile.
 - [`supervisor.md`](docs/supervisor.md): process supervision, signal handling, shutdown ordering.
 - [`backends.md`](docs/backends.md): the `Backend` ABC, the registry, how to add a new backend.
 - [`entrypoints.md`](docs/entrypoints.md): the `vllm-entrypoints` namespace stub package.
-- [`configuration.md`](docs/configuration.md): every environment variable.
+- [`configuration.md`](docs/configuration.md): every environment variable, plus the small `VLLM_*`-to-backend-namespace env translation map.
 - [`build-and-deploy.md`](docs/build-and-deploy.md): per-`(backend, platform)` Dockerfile layout, Jenkins matrix, registry tagging.
 - [`development.md`](docs/development.md): uv workspace setup, tests, type checking, lint.
 

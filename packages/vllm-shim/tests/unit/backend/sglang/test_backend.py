@@ -1,6 +1,7 @@
 """Tests for the SGLangBackend wiring (component types and filter order)."""
 
 from vllm_shim.backend.base.args import ArgTranslator
+from vllm_shim.backend.base.env import EnvTranslator
 from vllm_shim.backend.base.filter import RequestFilter
 from vllm_shim.backend.base.launcher import Launcher
 from vllm_shim.backend.base.metrics import MetricsTranslator
@@ -22,6 +23,7 @@ def test_metrics_path_default() -> None:
 def test_components_match_protocols() -> None:
     b = SGLangBackend()
     assert isinstance(b.args, ArgTranslator)
+    assert isinstance(b.env, EnvTranslator)
     assert isinstance(b.metrics, MetricsTranslator)
     assert isinstance(b.launcher, Launcher)
     assert isinstance(b.filters, tuple)

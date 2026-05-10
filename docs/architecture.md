@@ -81,9 +81,9 @@ The declared order matters for *drain quality* even though the SIGTERMs go out s
 | `vllm_shim.cli.haproxy` | haproxy config templating, error file, and launch helper. |
 | `vllm_shim.cli.supervisor` | `Supervisor` and `ManagedProcess`: process lifecycle, signal handling. |
 | `vllm_shim.values` | Frozen dataclasses (`ParsedArgs`, `PortAllocation`, `ServiceAddress`) shared across layers. |
-| `vllm_shim.backend.base` | Backend ABCs: `Backend`, `ArgTranslator`, `Launcher`, `MetricsTranslator`, `RequestFilter`. |
-| `vllm_shim.backend.sglang` | The concrete SGLang backend (args, launcher, metrics, two filters). |
-| `vllm_shim.backend.trtllm` | The concrete TensorRT-LLM backend (args, launcher, metrics, no filters). |
+| `vllm_shim.backend.base` | Backend ABCs: `Backend`, `ArgTranslator`, `EnvTranslator`, `Launcher`, `MetricsTranslator`, `RequestFilter`. |
+| `vllm_shim.backend.sglang` | The concrete SGLang backend (args, env, launcher, metrics, two filters). |
+| `vllm_shim.backend.trtllm` | The concrete TensorRT-LLM backend (args, env, launcher, metrics, no filters). |
 | `vllm_shim.backend.registry` | `select()`: env-driven backend dispatch (`VLLM_SHIM_BACKEND`). |
 | `vllm_shim.middleware` | FastAPI app, three handlers (health, metrics, proxy), shared httpx client, error-dump helper. |
 | `vllm-entrypoints` package | Top-level `vllm/` namespace whose `__main__.py` files redirect `python -m vllm.X` invocations to the shim. See `docs/entrypoints.md`. |
