@@ -57,12 +57,12 @@ def test_rename_chat_template(translator: TRTLLMArgTranslator) -> None:
 
 def test_rename_revision(translator: TRTLLMArgTranslator) -> None:
     out, _ = translator.translate(["--revision", "abc123"])
-    assert out == ["--revision", "abc123"]
+    assert out == ["--hf_revision", "abc123"]
 
 
 def test_rename_hf_revision(translator: TRTLLMArgTranslator) -> None:
     out, _ = translator.translate(["--hf-revision", "abc123"])
-    assert out == ["--revision", "abc123"]
+    assert out == ["--hf_revision", "abc123"]
 
 
 def test_rename_enable_chunked_prefill(translator: TRTLLMArgTranslator) -> None:
@@ -160,3 +160,122 @@ def test_mixed_input_preserves_order(translator: TRTLLMArgTranslator) -> None:
         "--config", "/tmp/cfg.yaml",
     ]
     assert dropped == ["--swap-space", "4"]
+
+
+# === Short alias normalisation ==================================================
+
+def test_short_alias_tp(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["-tp", "8"])
+    assert out == ["--tp_size", "8"]
+
+
+def test_short_alias_pp(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["-pp", "2"])
+    assert out == ["--pp_size", "2"]
+
+
+def test_short_alias_drops(translator: TRTLLMArgTranslator) -> None:
+    cases = [
+        (["-asc", "4"], ["-asc", "4"]),
+        (["-q", "fp8"], ["-q", "fp8"]),
+        (["-n", "2"], ["-n", "2"]),
+        (["-r", "0"], ["-r", "0"]),
+        (["-dp", "8"], ["-dp", "8"]),
+        (["-dcp", "2"], ["-dcp", "2"]),
+        (["-pcp", "2"], ["-pcp", "2"]),
+        (["-ep"], ["-ep"]),
+        (["-sc", "{}"], ["-sc", "{}"]),
+    ]
+    for argv, expected_dropped in cases:
+        out, dropped = translator.translate(argv)
+        assert out == [], f"expected empty out for {argv}, got {out}"
+        assert dropped == expected_dropped, f"for {argv}"
+
+
+# === -O family ==================================================================
+
+def test_drop_optimization_level_long_form(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate(["--optimization-level", "3"])
+    assert out == []
+    assert dropped == ["--optimization-level", "3"]
+
+
+def test_drop_O3_short(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate(["-O3"])
+    assert out == []
+    assert dropped == ["-O3"]
+
+
+def test_drop_O_with_separate_value(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate(["-O", "3"])
+    assert out == []
+    assert dropped == ["-O", "3"]
+
+
+# === Speculative-config: drop entirely (no TRT-LLM CLI flag) ====================
+
+def test_drop_speculative_config(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate([
+        "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
+    ])
+    assert out == []
+    assert dropped == [
+        "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
+    ]
+
+
+def test_drop_speculative_config_equals_form(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate(['--speculative-config={"method":"mtp"}'])
+    assert out == []
+    assert dropped == ['--speculative-config={"method":"mtp"}']
+
+
+# === Newly-classified flag drops (representative sample) ========================
+
+def test_drop_enable_auto_tool_choice(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate(["--enable-auto-tool-choice"])
+    assert out == []
+    assert dropped == ["--enable-auto-tool-choice"]
+
+
+def test_drop_mm_encoder_tp_mode_equals(translator: TRTLLMArgTranslator) -> None:
+    out, dropped = translator.translate(["--mm-encoder-tp-mode=data"])
+    assert out == []
+    assert dropped == ["--mm-encoder-tp-mode=data"]
+
+
+def test_drop_headless(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--headless"])
+    assert out == []
+
+
+def test_drop_allowed_origins(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--allowed-origins", '["*"]'])
+    assert out == []
+
+
+# === Renames added in this pass =================================================
+
+def test_rename_kv_cache_dtype(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--kv-cache-dtype", "fp8"])
+    assert out == ["--kv_cache_dtype", "fp8"]
+
+
+def test_rename_reasoning_parser(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--reasoning-parser", "deepseek-v3"])
+    assert out == ["--reasoning_parser", "deepseek-v3"]
+
+
+def test_rename_tool_call_parser_to_tool_parser(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--tool-call-parser", "qwen3_coder"])
+    assert out == ["--tool_parser", "qwen3_coder"]
+
+
+def test_rename_otlp_traces_endpoint(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--otlp-traces-endpoint", "http://x:4317"])
+    assert out == ["--otlp_traces_endpoint", "http://x:4317"]
+
+
+def test_rename_video_pruning_rate(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--video-pruning-rate", "0.5"])
+    assert out == ["--video_pruning_rate", "0.5"]

@@ -120,6 +120,38 @@ def translate_prom_line(line: str, name_map: dict[str, str]) -> list[str]:
     return [line]
 
 
+def strip_optimization_level(args: list[str]) -> tuple[list[str], list[str]]:
+    """Strip vLLM's ``-O`` family (``-O3``, ``-O=3``, ``-Odecode``, ``-O 3``).
+
+    vLLM's FlexibleArgumentParser pre-expands these into ``--optimization-level
+    <value>`` before argparse sees them. We never go through that parser, so
+    we receive the raw shorthand and have to handle it here. Neither SGLang
+    nor TRT-LLM has a direct equivalent CLI knob, so every form gets dropped;
+    the ``--optimization-level`` long form is dropped via each backend's
+    ARG_MAP.
+    """
+    out: list[str] = []
+    dropped: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "-O":
+            dropped.append(arg)
+            if i + 1 < len(args):
+                dropped.append(args[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if arg.startswith("-O") and not arg.startswith("--"):
+            dropped.append(arg)
+            i += 1
+            continue
+        out.append(arg)
+        i += 1
+    return out, dropped
+
+
 def vllm_synthesized_tail() -> list[str]:
     """Return the vLLM-shape synthesized series every backend emits at the end of /metrics.
 

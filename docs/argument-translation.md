@@ -81,6 +81,17 @@ Two reasons an arg shows up in `dropped`:
 
 The `dropped` list is currently informational; `entrypoint.main` discards it (the variable is named `_dropped`). Worth keeping in the API in case a future caller wants to log or surface it.
 
+### Beyond ARG_MAP: the two pre-processors
+
+A handful of vLLM inputs need handling that the (flag, value) shape of `ARG_MAP` can't express, so the SGLang translator runs two pre-processors before `translate_with_arg_map`:
+
+1. **`strip_optimization_level`** (in `vllm_shim.backend._shared`, used by both backends). vLLM's `FlexibleArgumentParser` rewrites `-O3` / `-O=3` / `-Odecode` / `-O 3` into `--optimization-level <value>` before argparse runs. The shim's parser does no such rewrite, so the `-O…` shorthand arrives literally and has to be handled separately. Neither SGLang nor TRT-LLM has a CLI knob equivalent to vLLM's compilation level (SGLang's nearest knob is `--enable-torch-compile`), so every form is dropped. The `--optimization-level` long form is a regular `(None, True)` ARG_MAP entry.
+2. **`_split_speculative_config`** (SGLang-only). vLLM's `--speculative-config` / `-sc` carries a JSON blob, and SGLang exposes the same configuration through several flat flags (`--speculative-algorithm`, `--speculative-num-steps`, …). The pre-processor extracts the JSON, parses it, and emits the SGLang flag list inline. Currently only `method=mtp` is recognised; the mapping is the SGLang-recommended MTP recipe (`EAGLE` algorithm, `num_steps = N`, `eagle_topk = 1`, `num_draft_tokens = N + 1`) from `repos/sglang/docs/basic_usage/deepseek_v32.md` and `repos/sglang/test/registered/8-gpu-models/test_deepseek_v3_mtp.py`. Unknown methods, malformed JSON, or missing `num_speculative_tokens` cause the flag to be dropped (and added to `dropped`); SGLang then runs without speculative decoding. TRT-LLM has no equivalent CLI surface, so the TRT-LLM translator just drops `--speculative-config` via ARG_MAP.
+
+### Short aliases
+
+vLLM accepts `-tp`, `-pp`, `-dp`, `-q`, `-n`, `-r`, `-asc`, `-sc`, `-ac`, `-cc`, `-ep`, `-dcp`, `-pcp`, and the `-dpa…-dpr` family for various data-parallel knobs. Neither SGLang nor TRT-LLM defines any of these. The two ARG_MAPs include explicit entries for all of them: those whose long-form has an equivalent are renamed to the long form (`-tp` → `--tp` for SGLang, `--tp_size` for TRT-LLM); the rest are dropped (with their value, where applicable).
+
 ## Full mapping
 
 For the canonical, current list see `ARG_MAP` itself (`packages/vllm-shim/src/vllm_shim/backend/sglang/args.py`). The README has a hand-curated table grouped by behavior; keep that in sync if you add entries.
@@ -117,4 +128,6 @@ The canonical, current list lives in `vllm_shim.backend.trtllm.args.ARG_MAP`.
 
 One semantic mismatch worth flagging: `--gpu-memory-utilization` maps to `--kv_cache_free_gpu_memory_fraction`, but the two values mean different things. vLLM's value is the fraction of total GPU memory the engine is allowed to use; TRT-LLM's is the fraction of free GPU memory reserved for KV cache after weights and activations are allocated. The numeric value is forwarded unchanged. Same pragmatic compromise SGLang carries.
 
-YAML config injection is intentionally out of scope. Five vLLM flags (`--seed`, `--enable-prefix-caching`, `--no-enable-prefix-caching`, `--enforce-eager`, `--max-cpu-loras`) have clean YAML equivalents in TRT-LLM's `--config <yaml>` extra-llm-api-options surface. Honoring them via the shim would require an ABC change or breaking the translator's pure-function property; operators who need them pass `--config their.yaml` directly through the shim's pass-through.
+Many vLLM flags (`--seed`, `--enable-prefix-caching`, `--no-enable-prefix-caching`, `--enforce-eager`, `--max-cpu-loras`, and others) map cleanly to entries in TRT-LLM's `--config <yaml>` extra-llm-api-options surface, but expanding YAML in the shim would require an ABC change or break the translator's pure-function property. Operators who need any of them pass `--config their.yaml` directly through the shim's pass-through; the YAML can carry whatever extra knobs `trtllm-serve`'s LLM API supports.
+
+Coverage parity with the SGLang map: every vLLM flag (engine-level and frontend-level, in both dash and underscore form, plus the short aliases) has an explicit decision in `vllm_shim.backend.trtllm.args.ARG_MAP`. Source of truth for the trtllm-serve flag set is the click options in `repos/TensorRT-LLM/tensorrt_llm/commands/serve.py`. The same `strip_optimization_level` pre-processor handles `-O…` shorthands; speculative decoding has no `trtllm-serve` CLI flag, so `--speculative-config` is dropped (operators wanting speculative decoding configure it via `--config their.yaml`).
