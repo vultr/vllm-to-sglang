@@ -8,6 +8,14 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends haproxy && \
     rm -rf /var/lib/apt/lists/*
 
+# Upgrade transformers past the base image's pinned version, which lags
+# behind newer model architectures (Kimi K2.6 etc.).
+RUN uv pip install --no-cache \
+        --python /usr/bin/python \
+        --python-preference only-system \
+        --break-system-packages \
+        --upgrade transformers
+
 COPY pyproject.toml uv.lock /src/
 COPY packages /src/packages
 RUN uv pip install --no-cache \

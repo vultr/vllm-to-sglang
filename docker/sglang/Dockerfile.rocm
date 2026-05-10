@@ -11,6 +11,10 @@ RUN apt-get update && \
 # AMD's aiter kernels belong with SGLang in its existing 3.10 venv.
 RUN uv pip install --no-cache --python /opt/venv/bin/python /sgl-workspace/aiter
 
+# Upgrade transformers in SGLang's venv past the base image's pinned version,
+# which lags behind newer model architectures (Kimi K2.6 etc.).
+RUN uv pip install --no-cache --python /opt/venv/bin/python --upgrade transformers
+
 # vllm-shim lives in its own Python 3.12 venv so it can satisfy
 # requires-python without disturbing SGLang's 3.10 environment. The launcher
 # spawns SGLang via the `sglang` console script in /opt/venv/bin; the script's
