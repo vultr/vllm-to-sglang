@@ -122,7 +122,7 @@ docker build -f docker/sglang/Dockerfile.cuda -t vllm-shim:sglang-cuda .
 Or via Jenkins (default `BACKEND=sglang`, `PLATFORM=rocm`; final tag is `${TAG}-${BACKEND}-${PLATFORM}`):
 
 ```bash
-curl -X POST "https://jenkins.sweetapi.com/job/vllm-shim/buildWithParameters" \
+curl -X POST "https://jenkins.sweetapi.com/job/vllm-to-sglang/buildWithParameters" \
   -d TAG=nightly \
   -d BACKEND=sglang \
   -d PLATFORM=rocm
