@@ -10,6 +10,12 @@ RUN apt-get update && \
 
 COPY pyproject.toml uv.lock /src/
 COPY packages /src/packages
-RUN uv pip install --system --no-cache \
+# `distro` is a required openai dep that the upstream SGLang CUDA image
+# bundles openai without; without it `import sglang.launch_server` fails.
+RUN uv pip install --no-cache \
+        --python /usr/bin/python \
+        --python-preference only-system \
+        --break-system-packages \
         /src/packages/vllm-shim \
-        /src/packages/vllm-entrypoints
+        /src/packages/vllm-entrypoints \
+        distro

@@ -10,6 +10,9 @@ RUN apt-get update && \
 
 COPY pyproject.toml uv.lock /src/
 COPY packages /src/packages
-RUN uv pip install --system --no-cache \
+RUN uv pip install --no-cache \
+        --python /usr/bin/python \
+        --python-preference only-system \
+        --break-system-packages \
         /src/packages/vllm-shim \
         /src/packages/vllm-entrypoints

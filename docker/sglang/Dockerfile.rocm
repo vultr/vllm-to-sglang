@@ -8,9 +8,22 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends haproxy && \
     rm -rf /var/lib/apt/lists/*
 
+# AMD's aiter kernels belong with SGLang in its existing 3.10 venv.
+RUN uv pip install --no-cache --python /opt/venv/bin/python /sgl-workspace/aiter
+
+# vllm-shim lives in its own Python 3.12 venv so it can satisfy
+# requires-python without disturbing SGLang's 3.10 environment. The launcher
+# spawns SGLang via the `sglang` console script in /opt/venv/bin; the script's
+# shebang routes execution back into SGLang's 3.10 interpreter, so the two
+# environments do not need to share a sys.path.
+RUN uv venv /opt/shim --python 3.12
+
 COPY pyproject.toml uv.lock /src/
 COPY packages /src/packages
-RUN uv pip install --system --no-cache \
+RUN uv pip install --no-cache --python /opt/shim/bin/python \
         /src/packages/vllm-shim \
-        /src/packages/vllm-entrypoints \
-        /sgl-workspace/aiter
+        /src/packages/vllm-entrypoints
+
+# /opt/shim/bin first so `vllm` resolves to our entrypoint;
+# /opt/venv/bin so the launcher can resolve `sglang`.
+ENV PATH="/opt/shim/bin:/opt/venv/bin:${PATH}"
