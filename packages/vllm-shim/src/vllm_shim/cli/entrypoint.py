@@ -33,9 +33,9 @@ def main() -> int:
     # Middleware reads its config from env, not argv, so it can be launched independently
     # (e.g. via the vllm-shim-middleware console script in tests).
     middleware_env = os.environ.copy()
-    middleware_env["SGLANG_HOST"] = backend_addr.host
-    middleware_env["SGLANG_PORT"] = str(backend_addr.port)
-    middleware_env["MIDDLEWARE_PORT"] = str(middleware_addr.port)
+    middleware_env["VLLM_SHIM_BACKEND_HOST"] = backend_addr.host
+    middleware_env["VLLM_SHIM_BACKEND_PORT"] = str(backend_addr.port)
+    middleware_env["VLLM_SHIM_MIDDLEWARE_PORT"] = str(middleware_addr.port)
     middleware_proc = subprocess.Popen(
         [sys.executable, "-m", "vllm_shim.middleware"],
         env=middleware_env,

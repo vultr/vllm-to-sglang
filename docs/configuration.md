@@ -29,7 +29,7 @@ Valid values are `sglang` and `trtllm`; anything else raises `ValueError("Unknow
 
 The default is `qwen3_coder` because the Qwen3 family is the current target deployment. Override to `mistral`, `llama3`, etc. when serving a different model family. See SGLang's own docs for the full list of supported parsers.
 
-### `SGLANG_HOST`
+### `VLLM_SHIM_BACKEND_HOST`
 
 | | |
 |---|---|
@@ -39,7 +39,9 @@ The default is `qwen3_coder` because the Qwen3 family is the current target depl
 
 Set automatically by the supervisor when it spawns the middleware (the supervisor passes the `--host` value the caller provided). Not normally set by hand; it exists to keep the middleware as a stand-alone process that can read its config from the environment.
 
-### `SGLANG_PORT`
+These names are deliberately neutral. The middleware uses the same env vars whether the backend is SGLang or TRT-LLM, and the previous names (`SGLANG_HOST` / `SGLANG_PORT`) collided with real SGLang env vars - operators setting them in a k8s `env:` block would have had the supervisor silently overwrite their values.
+
+### `VLLM_SHIM_BACKEND_PORT`
 
 | | |
 |---|---|
@@ -47,9 +49,9 @@ Set automatically by the supervisor when it spawns the middleware (the superviso
 | Read by | `vllm_shim.middleware.app.run` |
 | Effect | The port the middleware connects to when forwarding to the backend. |
 
-Set automatically by the supervisor (computed as `--port + 1`). Same role as `SGLANG_HOST`: the middleware doesn't have to know about port allocation.
+Set automatically by the supervisor (computed as `--port + 1`). Same role as `VLLM_SHIM_BACKEND_HOST`: the middleware doesn't have to know about port allocation.
 
-### `MIDDLEWARE_PORT`
+### `VLLM_SHIM_MIDDLEWARE_PORT`
 
 | | |
 |---|---|
@@ -57,7 +59,7 @@ Set automatically by the supervisor (computed as `--port + 1`). Same role as `SG
 | Read by | `vllm_shim.middleware.app.run` |
 | Effect | The port the middleware listens on. |
 
-Set automatically by the supervisor (computed as `--port + 2`). The middleware binds `0.0.0.0:{MIDDLEWARE_PORT}`; haproxy connects via `127.0.0.1:{MIDDLEWARE_PORT}`.
+Set automatically by the supervisor (computed as `--port + 2`). The middleware binds `0.0.0.0:{VLLM_SHIM_MIDDLEWARE_PORT}`; haproxy connects via `127.0.0.1:{VLLM_SHIM_MIDDLEWARE_PORT}`.
 
 ### TRT-LLM env vars
 
@@ -106,9 +108,9 @@ For completeness, here's what the supervisor injects into the middleware subproc
 
 ```python
 middleware_env = os.environ.copy()
-middleware_env["SGLANG_HOST"] = backend_addr.host
-middleware_env["SGLANG_PORT"] = str(backend_addr.port)
-middleware_env["MIDDLEWARE_PORT"] = str(middleware_addr.port)
+middleware_env["VLLM_SHIM_BACKEND_HOST"] = backend_addr.host
+middleware_env["VLLM_SHIM_BACKEND_PORT"] = str(backend_addr.port)
+middleware_env["VLLM_SHIM_MIDDLEWARE_PORT"] = str(middleware_addr.port)
 ```
 
 The middleware inherits the rest of the parent environment (so `VLLM_SHIM_BACKEND`, `VLLM_SHIM_LOG`, etc., flow through naturally).

@@ -148,7 +148,7 @@ The shim doesn't run end-to-end without a real inference backend, but you can ex
 
 ```bash
 # Run just the middleware against a fake SGLang
-SGLANG_HOST=localhost SGLANG_PORT=9999 MIDDLEWARE_PORT=8080 \
+VLLM_SHIM_BACKEND_HOST=localhost VLLM_SHIM_BACKEND_PORT=9999 VLLM_SHIM_MIDDLEWARE_PORT=8080 \
     uv run vllm-shim-middleware
 ```
 

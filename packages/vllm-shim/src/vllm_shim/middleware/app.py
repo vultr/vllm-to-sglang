@@ -40,9 +40,9 @@ def run() -> None:
     """Entry point for `python -m vllm_shim.middleware` and the
     `vllm-shim-middleware` console script."""
     backend_addr = ServiceAddress(
-        os.environ.get("SGLANG_HOST", "127.0.0.1"),
-        int(os.environ.get("SGLANG_PORT", "8001")),
+        os.environ.get("VLLM_SHIM_BACKEND_HOST", "127.0.0.1"),
+        int(os.environ.get("VLLM_SHIM_BACKEND_PORT", "8001")),
     )
-    listen_port = int(os.environ.get("MIDDLEWARE_PORT", "8002"))
+    listen_port = int(os.environ.get("VLLM_SHIM_MIDDLEWARE_PORT", "8002"))
     app = create_app(registry.select(), backend_addr)
     uvicorn.run(app, host="0.0.0.0", port=listen_port, log_level="warning")

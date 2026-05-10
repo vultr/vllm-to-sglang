@@ -31,7 +31,7 @@ docker build -f docker/trtllm/Dockerfile.cuda  -t vllm-shim:trtllm-cuda .
 There is no end-to-end local run; the shim needs a real backend image to serve. To exercise just the middleware against a fake backend:
 
 ```bash
-SGLANG_HOST=localhost SGLANG_PORT=9999 MIDDLEWARE_PORT=8080 uv run vllm-shim-middleware
+VLLM_SHIM_BACKEND_HOST=localhost VLLM_SHIM_BACKEND_PORT=9999 VLLM_SHIM_MIDDLEWARE_PORT=8080 uv run vllm-shim-middleware
 ```
 
 ## Architecture you must hold in your head
@@ -91,7 +91,7 @@ The shim has no config file. Behavior is driven by CLI args (the `vllm serve` in
 | `VLLM_SHIM_BACKEND`        | `sglang`         | `sglang` or `trtllm`. |
 | `VLLM_SHIM_LOG`            | `/tmp/vllm-shim.log` | Where 4xx/5xx error dumps are appended. Read once at module import. |
 | `SGLANG_TOOL_CALL_PARSER`  | `qwen3_coder`    | Forwarded to SGLang's `--tool-call-parser`. |
-| `SGLANG_HOST` / `SGLANG_PORT` / `MIDDLEWARE_PORT` | derived | Set by the supervisor when spawning the middleware; not normally set by hand. |
+| `VLLM_SHIM_BACKEND_HOST` / `VLLM_SHIM_BACKEND_PORT` / `VLLM_SHIM_MIDDLEWARE_PORT` | derived | Set by the supervisor when spawning the middleware; not normally set by hand. |
 | `TRTLLM_BACKEND`           | `pytorch`        | `pytorch`, `tensorrt`, or `_autodeploy`. |
 | `TRTLLM_TOOL_PARSER`       | `qwen3_coder`    | Forwarded to `trtllm-serve --tool_parser`. |
 | `TRTLLM_REASONING_PARSER`  | unset            | If set, appends `--reasoning_parser <value>`. |
