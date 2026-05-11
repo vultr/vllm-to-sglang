@@ -65,8 +65,9 @@ The backend layer must not import from `vllm_shim.middleware` or `vllm_shim.cli`
 
 ### Two-stage CLI translation
 
-1. `ArgParser` (`vllm_shim.cli.parser`) extracts only what the supervisor needs (`model`, `host`, `port`) and routes the rest into `passthrough` verbatim. Backend-agnostic.
-2. The selected backend's `ArgTranslator` rewrites `passthrough` via an `ARG_MAP` dict whose values are `(target_name | None, has_value: bool)`. Anything not in the map passes through unchanged. `=`-form and underscore variants are explicit map keys (no normalization layer). See `docs/argument-translation.md`.
+1. `ArgParser` (`vllm_shim.cli.parser`) extracts only what the supervisor needs (`model`, `host`, `port`, `revision`) and routes the rest into `passthrough` verbatim. Backend-agnostic.
+2. Between stages, the entrypoint calls `resolve_model` (`vllm_shim.cli.model_resolver`) to turn HF repo IDs into local snapshot directories via `huggingface_hub.snapshot_download` (no-op on cache hit; honours `HF_HOME` and `HF_HUB_OFFLINE`). When this rewrites the path, the entrypoint also injects `--served-model-name <original>` so `/v1/models` keeps advertising what clients are calling with. Local-path inputs pass through unchanged and trigger no injection.
+3. The selected backend's `ArgTranslator` rewrites `passthrough` via an `ARG_MAP` dict whose values are `(target_name | None, has_value: bool)`. Anything not in the map passes through unchanged. `=`-form and underscore variants are explicit map keys (no normalization layer). See `docs/argument-translation.md`.
 
 ### The `vllm-entrypoints` stub package
 

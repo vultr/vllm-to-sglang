@@ -15,6 +15,7 @@ class ArgParser:
         model: str | None = None
         host = "0.0.0.0"
         port = 8000
+        revision: str | None = None
         passthrough: list[str] = []
 
         i = 0
@@ -53,6 +54,20 @@ class ArgParser:
                 i += 1
                 continue
 
+            # --revision is captured for the model resolver (which needs to know
+            # which HF snapshot to materialise) and also kept in passthrough so
+            # the backend sees the same revision the user requested.
+            if arg == "--revision" and i + 1 < len(args):
+                revision = args[i + 1]
+                passthrough.extend([arg, args[i + 1]])
+                i += 2
+                continue
+            if arg.startswith("--revision="):
+                revision = arg.split("=", 1)[1]
+                passthrough.append(arg)
+                i += 1
+                continue
+
             if not arg.startswith("-") and model is None:
                 model = arg
                 i += 1
@@ -63,4 +78,10 @@ class ArgParser:
 
         if model is None:
             raise ValueError("No model specified in vLLM args")
-        return ParsedArgs(model=model, host=host, port=port, passthrough=tuple(passthrough))
+        return ParsedArgs(
+            model=model,
+            host=host,
+            port=port,
+            passthrough=tuple(passthrough),
+            revision=revision,
+        )

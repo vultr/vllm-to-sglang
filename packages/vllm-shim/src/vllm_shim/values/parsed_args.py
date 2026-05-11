@@ -13,3 +13,4 @@ class ParsedArgs:
     host: str
     port: int
     passthrough: tuple[str, ...]
+    revision: str | None = None

@@ -15,13 +15,22 @@ The parser walks `argv` and only consumes:
 - `--host` / `--host=…`: captured for haproxy and SGLang. Default `0.0.0.0`.
 - `--port` / `--port=…`: captured for the port allocation. Default `8000`.
 - `--model` / `--model-name` (and `=`-form): captured as the model identifier.
+- `--revision` / `--revision=…`: captured for `resolve_model` (see below). Kept in `passthrough` too, so the backend sees the same revision the caller requested.
 - A bare positional that doesn't start with `-`, when no model has been seen yet: captured as the model.
 
 Everything else is appended to `passthrough` in original order. The result is a `ParsedArgs` (`packages/vllm-shim/src/vllm_shim/values/parsed_args.py`):
 
 ```python
-ParsedArgs(model=str, host=str, port=int, passthrough=tuple[str, ...])
+ParsedArgs(model=str, host=str, port=int, passthrough=tuple[str, ...], revision=str | None)
 ```
+
+### Between stages: `resolve_model`
+
+After parsing and before stage 2, `entrypoint.main` calls `resolve_model(parsed.model, revision=parsed.revision)` (`vllm_shim.cli.model_resolver`). If `parsed.model` is already an existing local directory it passes through; otherwise it is treated as an HF repo ID and resolved to a local snapshot directory via `huggingface_hub.snapshot_download`, which is a metadata-only call when the snapshot is already cached under `HF_HOME` and honours `HF_HUB_OFFLINE`. The resolved path is what the backend launcher receives as `--model-path`.
+
+This sidesteps `trust_remote_code` tokenizers that hardcode `os.path.join(model_arg, "...")` and only work when the caller hands them a directory (Kimi K2.6's fast tokenizer is the motivating example). It also means Production Stack's existing `/data`-mounted `HF_HOME` cache is reused transparently across launches.
+
+When resolution does change the model arg, `entrypoint.main` injects `--served-model-name <original>` into `passthrough` (unless the caller already supplied one), so `/v1/models` keeps advertising the repo ID clients are calling with rather than the resolved snapshot path.
 
 If no model was found, the parser raises `ValueError("No model specified in vLLM args")`. That's the only failure mode at this stage; unknown flags are not errors here, they're just deferred to the translator.
 

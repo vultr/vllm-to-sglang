@@ -42,3 +42,20 @@ def test_model_via_named_flag() -> None:
 def test_missing_model_raises() -> None:
     with pytest.raises(ValueError, match="No model"):
         ArgParser().parse(["serve", "--host", "h"])
+
+
+def test_default_revision_is_none() -> None:
+    p = ArgParser().parse(["serve", "m"])
+    assert p.revision is None
+
+
+def test_extracts_revision_space_form_and_keeps_in_passthrough() -> None:
+    p = ArgParser().parse(["serve", "m", "--revision", "abc123"])
+    assert p.revision == "abc123"
+    assert p.passthrough == ("--revision", "abc123")
+
+
+def test_extracts_revision_equals_form_and_keeps_in_passthrough() -> None:
+    p = ArgParser().parse(["serve", "m", "--revision=abc123"])
+    assert p.revision == "abc123"
+    assert p.passthrough == ("--revision=abc123",)
