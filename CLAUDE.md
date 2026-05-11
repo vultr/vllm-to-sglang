@@ -69,6 +69,10 @@ The backend layer must not import from `vllm_shim.middleware` or `vllm_shim.cli`
 2. Between stages, the entrypoint calls `resolve_model` (`vllm_shim.cli.model_resolver`) to turn HF repo IDs into local snapshot directories via `huggingface_hub.snapshot_download` (no-op on cache hit; honours `HF_HOME` and `HF_HUB_OFFLINE`). When this rewrites the path, the entrypoint also injects `--served-model-name <original>` so `/v1/models` keeps advertising what clients are calling with. Local-path inputs pass through unchanged and trigger no injection.
 3. The selected backend's `ArgTranslator` rewrites `passthrough` via an `ARG_MAP` dict whose values are `(target_name | None, has_value: bool)`. Anything not in the map passes through unchanged. `=`-form and underscore variants are explicit map keys (no normalization layer). See `docs/argument-translation.md`.
 
+### Launch-time info dump
+
+Once translation is settled the entrypoint calls `vllm_shim.cli.info.collect`, writes the result as JSON to `/tmp/vllm-shim-info.json`, and prints a short summary to stderr. The dump captures the original argv, selected backend, original vs. resolved model path, revision, port allocation, the backend invocation, dropped args, env renames produced by the backend's `EnvTranslator`, the active shim config knobs, and the HF cache state. The `vllm-shim-info` console script (registered in `packages/vllm-shim/pyproject.toml`) just prints that file, so an operator can `kubectl exec` into the pod and run it instead of grepping logs. The set of shim-config and HF env keys surfaced lives in `_SHIM_CONFIG_KEYS` and `_HF_KEYS` in `vllm_shim.cli.info`; keep those in sync with the Configuration surface table below when adding knobs.
+
 ### The `vllm-entrypoints` stub package
 
 `packages/vllm-entrypoints/src/vllm/` is a namespace stub whose `__main__.py` files redirect every `python -m vllm.X` invocation (e.g. `vllm.entrypoints.openai.api_server`) into `vllm_shim.cli.entrypoint.main`. Each leaf module is three lines: import `main`, `raise SystemExit(main())`. Do not add real vLLM API surface here; it exists purely to occupy the import namespace. See `docs/entrypoints.md`.

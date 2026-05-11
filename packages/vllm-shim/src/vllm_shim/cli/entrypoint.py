@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from vllm_shim.backend import registry
+from vllm_shim.cli import info
 from vllm_shim.cli.haproxy import HAProxyConfig, write_error_file
 from vllm_shim.cli.haproxy import launch as launch_haproxy
 from vllm_shim.cli.model_resolver import resolve_model
@@ -34,7 +35,8 @@ def _pin_served_model_name(
 
 def main() -> int:
     """Spawn the three child processes and block in the supervisor until one exits."""
-    parsed = ArgParser().parse(sys.argv[1:])
+    original_argv = tuple(sys.argv[1:])
+    parsed = ArgParser().parse(list(original_argv))
     backend = registry.select()
 
     ports = PortAllocation.from_listen(parsed.port)
@@ -63,7 +65,7 @@ def main() -> int:
 
     resolved_model = resolve_model(parsed.model, revision=parsed.revision)
     passthrough = _pin_served_model_name(parsed.passthrough, parsed.model, resolved_model)
-    backend_args, _dropped = backend.args.translate(passthrough)
+    backend_args, dropped = backend.args.translate(passthrough)
 
     backend_cmd = backend.launcher.build_command(resolved_model, backend_addr, backend_args)
     # Auto-translate selected vLLM env vars into the backend's namespace so
@@ -71,6 +73,26 @@ def main() -> int:
     # the SGLang/TRT-LLM side. See the backend's env.ENV_MAP for what's
     # in scope; vLLM-side names stay in place and are ignored by the backend.
     backend_env = backend.env.translate(os.environ)
+
+    # Snapshot every translation/resolution decision to disk + stderr so
+    # vllm-shim-info can echo it from a pod shell and pod logs show the
+    # final backend invocation without grepping the supervisor's output.
+    launch_info = info.collect(
+        original_argv=original_argv,
+        backend_name=backend.name,
+        model_original=parsed.model,
+        model_resolved=resolved_model,
+        revision=parsed.revision,
+        listen=listen_addr,
+        ports=ports,
+        backend_argv=backend_cmd,
+        dropped_args=dropped,
+        parent_env=os.environ,
+        backend_env=backend_env,
+    )
+    info.write(launch_info)
+    info.print_summary(launch_info)
+
     backend_proc = subprocess.Popen(backend_cmd, env=backend_env)
 
     # Order matters for shutdown drain quality (haproxy first, backend last); see Supervisor.
