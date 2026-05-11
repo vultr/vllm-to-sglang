@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Recreate repos/ at the upstream tags referenced by this codebase.
 #
-# repos/ holds read-only clones of vLLM, SGLang, and TensorRT-LLM that the
-# argument-translation, env-translation, metrics, and filter modules grep
-# and read for source of truth. The directory is gitignored; this script
-# is the canonical way to populate it.
+# repos/ holds read-only clones of vLLM, SGLang, TensorRT-LLM, and AITER
+# that the argument-translation, env-translation, metrics, filter, and
+# AITER capture/restore/tune modules grep and read for source of truth.
+# The directory is gitignored; this script is the canonical way to
+# populate it.
 #
 # To bump any version, edit the corresponding *_VERSION variable below
 # and re-run. Idempotent: if a repo already exists at the pinned tag,
@@ -18,6 +19,7 @@
 set -euo pipefail
 
 # === Pinned versions (edit these to bump) =====================================
+AITER_VERSION="v0.1.9.post1"
 SGLANG_VERSION="v0.5.11"
 TRTLLM_VERSION="v1.3.0rc14"
 VLLM_VERSION="v0.20.2"
@@ -57,11 +59,16 @@ declare -a TARGETS
 if [[ $# -gt 0 ]]; then
     TARGETS=("$@")
 else
-    TARGETS=(sglang trtllm vllm)
+    TARGETS=(aiter sglang trtllm vllm)
 fi
 
 for target in "${TARGETS[@]}"; do
     case "$target" in
+        aiter)
+            sync_repo aiter \
+                https://github.com/ROCm/aiter.git \
+                "$AITER_VERSION"
+            ;;
         sglang)
             sync_repo sglang \
                 https://github.com/sgl-project/sglang.git \
@@ -79,7 +86,7 @@ for target in "${TARGETS[@]}"; do
             ;;
         *)
             echo "unknown target: $target" >&2
-            echo "valid targets: sglang, trtllm, vllm" >&2
+            echo "valid targets: aiter, sglang, trtllm, vllm" >&2
             exit 2
             ;;
     esac
