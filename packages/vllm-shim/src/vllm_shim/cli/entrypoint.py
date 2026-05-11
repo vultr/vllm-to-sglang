@@ -101,6 +101,13 @@ def main() -> int:
         model=parsed.model,
         parallelism=backend.parallelism.extract(backend_args),
     )
+    # The shape-not-found line is emitted at INFO by AITER's logger
+    # (tuned_gemm.py:192). If an operator raises log level globally,
+    # capture goes silent. Pin INFO when capture is enabled, via
+    # setdefault so an explicit AITER_LOG_LEVEL in the pod spec still
+    # wins (e.g. someone deliberately quieting AITER for debugging).
+    if capture_plan.enabled:
+        backend_env.setdefault("AITER_LOG_LEVEL", "INFO")
 
     # Snapshot every translation/resolution decision to disk + stderr so
     # vllm-shim-info can echo it from a pod shell and pod logs show the

@@ -149,7 +149,7 @@ vllm-shim 0.0.1 -> sglang listening on 0.0.0.0:8000
   model: moonshotai/Kimi-K2.6 -> /data/hub/models--moonshotai--Kimi-K2.6/snapshots/abc
   backend argv: sglang serve --model-path ... --tp 8
   aiter capture: enabled -> /data/hf/vllm-shim/aiter-shapes/gfx942-304cu/moonshotai--Kimi-K2.6/tp8
-  aiter restore: 2 configs from /data/hf/vllm-shim/aiter-configs/gfx942-304cu (bf16_gemm.csv, fp8_blockscale_gemm.csv)
+  aiter restore: 2 configs from /data/hf/vllm-shim/aiter-configs/gfx942-304cu (AITER_CONFIG_GEMM_BF16, AITER_CONFIG_GEMM_A8W8)
 ```
 
 The restore line has three forms:
@@ -157,10 +157,33 @@ The restore line has three forms:
 | Line | Meaning |
 |---|---|
 | `aiter restore: disabled (<reason>)` | Prerequisites failed; no work done. |
-| `aiter restore: N configs from <source> (<names>)` | Newly symlinked N files into `/tmp/aiter_configs/`. |
+| `aiter restore: N configs from <source> (<env vars>)` | N `AITER_CONFIG_*` env vars injected into the backend env, pointing at our tuned CSVs. The full env-var-to-path mapping is in the JSON dump. |
 | `aiter restore: enabled, nothing to restore from <source>` | Source dir is missing or empty (first-ever run, or pre-tuner). |
 
 The JSON dump at `/tmp/vllm-shim-info.json` has the same data in `aiter_capture` and `aiter_restore` keys.
+
+## Capture trade-offs and relationship to AITER's own tuning paths
+
+AITER ships with two adjacent mechanisms it's worth being explicit about:
+
+**`AITER_TUNE_GEMM=1`**: AITER's native shape capture. When set, `tuned_gemm.save_shapes` writes *every* GEMM call (hits and misses) to `<install>/aiter/configs/bf16_untuned_gemm.csv` using the canonical CSV schema. We don't use this for three reasons:
+
+- It captures everything, not just the actionable misses. The tuner only needs the gap between observed and tuned, so the extra rows are waste.
+- The write location is hardcoded inside the AITER install dir (not env-overridable), so we'd have no way to land the file under `$HF_HOME` without monkey-patching AITER.
+- It can't partition by model or parallelism; one process writes one global file. Our stderr-tee partitions naturally via the path layout.
+
+Our stderr-tee is more constrained (only matches the BF16 GEMM log format today; other targets like a4w4 emit different formats and aren't yet parsed) but the trade is acceptable: GEMM is the dominant target by call count, and adding new log formats is local work in `log_parser.py`.
+
+**`AITER_ONLINE_TUNE=1`**: lazy tuning at first miss, MoE-only. When a fused MoE forward pass misses, AITER acquires a multiprocess file lock, invokes `gemm_moe_tune.py` synchronously, and unblocks the request after tuning completes. Output lands in the same `AITER_CONFIG_FMOE` file our restore reads. We deliberately don't enable it by default because:
+
+- It only covers MoE. GEMM-side misses still need our capture + offline tune flow, so it's not a substitute.
+- The triggering request eats the tuning cost: seconds to minutes per shape, on the live serving GPU. Unacceptable p99 for an inference API.
+
+An operator who explicitly wants laziness for MoE can set `AITER_ONLINE_TUNE=1` in their pod spec; restore's env-var injection uses a different set of variables and won't fight it. Our capture still records the MoE miss lines regardless.
+
+**Background ("Flavor 2") tuning**: a tempting design where a sidecar tunes shapes during idle and the running pod picks up the new configs without a restart. We've chosen not to pursue this yet because of a concrete blocker: AITER caches the tuned-config dict in memory via `@functools.lru_cache(maxsize=1)` on `get_GEMM_*_config_`. The running pod won't re-read a freshly tuned CSV until the cache invalidates, which doesn't happen without a restart or an explicit signal we don't have. Background tuning could still write to the PV for *future* pods to pick up via restore, but that's effectively just an asynchronous offline tuner, not online tuning. If we ever want true zero-restart pickup, we need either an upstream AITER patch with a cache-invalidation hook or an external control-plane endpoint on the backend.
+
+**Log level pin**: when capture is enabled, the entrypoint sets `AITER_LOG_LEVEL=INFO` in `backend_env` via `setdefault`. AITER emits the shape-not-found line at `logger.info`; an operator who raises log level globally would silence capture otherwise. The `setdefault` semantics preserve any explicit override (e.g. someone debugging who has good reason to quiet AITER).
 
 ## Module layout
 
