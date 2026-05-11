@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from vllm_shim.aiter.capture import REASON_ENABLED, REASON_NO_GPU, CapturePlan
+from vllm_shim.aiter.restore import AITER_CONFIG_DIR, RestorePlan
 from vllm_shim.cli import info
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
@@ -12,6 +13,12 @@ from vllm_shim.values.service_address import ServiceAddress
 
 def _disabled_capture() -> CapturePlan:
     return CapturePlan(enabled=False, root=None, reason=REASON_NO_GPU)
+
+
+def _disabled_restore() -> RestorePlan:
+    return RestorePlan(
+        enabled=False, source=None, target=AITER_CONFIG_DIR, reason=REASON_NO_GPU
+    )
 
 
 def _sample_args() -> dict[str, object]:
@@ -26,6 +33,8 @@ def _sample_args() -> dict[str, object]:
         "backend_argv": ("python", "-m", "sglang.launch_server", "--port", "8001"),
         "dropped_args": ("--enable-chunked-prefill",),
         "aiter_capture": _disabled_capture(),
+        "aiter_restore": _disabled_restore(),
+        "aiter_restored": (),
     }
 
 
@@ -119,6 +128,46 @@ def test_collect_aiter_capture_enabled_shape() -> None:
     assert out["aiter_capture"]["reason"] == REASON_ENABLED
 
 
+def test_collect_aiter_restore_enabled_shape() -> None:
+    args = _sample_args()
+    args["aiter_restore"] = RestorePlan(
+        enabled=True,
+        source=Path("/data/hf/vllm-shim/aiter-configs/gfx942-304cu"),
+        target=AITER_CONFIG_DIR,
+        reason=REASON_ENABLED,
+    )
+    args["aiter_restored"] = ("bf16_gemm.csv", "fp8_blockscale_gemm.csv")
+    out = info.collect(
+        **args,  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    assert out["aiter_restore"]["enabled"] is True
+    assert out["aiter_restore"]["source"] == str(
+        Path("/data/hf/vllm-shim/aiter-configs/gfx942-304cu")
+    )
+    assert out["aiter_restore"]["target"] == str(AITER_CONFIG_DIR)
+    assert out["aiter_restore"]["restored"] == [
+        "bf16_gemm.csv",
+        "fp8_blockscale_gemm.csv",
+    ]
+
+
+def test_collect_aiter_restore_disabled_shape() -> None:
+    out = info.collect(
+        **_sample_args(),  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    assert out["aiter_restore"] == {
+        "enabled": False,
+        "source": None,
+        "target": str(AITER_CONFIG_DIR),
+        "reason": REASON_NO_GPU,
+        "restored": [],
+    }
+
+
 def test_write_produces_pretty_json_with_trailing_newline(tmp_path: Path) -> None:
     target = tmp_path / "info.json"
     info.write({"a": 1, "b": [2, 3]}, path=target)
@@ -126,6 +175,20 @@ def test_write_produces_pretty_json_with_trailing_newline(tmp_path: Path) -> Non
     assert raw.endswith("\n")
     assert json.loads(raw) == {"a": 1, "b": [2, 3]}
     assert "\n" in raw.strip()  # multi-line, not a one-liner
+
+
+_DISABLED_CAPTURE_DICT: dict[str, object] = {
+    "enabled": False,
+    "root": None,
+    "reason": REASON_NO_GPU,
+}
+_DISABLED_RESTORE_DICT: dict[str, object] = {
+    "enabled": False,
+    "source": None,
+    "target": "/tmp/aiter_configs",
+    "reason": REASON_NO_GPU,
+    "restored": [],
+}
 
 
 def test_print_summary_writes_dropped_and_renames(
@@ -144,11 +207,8 @@ def test_print_summary_writes_dropped_and_renames(
             "backend_argv": ["python", "-m", "sglang.launch_server"],
             "dropped_args": ["--enable-chunked-prefill"],
             "env_translation": {"SGLANG_HOST_IP": "1.2.3.4"},
-            "aiter_capture": {
-                "enabled": False,
-                "root": None,
-                "reason": REASON_NO_GPU,
-            },
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
         }
     )
     err = capsys.readouterr().err
@@ -157,6 +217,7 @@ def test_print_summary_writes_dropped_and_renames(
     assert "dropped: --enable-chunked-prefill" in err
     assert "SGLANG_HOST_IP=1.2.3.4" in err
     assert f"aiter capture: disabled ({REASON_NO_GPU})" in err
+    assert f"aiter restore: disabled ({REASON_NO_GPU})" in err
 
 
 def test_print_summary_omits_optional_sections_when_empty(
@@ -171,11 +232,8 @@ def test_print_summary_omits_optional_sections_when_empty(
             "backend_argv": ["python", "-m", "sglang.launch_server"],
             "dropped_args": [],
             "env_translation": {},
-            "aiter_capture": {
-                "enabled": False,
-                "root": None,
-                "reason": REASON_NO_GPU,
-            },
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
         }
     )
     err = capsys.readouterr().err
@@ -200,6 +258,7 @@ def test_print_summary_shows_capture_path_when_enabled(
                 "root": "/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8",
                 "reason": REASON_ENABLED,
             },
+            "aiter_restore": _DISABLED_RESTORE_DICT,
         }
     )
     err = capsys.readouterr().err
@@ -210,6 +269,67 @@ def test_print_summary_shows_capture_path_when_enabled(
         "aiter capture: enabled -> /data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8"
         in err
     )
+
+
+def test_print_summary_shows_restore_count_and_names_when_enabled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": {
+                "enabled": True,
+                "source": "/data/hf/vllm-shim/aiter-configs/gfx942-304cu",
+                "target": "/tmp/aiter_configs",
+                "reason": REASON_ENABLED,
+                "restored": ["bf16_gemm.csv", "fp8_blockscale_gemm.csv"],
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    # The count + names together give the operator everything they need
+    # to confirm AITER picked up the right configs without having to ls
+    # the target directory.
+    assert "aiter restore: 2 configs from" in err
+    assert "bf16_gemm.csv" in err
+    assert "fp8_blockscale_gemm.csv" in err
+
+
+def test_print_summary_says_nothing_to_restore_when_source_empty(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # First-ever run: the source dir exists (or doesn't) but has no
+    # configs. The summary should say so explicitly rather than print
+    # an empty list, so the operator understands restore RAN but found
+    # nothing - distinct from restore being disabled.
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": {
+                "enabled": True,
+                "source": "/data/hf/vllm-shim/aiter-configs/gfx942-304cu",
+                "target": "/tmp/aiter_configs",
+                "reason": REASON_ENABLED,
+                "restored": [],
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    assert "aiter restore: enabled, nothing to restore from" in err
 
 
 def test_main_prints_file_when_present(

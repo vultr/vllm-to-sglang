@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_hf_home
+from vllm_shim.aiter.restore import plan_restore, restore_configs
 from vllm_shim.aiter.shape_store import ShapeStore
 from vllm_shim.aiter.stream_tee import StreamTee
 from vllm_shim.backend import registry
@@ -78,14 +79,18 @@ def main() -> int:
     # in scope; vLLM-side names stay in place and are ignored by the backend.
     backend_env = backend.env.translate(os.environ)
 
-    # AITER shape capture: light up only on ROCm hosts (where AITER actually
-    # runs) and only when the HF cache can be resolved (so the captured CSVs
-    # share the persistent volume with model snapshots). Plan first; spawn
-    # with stderr=PIPE only when we'll actually read it, so the inherit-stderr
-    # path stays the default for CUDA hosts and dev boxes.
+    # AITER integration: probe ROCm + resolve HF cache once, then drive both
+    # the restore (seed /tmp/aiter_configs from previously tuned data) and
+    # capture (record shape misses for the next tuner run) decisions off the
+    # same shared environment. Restore runs synchronously so the symlinks
+    # are in place before the backend touches AITER.
+    hf_home = resolve_hf_home()
+    gpu = probe_rocm()
+    restore_plan = plan_restore(hf_home=hf_home, gpu=gpu)
+    restored = restore_configs(restore_plan)
     capture_plan = plan_capture(
-        hf_home=resolve_hf_home(),
-        gpu=probe_rocm(),
+        hf_home=hf_home,
+        gpu=gpu,
         model=parsed.model,
         parallelism=backend.parallelism.extract(backend_args),
     )
@@ -106,6 +111,8 @@ def main() -> int:
         parent_env=os.environ,
         backend_env=backend_env,
         aiter_capture=capture_plan,
+        aiter_restore=restore_plan,
+        aiter_restored=restored,
     )
     info.write(launch_info)
     info.print_summary(launch_info)

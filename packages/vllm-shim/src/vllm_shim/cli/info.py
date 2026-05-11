@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from vllm_shim.aiter.capture import CapturePlan
+from vllm_shim.aiter.restore import RestorePlan
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
 
@@ -58,6 +59,8 @@ def collect(
     parent_env: Mapping[str, str],
     backend_env: Mapping[str, str],
     aiter_capture: CapturePlan,
+    aiter_restore: RestorePlan,
+    aiter_restored: Sequence[str],
 ) -> dict[str, Any]:
     """Assemble the info dict from already-decided launch state."""
     env_translation = {k: v for k, v in backend_env.items() if k not in parent_env}
@@ -88,6 +91,13 @@ def collect(
             "root": str(aiter_capture.root) if aiter_capture.root else None,
             "reason": aiter_capture.reason,
         },
+        "aiter_restore": {
+            "enabled": aiter_restore.enabled,
+            "source": str(aiter_restore.source) if aiter_restore.source else None,
+            "target": str(aiter_restore.target),
+            "reason": aiter_restore.reason,
+            "restored": list(aiter_restored),
+        },
     }
 
 
@@ -116,6 +126,19 @@ def print_summary(info: dict[str, Any]) -> None:
         sys.stderr.write(f"  aiter capture: enabled -> {capture['root']}\n")
     else:
         sys.stderr.write(f"  aiter capture: disabled ({capture['reason']})\n")
+    restore = info["aiter_restore"]
+    if not restore["enabled"]:
+        sys.stderr.write(f"  aiter restore: disabled ({restore['reason']})\n")
+    elif restore["restored"]:
+        names = ", ".join(restore["restored"])
+        sys.stderr.write(
+            f"  aiter restore: {len(restore['restored'])} configs from "
+            f"{restore['source']} ({names})\n"
+        )
+    else:
+        sys.stderr.write(
+            f"  aiter restore: enabled, nothing to restore from {restore['source']}\n"
+        )
 
 
 def main() -> int:
