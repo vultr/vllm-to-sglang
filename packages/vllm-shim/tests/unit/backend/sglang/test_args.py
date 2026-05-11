@@ -17,6 +17,28 @@ def test_rename_tensor_parallel_size(translator: SGLangArgTranslator) -> None:
     assert dropped == []
 
 
+def test_rename_tensor_parallel_size_underscore(translator: SGLangArgTranslator) -> None:
+    # vLLM users often write the underscore form; SGLang's argparse only
+    # registers the dashed names, so we have to normalise.
+    out, _ = translator.translate(["--tensor_parallel_size", "8"])
+    assert out == ["--tp", "8"]
+
+
+def test_rename_pipeline_parallel_size_underscore(translator: SGLangArgTranslator) -> None:
+    out, _ = translator.translate(["--pipeline_parallel_size", "2"])
+    assert out == ["--pipeline-parallel-size", "2"]
+
+
+def test_rename_ep_size_underscore(translator: SGLangArgTranslator) -> None:
+    out, _ = translator.translate(["--ep_size", "8"])
+    assert out == ["--ep-size", "8"]
+
+
+def test_rename_expert_parallel_size_underscore(translator: SGLangArgTranslator) -> None:
+    out, _ = translator.translate(["--expert_parallel_size", "8"])
+    assert out == ["--expert-parallel-size", "8"]
+
+
 def test_rename_max_model_len_to_context_length(translator: SGLangArgTranslator) -> None:
     out, _ = translator.translate(["--max-model-len", "32768"])
     assert out == ["--context-length", "32768"]

@@ -3,6 +3,7 @@
 Lives outside backend/base/ per docs/backends.md ('What stays in base/: ABCs, no helpers').
 """
 
+import contextlib
 import re
 from collections.abc import Mapping, Sequence
 
@@ -171,6 +172,34 @@ def translate_env_with_map(
         if src in parent_env and dst not in parent_env:
             out[dst] = parent_env[src]
     return out
+
+
+def last_int_for_flags(args: Sequence[str], flags: frozenset[str]) -> int | None:
+    """Return the int value of the last occurrence of any flag in ``flags``.
+
+    Recognises both ``--flag N`` and ``--flag=N``. Last-wins mirrors the
+    semantics of every argparse-based CLI we forward to: repeated flags
+    override earlier ones. Returns None when no flag matches or the value
+    can't be parsed as an int. Used by per-backend ParallelismExtractors,
+    which know which flag names their target backend accepts.
+    """
+    found: int | None = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in flags:
+            if i + 1 < len(args):
+                with contextlib.suppress(ValueError):
+                    found = int(args[i + 1])
+            i += 2
+            continue
+        if "=" in arg:
+            flag, val = arg.split("=", 1)
+            if flag in flags:
+                with contextlib.suppress(ValueError):
+                    found = int(val)
+        i += 1
+    return found
 
 
 def vllm_synthesized_tail() -> list[str]:

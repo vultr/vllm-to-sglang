@@ -9,6 +9,7 @@ from vllm_shim.backend.sglang.filter.fix_schema import FixToolSchemas
 from vllm_shim.backend.sglang.filter.strip_params import StripVLLMParams
 from vllm_shim.backend.sglang.launcher import SGLangLauncher
 from vllm_shim.backend.sglang.metrics import SGLangMetricsTranslator
+from vllm_shim.backend.sglang.parallelism import SGLangParallelismExtractor
 
 
 class SGLangBackend(Backend):
@@ -23,3 +24,4 @@ class SGLangBackend(Backend):
         self.launcher = SGLangLauncher()
         # Strip first, then fix schemas: stripping removes keys the schema fixer would walk.
         self.filters = (StripVLLMParams(), FixToolSchemas())
+        self.parallelism = SGLangParallelismExtractor()

@@ -4,6 +4,7 @@ from vllm_shim.backend.base.args import ArgTranslator
 from vllm_shim.backend.base.env import EnvTranslator
 from vllm_shim.backend.base.launcher import Launcher
 from vllm_shim.backend.base.metrics import MetricsTranslator
+from vllm_shim.backend.base.parallelism import ParallelismExtractor
 from vllm_shim.backend.trtllm.backend import TRTLLMBackend
 
 
@@ -26,6 +27,7 @@ def test_components_match_protocols() -> None:
     assert isinstance(b.metrics, MetricsTranslator)
     assert isinstance(b.launcher, Launcher)
     assert isinstance(b.filters, tuple)
+    assert isinstance(b.parallelism, ParallelismExtractor)
 
 
 def test_filters_empty_in_v1() -> None:

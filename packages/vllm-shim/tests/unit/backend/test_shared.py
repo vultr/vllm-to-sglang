@@ -2,6 +2,7 @@
 translate_prom_line, vllm_synthesized_tail)."""
 
 from vllm_shim.backend._shared import (
+    last_int_for_flags,
     translate_env_with_map,
     translate_prom_line,
     translate_with_arg_map,
@@ -160,3 +161,53 @@ def test_translate_env_does_not_mutate_input() -> None:
     snapshot = dict(parent)
     translate_env_with_map(parent, {"FOO": "BAR"})
     assert parent == snapshot
+
+
+# ---------- last_int_for_flags ----------
+
+_FLAGS = frozenset({"--tp", "--tp-size"})
+
+
+def test_last_int_returns_none_for_missing() -> None:
+    assert last_int_for_flags(["--other", "8"], _FLAGS) is None
+
+
+def test_last_int_returns_none_for_empty_args() -> None:
+    assert last_int_for_flags([], _FLAGS) is None
+
+
+def test_last_int_finds_value_after_flag() -> None:
+    assert last_int_for_flags(["--tp", "8"], _FLAGS) == 8
+
+
+def test_last_int_finds_value_in_equals_form() -> None:
+    assert last_int_for_flags(["--tp-size=4"], _FLAGS) == 4
+
+
+def test_last_int_handles_any_alias() -> None:
+    assert last_int_for_flags(["--tp-size", "2"], _FLAGS) == 2
+
+
+def test_last_int_last_wins_for_repeated_flag() -> None:
+    # Mirrors argparse: when the same flag appears twice, the later
+    # occurrence overrides the earlier.
+    assert last_int_for_flags(["--tp", "2", "--tp", "8"], _FLAGS) == 8
+
+
+def test_last_int_skips_unparseable_value() -> None:
+    # A non-integer value yields None; we don't surface "auto" or similar.
+    assert last_int_for_flags(["--tp", "auto"], _FLAGS) is None
+
+
+def test_last_int_recovers_from_bad_value_followed_by_good() -> None:
+    # A later parseable occurrence still wins after an earlier garbage one.
+    assert last_int_for_flags(["--tp", "auto", "--tp", "4"], _FLAGS) == 4
+
+
+def test_last_int_ignores_unrelated_equals_flags() -> None:
+    assert last_int_for_flags(["--other=8"], _FLAGS) is None
+
+
+def test_last_int_handles_dangling_flag_at_end() -> None:
+    # Flag at the very end with no value: don't index past the args list.
+    assert last_int_for_flags(["--tp"], _FLAGS) is None

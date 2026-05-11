@@ -26,6 +26,13 @@ from vllm_shim.backend.base.args import ArgTranslator
 ARG_MAP: dict[str, tuple[str | None, bool]] = {
     # === Renames: vLLM concept → SGLang concept, value forwarded unchanged ===
     "--tensor-parallel-size": ("--tp", True),
+    "--tensor_parallel_size": ("--tp", True),
+    "--pipeline_parallel_size": ("--pipeline-parallel-size", True),
+    # SGLang accepts --ep-size, --expert-parallel-size, --ep (dashed) natively.
+    # vLLM users habitually write the underscore form; rewrite so SGLang's
+    # argparse doesn't reject them.
+    "--ep_size": ("--ep-size", True),
+    "--expert_parallel_size": ("--expert-parallel-size", True),
     # Semantic mismatch (forwarded value-as-is anyway): vLLM's gpu-memory-utilization is
     # a cap on TOTAL GPU usage (weights + KV + activations + everything), with the
     # remainder left as untouched headroom. SGLang's mem-fraction-static is the

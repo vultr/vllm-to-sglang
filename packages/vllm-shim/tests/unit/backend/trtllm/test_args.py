@@ -20,6 +20,23 @@ def test_rename_pipeline_parallel_size(translator: TRTLLMArgTranslator) -> None:
     assert out == ["--pp_size", "2"]
 
 
+def test_rename_ep_size_dashed(translator: TRTLLMArgTranslator) -> None:
+    # trtllm-serve only recognises `--ep_size` (underscore); operators
+    # used to vLLM/SGLang reach for the dashed form.
+    out, _ = translator.translate(["--ep-size", "8"])
+    assert out == ["--ep_size", "8"]
+
+
+def test_rename_expert_parallel_size_dashed(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--expert-parallel-size", "8"])
+    assert out == ["--ep_size", "8"]
+
+
+def test_rename_moe_expert_parallel_size_dashed(translator: TRTLLMArgTranslator) -> None:
+    out, _ = translator.translate(["--moe-expert-parallel-size", "4"])
+    assert out == ["--moe_expert_parallel_size", "4"]
+
+
 def test_rename_max_model_len_to_max_seq_len(translator: TRTLLMArgTranslator) -> None:
     out, _ = translator.translate(["--max-model-len", "32768"])
     assert out == ["--max_seq_len", "32768"]

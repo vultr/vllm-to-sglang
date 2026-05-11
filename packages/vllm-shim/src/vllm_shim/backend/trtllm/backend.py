@@ -7,6 +7,7 @@ from vllm_shim.backend.trtllm.args import TRTLLMArgTranslator
 from vllm_shim.backend.trtllm.env import TRTLLMEnvTranslator
 from vllm_shim.backend.trtllm.launcher import TRTLLMLauncher
 from vllm_shim.backend.trtllm.metrics import TRTLLMMetricsTranslator
+from vllm_shim.backend.trtllm.parallelism import TRTLLMParallelismExtractor
 
 
 class TRTLLMBackend(Backend):
@@ -22,3 +23,4 @@ class TRTLLMBackend(Backend):
         self.metrics = TRTLLMMetricsTranslator()
         self.launcher = TRTLLMLauncher()
         self.filters = ()
+        self.parallelism = TRTLLMParallelismExtractor()

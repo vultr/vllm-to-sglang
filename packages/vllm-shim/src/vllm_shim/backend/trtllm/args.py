@@ -28,6 +28,12 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--tensor_parallel_size": ("--tp_size", True),
     "--pipeline-parallel-size": ("--pp_size", True),
     "--pipeline_parallel_size": ("--pp_size", True),
+    # trtllm-serve only recognises the underscore canonical (--ep_size is
+    # the documented alias for --moe_expert_parallel_size). Dashed forms
+    # come in via passthrough from operators thinking in vLLM/SGLang style.
+    "--ep-size": ("--ep_size", True),
+    "--expert-parallel-size": ("--ep_size", True),
+    "--moe-expert-parallel-size": ("--moe_expert_parallel_size", True),
     "--max-model-len": ("--max_seq_len", True),
     "--max_model_len": ("--max_seq_len", True),
     "--max-num-seqs": ("--max_batch_size", True),
