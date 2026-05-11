@@ -17,14 +17,15 @@ class Backend(ABC):
     metrics: MetricsTranslator
     launcher: Launcher
     filters: tuple[RequestFilter, ...]
+    parallelism: ParallelismExtractor
 
     @abstractmethod
     def __init__(self) -> None: ...
 ```
 
-A backend is a bag of five components plus two class-level constants. Subclasses set the five instance attributes in `__init__`. There's no logic on the base class; `Backend` is purely a contract object.
+A backend is a bag of six components plus two class-level constants. Subclasses set the six instance attributes in `__init__`. There's no logic on the base class; `Backend` is purely a contract object.
 
-The five components are each their own ABC:
+The six components are each their own ABC:
 
 | Component | ABC | Role |
 |---|---|---|
@@ -33,6 +34,7 @@ The five components are each their own ABC:
 | `launcher` | `Launcher` | `build_command(model, address, extra_args) -> list[str]`. Builds the subprocess argv. |
 | `metrics` | `MetricsTranslator` | `translate(prom_text) -> str`. Rewrites Prometheus exposition. See `docs/metrics.md`. |
 | `filters` | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. See `docs/middleware.md`. |
+| `parallelism` | `ParallelismExtractor` | `extract(post_translation_argv) -> Parallelism`. Reads tp/ep/pp from the argv that's about to be handed to the launcher. Used by the AITER shape-capture path; see `docs/aiter.md`. |
 
 All five are intentionally stateless or self-contained. The supervisor and middleware never reach into a backend's internals; they only call these methods.
 
@@ -73,9 +75,11 @@ class SGLangBackend(Backend):
 
     def __init__(self) -> None:
         self.args = SGLangArgTranslator()
+        self.env = SGLangEnvTranslator()
         self.metrics = SGLangMetricsTranslator()
         self.launcher = SGLangLauncher()
         self.filters = (StripVLLMParams(), FixToolSchemas())
+        self.parallelism = SGLangParallelismExtractor()
 ```
 
 Filter order is documented in `tests/unit/backend/sglang/test_backend.py::test_filters_in_documented_order`. If you change it, change the test. Stripping happens before schema fixing because the stripper might delete keys the fixer would otherwise walk.
@@ -100,13 +104,14 @@ filter/        # zero or more RequestFilter subclasses
 
 The package can be flatter or deeper depending on complexity; `filter/` only exists if there are filters.
 
-### 2. Implement the five components
+### 2. Implement the six components
 
 - **`ArgTranslator.translate`**: takes the passthrough flags from `ArgParser`, returns `(backend_argv, dropped_argv)`. Pure function. Build a flag-rewrite map analogous to `ARG_MAP`, plus any custom logic.
 - **`EnvTranslator.translate`**: takes a parent env mapping (typically `os.environ`), returns a child env dict. Pure function. Build an `ENV_MAP` of `VLLM_*` -> backend-side renames; the helper `translate_env_with_map` is usually all you need. See `docs/configuration.md` for the rationale.
 - **`Launcher.build_command`**: takes `(model, ServiceAddress, extra_args)`, returns the full subprocess argv. Prefer the backend's installed console script (e.g. `sglang serve`, `trtllm-serve`) so the launcher does not need to share a Python interpreter with the backend.
 - **`MetricsTranslator.translate`**: takes Prometheus exposition text, returns Prometheus exposition text. If the backend has no native `/metrics`, you can return synthesized vLLM-format output and skip the rename step.
 - **`RequestFilter`s**: only needed if the backend rejects request shapes vLLM clients send. Each one sets `applies_to(method, path)` to gate when it runs.
+- **`ParallelismExtractor.extract`**: takes the *post-translation* argv (after `ArgTranslator` has run), returns a `Parallelism` value. Pure function. Each backend knows its own native flag spellings for tp/ep/pp; the helper `last_int_for_flags` handles the common pattern.
 
 ### 3. Wire the backend class
 
@@ -121,6 +126,7 @@ class XBackend(Backend):
         self.metrics = XMetricsTranslator()
         self.launcher = XLauncher()
         self.filters = (...)
+        self.parallelism = XParallelismExtractor()
 ```
 
 ### 4. Register it

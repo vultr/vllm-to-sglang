@@ -49,15 +49,16 @@ client :N -> haproxy -> :N+2 middleware (FastAPI) -> :N+1 SGLang/TRT-LLM
 
 ### Backend abstraction
 
-A `Backend` (`vllm_shim.backend.base.backend`) is a contract object holding five components plus class constants:
+A `Backend` (`vllm_shim.backend.base.backend`) is a contract object holding six components plus class constants:
 
 | Slot | ABC | Role |
 |---|---|---|
-| `args`     | `ArgTranslator`     | Pure function: `translate(passthrough) -> (backend_argv, dropped)`. |
-| `env`      | `EnvTranslator`     | Pure function: `translate(os.environ) -> dict[str, str]`. Adds backend-side renames for selected `VLLM_*` env vars. |
-| `launcher` | `Launcher`          | Builds the subprocess argv. |
-| `metrics`  | `MetricsTranslator` | Rewrites Prometheus exposition into vLLM-named series. |
-| `filters`  | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. |
+| `args`        | `ArgTranslator`        | Pure function: `translate(passthrough) -> (backend_argv, dropped)`. |
+| `env`         | `EnvTranslator`        | Pure function: `translate(os.environ) -> dict[str, str]`. Adds backend-side renames for selected `VLLM_*` env vars. |
+| `launcher`    | `Launcher`             | Builds the subprocess argv. |
+| `metrics`     | `MetricsTranslator`    | Rewrites Prometheus exposition into vLLM-named series. |
+| `filters`     | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. |
+| `parallelism` | `ParallelismExtractor` | Reads tp/ep/pp out of the post-translation argv. Used by the AITER shape-capture path; see `docs/aiter.md`. |
 
 Concrete backends live at `vllm_shim.backend.sglang` and `vllm_shim.backend.trtllm`. The registry (`vllm_shim.backend.registry`) is a single `dict` selected by `VLLM_SHIM_BACKEND` env (default `sglang`); to add a backend, edit that dict, do not introduce plugin discovery. The supervisor and middleware are separate processes, so each constructs its own `Backend` instance from the same env. See `docs/backends.md`.
 
@@ -71,7 +72,16 @@ The backend layer must not import from `vllm_shim.middleware` or `vllm_shim.cli`
 
 ### Launch-time info dump
 
-Once translation is settled the entrypoint calls `vllm_shim.cli.info.collect`, writes the result as JSON to `/tmp/vllm-shim-info.json`, and prints a short summary to stderr. The dump captures the original argv, selected backend, original vs. resolved model path, revision, port allocation, the backend invocation, dropped args, env renames produced by the backend's `EnvTranslator`, the active shim config knobs, and the HF cache state. The `vllm-shim-info` console script (registered in `packages/vllm-shim/pyproject.toml`) just prints that file, so an operator can `kubectl exec` into the pod and run it instead of grepping logs. The set of shim-config and HF env keys surfaced lives in `_SHIM_CONFIG_KEYS` and `_HF_KEYS` in `vllm_shim.cli.info`; keep those in sync with the Configuration surface table below when adding knobs.
+Once translation is settled the entrypoint calls `vllm_shim.cli.info.collect`, writes the result as JSON to `/tmp/vllm-shim-info.json`, and prints a short summary to stderr. The dump captures the original argv, selected backend, original vs. resolved model path, revision, port allocation, the backend invocation, dropped args, env renames produced by the backend's `EnvTranslator`, the active shim config knobs, the HF cache state, and the AITER capture/restore plans. The `vllm-shim-info` console script (registered in `packages/vllm-shim/pyproject.toml`) just prints that file, so an operator can `kubectl exec` into the pod and run it instead of grepping logs. The set of shim-config and HF env keys surfaced lives in `_SHIM_CONFIG_KEYS` and `_HF_KEYS` in `vllm_shim.cli.info`; keep those in sync with the Configuration surface table below when adding knobs.
+
+### AITER shape capture and config restore (ROCm only)
+
+On ROCm backends (SGLang on AMD GPUs today), the entrypoint also does two AITER-specific things, gated on a ROCm GPU detection plus a resolvable HF cache:
+
+1. **Restore.** Before launching the backend, symlink any tuned configs from `$HF_HOME/vllm-shim/aiter-configs/<bucket>/` into `/tmp/aiter_configs/` (AITER's hardcoded read location). Idempotent and per-file error tolerant. See `vllm_shim.aiter.restore`.
+2. **Capture.** Spawn the backend with `stderr=PIPE` and start a `StreamTee` daemon (`vllm_shim.aiter.stream_tee`) that forwards every line to the real stderr while parsing `[aiter] shape is M:... not found tuned config ...` lines and appending them, deduped, to `$HF_HOME/vllm-shim/aiter-shapes/<bucket>/<sanitized_model>/<parallelism>/<target>.csv`. The parallelism segment comes from the backend's `ParallelismExtractor` reading the *post-translation* argv (operators can pass either vLLM-style or backend-native flags, so we can't trust input-side flag names). See `vllm_shim.aiter.capture`.
+
+On CUDA hosts and dev boxes both halves no-op silently with stable reason strings in the launch-info dump. The tuner step that turns captured shapes into tuned configs is offline today; the operator drops the result under `aiter-configs/`. See `docs/aiter.md` for path layout, prerequisites, and the operator surface.
 
 ### The `vllm-entrypoints` stub package
 
@@ -110,4 +120,4 @@ The directory layout `docker/<backend>/Dockerfile.<platform>` *is* the matrix. J
 
 ## Where to read more
 
-Topic docs under `docs/`: `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.
+Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.

@@ -80,11 +80,14 @@ The declared order matters for *drain quality* even though the SIGTERMs go out s
 | `vllm_shim.cli.parser` | `ArgParser`: extracts the bits the supervisor needs (model, host, port) and routes everything else into `passthrough`. |
 | `vllm_shim.cli.haproxy` | haproxy config templating, error file, and launch helper. |
 | `vllm_shim.cli.supervisor` | `Supervisor` and `ManagedProcess`: process lifecycle, signal handling. |
-| `vllm_shim.values` | Frozen dataclasses (`ParsedArgs`, `PortAllocation`, `ServiceAddress`) shared across layers. |
-| `vllm_shim.backend.base` | Backend ABCs: `Backend`, `ArgTranslator`, `EnvTranslator`, `Launcher`, `MetricsTranslator`, `RequestFilter`. |
-| `vllm_shim.backend.sglang` | The concrete SGLang backend (args, env, launcher, metrics, two filters). |
-| `vllm_shim.backend.trtllm` | The concrete TensorRT-LLM backend (args, env, launcher, metrics, no filters). |
+| `vllm_shim.cli.rocm_probe` | Shells out to `rocminfo` to identify the GPU SKU bucket; gates AITER capture/restore. |
+| `vllm_shim.cli.info` | Launch-time info dump (JSON + stderr summary), `vllm-shim-info` console script. |
+| `vllm_shim.values` | Frozen dataclasses (`ParsedArgs`, `PortAllocation`, `ServiceAddress`, `Parallelism`) shared across layers. |
+| `vllm_shim.backend.base` | Backend ABCs: `Backend`, `ArgTranslator`, `EnvTranslator`, `Launcher`, `MetricsTranslator`, `RequestFilter`, `ParallelismExtractor`. |
+| `vllm_shim.backend.sglang` | The concrete SGLang backend (args, env, launcher, metrics, two filters, parallelism). |
+| `vllm_shim.backend.trtllm` | The concrete TensorRT-LLM backend (args, env, launcher, metrics, no filters, parallelism). |
 | `vllm_shim.backend.registry` | `select()`: env-driven backend dispatch (`VLLM_SHIM_BACKEND`). |
+| `vllm_shim.aiter` | AITER shape capture (stderr tee + dedup CSV) and config restore (symlink seeding). ROCm only; no-op elsewhere. See `docs/aiter.md`. |
 | `vllm_shim.middleware` | FastAPI app, three handlers (health, metrics, proxy), shared httpx client, error-dump helper. |
 | `vllm-entrypoints` package | Top-level `vllm/` namespace whose `__main__.py` files redirect `python -m vllm.X` invocations to the shim. See `docs/entrypoints.md`. |
 
