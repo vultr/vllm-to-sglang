@@ -4,9 +4,14 @@ import json
 from pathlib import Path
 
 import pytest
+from vllm_shim.aiter.capture import REASON_ENABLED, REASON_NO_GPU, CapturePlan
 from vllm_shim.cli import info
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
+
+
+def _disabled_capture() -> CapturePlan:
+    return CapturePlan(enabled=False, root=None, reason=REASON_NO_GPU)
 
 
 def _sample_args() -> dict[str, object]:
@@ -20,6 +25,7 @@ def _sample_args() -> dict[str, object]:
         "ports": PortAllocation.from_listen(8000),
         "backend_argv": ("python", "-m", "sglang.launch_server", "--port", "8001"),
         "dropped_args": ("--enable-chunked-prefill",),
+        "aiter_capture": _disabled_capture(),
     }
 
 
@@ -78,6 +84,41 @@ def test_collect_picks_up_hf_cache_vars_when_present() -> None:
     assert out["hf_cache"] == {"HF_HOME": "/data", "HF_HUB_OFFLINE": "0"}
 
 
+def test_collect_aiter_capture_disabled_shape() -> None:
+    out = info.collect(
+        **_sample_args(),  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    # Disabled plans must surface the reason but null the root so the JSON
+    # dump is unambiguous (no stale path from a previous run).
+    assert out["aiter_capture"] == {
+        "enabled": False,
+        "root": None,
+        "reason": REASON_NO_GPU,
+    }
+
+
+def test_collect_aiter_capture_enabled_shape() -> None:
+    args = _sample_args()
+    args["aiter_capture"] = CapturePlan(
+        enabled=True,
+        root=Path("/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8"),
+        reason=REASON_ENABLED,
+    )
+    out = info.collect(
+        **args,  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    # Path objects get stringified so the dict is JSON-serialisable as is.
+    assert out["aiter_capture"]["enabled"] is True
+    assert out["aiter_capture"]["root"] == str(
+        Path("/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8")
+    )
+    assert out["aiter_capture"]["reason"] == REASON_ENABLED
+
+
 def test_write_produces_pretty_json_with_trailing_newline(tmp_path: Path) -> None:
     target = tmp_path / "info.json"
     info.write({"a": 1, "b": [2, 3]}, path=target)
@@ -103,6 +144,11 @@ def test_print_summary_writes_dropped_and_renames(
             "backend_argv": ["python", "-m", "sglang.launch_server"],
             "dropped_args": ["--enable-chunked-prefill"],
             "env_translation": {"SGLANG_HOST_IP": "1.2.3.4"},
+            "aiter_capture": {
+                "enabled": False,
+                "root": None,
+                "reason": REASON_NO_GPU,
+            },
         }
     )
     err = capsys.readouterr().err
@@ -110,6 +156,7 @@ def test_print_summary_writes_dropped_and_renames(
     assert "org/m@abc -> /cache/m/snapshots/abc" in err
     assert "dropped: --enable-chunked-prefill" in err
     assert "SGLANG_HOST_IP=1.2.3.4" in err
+    assert f"aiter capture: disabled ({REASON_NO_GPU})" in err
 
 
 def test_print_summary_omits_optional_sections_when_empty(
@@ -124,11 +171,45 @@ def test_print_summary_omits_optional_sections_when_empty(
             "backend_argv": ["python", "-m", "sglang.launch_server"],
             "dropped_args": [],
             "env_translation": {},
+            "aiter_capture": {
+                "enabled": False,
+                "root": None,
+                "reason": REASON_NO_GPU,
+            },
         }
     )
     err = capsys.readouterr().err
     assert "dropped:" not in err
     assert "env renames:" not in err
+
+
+def test_print_summary_shows_capture_path_when_enabled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": {
+                "enabled": True,
+                "root": "/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8",
+                "reason": REASON_ENABLED,
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    # Operators reading pod logs should see *where* shapes will land so
+    # they can tail the directory while loading; the reason string adds
+    # nothing when enabled.
+    assert (
+        "aiter capture: enabled -> /data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8"
+        in err
+    )
 
 
 def test_main_prints_file_when_present(

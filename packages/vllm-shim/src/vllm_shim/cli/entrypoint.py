@@ -5,12 +5,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_hf_home
+from vllm_shim.aiter.shape_store import ShapeStore
+from vllm_shim.aiter.stream_tee import StreamTee
 from vllm_shim.backend import registry
 from vllm_shim.cli import info
 from vllm_shim.cli.haproxy import HAProxyConfig, write_error_file
 from vllm_shim.cli.haproxy import launch as launch_haproxy
 from vllm_shim.cli.model_resolver import resolve_model
 from vllm_shim.cli.parser import ArgParser
+from vllm_shim.cli.rocm_probe import probe as probe_rocm
 from vllm_shim.cli.supervisor import ManagedProcess, Supervisor
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
@@ -74,6 +78,18 @@ def main() -> int:
     # in scope; vLLM-side names stay in place and are ignored by the backend.
     backend_env = backend.env.translate(os.environ)
 
+    # AITER shape capture: light up only on ROCm hosts (where AITER actually
+    # runs) and only when the HF cache can be resolved (so the captured CSVs
+    # share the persistent volume with model snapshots). Plan first; spawn
+    # with stderr=PIPE only when we'll actually read it, so the inherit-stderr
+    # path stays the default for CUDA hosts and dev boxes.
+    capture_plan = plan_capture(
+        hf_home=resolve_hf_home(),
+        gpu=probe_rocm(),
+        model=parsed.model,
+        parallelism=backend.parallelism.extract(backend_args),
+    )
+
     # Snapshot every translation/resolution decision to disk + stderr so
     # vllm-shim-info can echo it from a pod shell and pod logs show the
     # final backend invocation without grepping the supervisor's output.
@@ -89,11 +105,27 @@ def main() -> int:
         dropped_args=dropped,
         parent_env=os.environ,
         backend_env=backend_env,
+        aiter_capture=capture_plan,
     )
     info.write(launch_info)
     info.print_summary(launch_info)
 
-    backend_proc = subprocess.Popen(backend_cmd, env=backend_env)
+    if capture_plan.enabled and capture_plan.root is not None:
+        backend_proc = subprocess.Popen(
+            backend_cmd, env=backend_env, stderr=subprocess.PIPE
+        )
+        # The tee is a daemon thread; backend stderr is the only stream it
+        # reads, and it exits on EOF when the backend closes its end. We
+        # don't track it past the entrypoint - the supervisor's shutdown
+        # path already owns the backend's lifecycle.
+        assert backend_proc.stderr is not None
+        StreamTee(
+            source=backend_proc.stderr,
+            sink=sys.stderr.buffer,
+            callback=build_callback(ShapeStore(capture_plan.root)),
+        ).start()
+    else:
+        backend_proc = subprocess.Popen(backend_cmd, env=backend_env)
 
     # Order matters for shutdown drain quality (haproxy first, backend last); see Supervisor.
     return Supervisor(

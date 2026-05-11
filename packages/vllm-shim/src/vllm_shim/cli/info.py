@@ -14,6 +14,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from vllm_shim.aiter.capture import CapturePlan
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
 
@@ -56,6 +57,7 @@ def collect(
     dropped_args: Sequence[str],
     parent_env: Mapping[str, str],
     backend_env: Mapping[str, str],
+    aiter_capture: CapturePlan,
 ) -> dict[str, Any]:
     """Assemble the info dict from already-decided launch state."""
     env_translation = {k: v for k, v in backend_env.items() if k not in parent_env}
@@ -81,6 +83,11 @@ def collect(
         "env_translation": env_translation,
         "shim_config": shim_config,
         "hf_cache": hf_cache,
+        "aiter_capture": {
+            "enabled": aiter_capture.enabled,
+            "root": str(aiter_capture.root) if aiter_capture.root else None,
+            "reason": aiter_capture.reason,
+        },
     }
 
 
@@ -104,6 +111,11 @@ def print_summary(info: dict[str, Any]) -> None:
     if info["env_translation"]:
         renames = ", ".join(f"{k}={v}" for k, v in info["env_translation"].items())
         sys.stderr.write(f"  env renames: {renames}\n")
+    capture = info["aiter_capture"]
+    if capture["enabled"]:
+        sys.stderr.write(f"  aiter capture: enabled -> {capture['root']}\n")
+    else:
+        sys.stderr.write(f"  aiter capture: disabled ({capture['reason']})\n")
 
 
 def main() -> int:
