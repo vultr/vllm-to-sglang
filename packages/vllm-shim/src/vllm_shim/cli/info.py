@@ -60,7 +60,7 @@ def collect(
     backend_env: Mapping[str, str],
     aiter_capture: CapturePlan,
     aiter_restore: RestorePlan,
-    aiter_restored: Sequence[str],
+    aiter_restored: Mapping[str, str],
 ) -> dict[str, Any]:
     """Assemble the info dict from already-decided launch state."""
     env_translation = {k: v for k, v in backend_env.items() if k not in parent_env}
@@ -94,9 +94,8 @@ def collect(
         "aiter_restore": {
             "enabled": aiter_restore.enabled,
             "source": str(aiter_restore.source) if aiter_restore.source else None,
-            "target": str(aiter_restore.target),
             "reason": aiter_restore.reason,
-            "restored": list(aiter_restored),
+            "overrides": dict(aiter_restored),
         },
     }
 
@@ -129,11 +128,11 @@ def print_summary(info: dict[str, Any]) -> None:
     restore = info["aiter_restore"]
     if not restore["enabled"]:
         sys.stderr.write(f"  aiter restore: disabled ({restore['reason']})\n")
-    elif restore["restored"]:
-        names = ", ".join(restore["restored"])
+    elif restore["overrides"]:
+        envs = ", ".join(sorted(restore["overrides"].keys()))
         sys.stderr.write(
-            f"  aiter restore: {len(restore['restored'])} configs from "
-            f"{restore['source']} ({names})\n"
+            f"  aiter restore: {len(restore['overrides'])} configs from "
+            f"{restore['source']} ({envs})\n"
         )
     else:
         sys.stderr.write(

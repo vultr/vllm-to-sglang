@@ -4,8 +4,8 @@ AITER is AMD's optimized kernel library, used by SGLang on ROCm. It looks up tun
 
 The shim closes this loop in two halves:
 
-1. **Capture.** Tee the backend's stderr, parse `[aiter] shape is M:... not found tuned config in /tmp/aiter_configs/<target>.csv` lines, and persist them to `$HF_HOME/vllm-shim/aiter-shapes/...`. Captured shapes are the input the AITER tuner needs.
-2. **Restore.** At startup, symlink previously tuned configs from `$HF_HOME/vllm-shim/aiter-configs/<bucket>/` into `/tmp/aiter_configs/` so AITER finds them on first lookup.
+1. **Capture.** Tee the backend's stderr, parse `shape is M:... not found tuned config in <path>` lines, and persist them to `$HF_HOME/vllm-shim/aiter-shapes/...`. Captured shapes are the input the AITER tuner needs.
+2. **Restore.** At startup, point AITER's `AITER_CONFIG_*` env vars at previously tuned configs under `$HF_HOME/vllm-shim/aiter-configs/<bucket>/`. AITER then reads directly from the persistent volume on first lookup (no symlinks, no writes into `/tmp`).
 
 Both halves are silent no-ops when their prerequisites aren't met (no ROCm GPU, no resolvable HF cache), so the same image runs on CUDA hosts and dev boxes without surprise behavior.
 
@@ -15,7 +15,7 @@ The tuner itself (turning captured shapes into tuned configs) is not part of the
 
 The captured shapes and tuned configs need to survive pod restarts. Production Stack already mounts a persistent volume at `$HF_HOME` for model snapshots, so reusing that mount means operators don't have to wire a second PV. The shim resolves `$HF_HOME` via `huggingface_hub.constants.HF_HOME` (which already honors the env var, `$XDG_CACHE_HOME`, and `~/.cache/huggingface` defaults) so the captured/tuned trees automatically follow wherever HF itself is reading and writing.
 
-`/tmp/aiter_configs/` is AITER's hardcoded read location. There is no env knob to point AITER elsewhere, so restore goes through symlinks rather than changing where AITER looks.
+AITER's tuned-config CSV locations are env-overridable. Each kernel target has its own `AITER_CONFIG_*` env var (`AITER_CONFIG_GEMM_BF16` for `bf16_tuned_gemm.csv`, `AITER_CONFIG_GEMM_A8W8` for `a8w8_tuned_gemm.csv`, etc.; see `repos/aiter/aiter/jit/core.py` for the full list). Restore sets those env vars in the backend's environment so AITER reads the configs directly off the PV. No symlinks, no writes into `/tmp`, multiple pods on the same PV share the files read-only for free.
 
 ## Path layout
 
@@ -74,23 +74,38 @@ A few invariants to know about:
 - **`ShapeStore` dedups twice.** An in-memory set per target prevents repeat writes during this process, and on first write to a target the existing CSV is loaded into that set so restarts converge on a deduped file. Concurrent writers on a shared persistent volume could in theory produce duplicate rows; we accept that and the operator can dedupe offline if it ever matters.
 - **One CSV per AITER target.** Targets come from the basename of the `/tmp/aiter_configs/...csv` path the log line names. `bf16_gemm.csv`, `fp8_blockscale_gemm.csv`, etc. The directory part of that path is hardcoded by AITER and unrelated to where we write.
 
-## Restore: how `/tmp/aiter_configs/` gets seeded
+## Restore: how AITER gets pointed at our configs
 
 ```
-$HF_HOME/vllm-shim/aiter-configs/<bucket>/*.csv
+$HF_HOME/vllm-shim/aiter-configs/<bucket>/bf16_tuned_gemm.csv
                    │
                    ▼  pre-launch, in vllm_shim.aiter.restore.restore_configs
-                symlink each file
+       map basename -> AITER_CONFIG_GEMM_BF16
                    │
                    ▼
-              /tmp/aiter_configs/*.csv   # AITER reads from here
+     backend_env["AITER_CONFIG_GEMM_BF16"] = "<that path>"
+                   │
+                   ▼
+       AITER's jit/core.py reads the env at import time
 ```
 
-Restore is **idempotent**: a destination that already exists (regular file or symlink) is left alone. This protects an operator who has hand-placed configs from being clobbered, and lets the function be called safely on every launch.
+The mapping from tuned-config basename to env var lives in `_TARGET_ENV` in `vllm_shim.aiter.restore`. It mirrors AITER's own `AITER_CONFIG_*` defaults defined in `repos/aiter/aiter/jit/core.py`. The known mapping today:
 
-Restore is **per-file error tolerant**: if symlinking one file fails (`OSError`, permissions, ENOSPC), the function skips it and continues with the rest. The shim must not refuse to launch the backend because a restore step misbehaved.
+| Basename | Env var | AITER property |
+|---|---|---|
+| `bf16_tuned_gemm.csv` | `AITER_CONFIG_GEMM_BF16` | `AITER_CONFIG_GEMM_BF16_FILE` |
+| `a4w4_blockscale_tuned_gemm.csv` | `AITER_CONFIG_GEMM_A4W4` | `AITER_CONFIG_GEMM_A4W4_FILE` |
+| `a8w8_tuned_gemm.csv` | `AITER_CONFIG_GEMM_A8W8` | `AITER_CONFIG_GEMM_A8W8_FILE` |
+| `a8w8_bpreshuffle_tuned_gemm.csv` | `AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE` | `AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE` |
+| `a8w8_blockscale_tuned_gemm.csv` | `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE` | `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE` |
+| `a8w8_blockscale_bpreshuffle_tuned_gemm.csv` | `AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE` | `..._BLOCKSCALE_BPRESHUFFLE_FILE` |
+| `bf16_tuned_batched_gemm.csv` | `AITER_CONFIG_BF16_BATCHED_GEMM` | `AITER_CONFIG_BF16_BATCHED_GEMM_FILE` |
+| `a8w8_tuned_batched_gemm.csv` | `AITER_CONFIG_A8W8_BATCHED_GEMM` | `AITER_CONFIG_A8W8_BATCHED_GEMM_FILE` |
+| `tuned_fmoe.csv` | `AITER_CONFIG_FMOE` | `AITER_CONFIG_FMOE_FILE` |
 
-The target `/tmp/aiter_configs/` is created on every enabled launch whether or not the source has any files, because AITER may *write* into it during a fine-tuning run and a missing directory would fail differently than an empty one.
+`restore_configs` is read-only: it lists the bucket directory, looks up known basenames in the mapping, and returns the `{env_var: path}` dict. The entrypoint filters out any var the operator has already set, then merges the rest into `backend_env` before spawning. Unknown basenames are skipped (likely a future AITER target the shim doesn't recognise yet; the operator can set the env var manually if needed).
+
+**Precedence**: operator-set `AITER_CONFIG_*` env vars (in the pod spec or container `ENV`) win over restore. Same principle as `translate_env_with_map`: if the operator wrote it down, they meant it. The launch-info dump only lists the overrides that actually took effect, so a missing entry in `aiter_restore.overrides` for a target whose file exists under `$HF_HOME` is the signal that the operator's env beat us to it.
 
 ## Prerequisites and decision flow
 

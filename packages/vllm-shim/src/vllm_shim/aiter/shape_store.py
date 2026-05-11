@@ -1,9 +1,18 @@
 """Persist captured AITER shapes to CSV with dedup.
 
 One CSV per AITER target (the basename AITER itself looks up, e.g.
-``bf16_gemm.csv``). The directory the store writes into is supplied by
-the caller; it encodes hardware bucket + model + parallelism in its
-path so files can't cross-pollinate between incompatible setups.
+``bf16_tuned_gemm.csv``). The directory the store writes into is
+supplied by the caller; it encodes hardware bucket + model +
+parallelism in its path so files can't cross-pollinate between
+incompatible setups.
+
+Column order and naming match AITER's own ``save_shapes`` writer in
+``repos/aiter/aiter/tuned_gemm.py`` so the captured CSV is a drop-in
+``--untune_file`` for the per-target tune scripts (``M, N, K, bias,
+dtype, outdtype, scaleAB, bpreshuffle``). The shape-key columns the
+tuner actually cares about are ``M, N, K`` (and ``B`` for batched
+variants we don't currently produce); the rest are descriptive and
+identify the kernel family.
 
 Dedup is double-bucketed: an in-memory set per target prevents repeat
 writes during this process, and on first write to a target the existing
@@ -18,21 +27,21 @@ from pathlib import Path
 
 from vllm_shim.aiter.log_parser import AiterShape
 
-# Column order is the contract with the (future) tuner consumer. Keep
-# the AITER-side names (scaleAB, bpreshuffle) so a human reading the
-# CSV against an AITER log can match fields by eye.
+# Column order is the contract with the AITER tuner. ``outdtype`` (not
+# ``otype``) is intentional - that's what AITER's CSV schema uses, even
+# though the runtime log line spells the same value as ``otype=``.
 _HEADER: tuple[str, ...] = (
     "M",
     "N",
     "K",
-    "dtype",
-    "otype",
     "bias",
+    "dtype",
+    "outdtype",
     "scaleAB",
     "bpreshuffle",
 )
 
-_ShapeKey = tuple[int, int, int, str, str, bool, bool, bool]
+_ShapeKey = tuple[int, int, int, bool, str, str, bool, bool]
 
 
 def _key(shape: AiterShape) -> _ShapeKey:
@@ -40,9 +49,9 @@ def _key(shape: AiterShape) -> _ShapeKey:
         shape.m,
         shape.n,
         shape.k,
-        shape.dtype,
-        shape.otype,
         shape.bias,
+        shape.dtype,
+        shape.outdtype,
         shape.scale_ab,
         shape.bpreshuffle,
     )
@@ -53,9 +62,9 @@ def _row(shape: AiterShape) -> list[str]:
         str(shape.m),
         str(shape.n),
         str(shape.k),
-        shape.dtype,
-        shape.otype,
         str(shape.bias),
+        shape.dtype,
+        shape.outdtype,
         str(shape.scale_ab),
         str(shape.bpreshuffle),
     ]
@@ -66,9 +75,9 @@ def _row_to_key(row: dict[str, str]) -> _ShapeKey:
         int(row["M"]),
         int(row["N"]),
         int(row["K"]),
-        row["dtype"],
-        row["otype"],
         row["bias"] == "True",
+        row["dtype"],
+        row["outdtype"],
         row["scaleAB"] == "True",
         row["bpreshuffle"] == "True",
     )

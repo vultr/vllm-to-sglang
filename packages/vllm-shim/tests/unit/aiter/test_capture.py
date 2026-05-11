@@ -17,10 +17,10 @@ from vllm_shim.values.parallelism import Parallelism
 
 _GPU = GpuAgent(gfx_target="gfx942", compute_units=304, marketing_name="MI300X")
 _CANONICAL_LINE = (
-    "[aiter] shape is M:1024, N:7168, K:512 "
+    "shape is M:1024, N:7168, K:512 "
     "dtype=torch.bfloat16 otype=torch.bfloat16 "
-    "bias=False scaleAB=False bpreshuffle=False, "
-    "not found tuned config in /tmp/aiter_configs/bf16_gemm.csv, "
+    "bias=False, scaleAB=False, bpreshuffle=False, "
+    "not found tuned config in /opt/aiter/aiter/configs/bf16_tuned_gemm.csv, "
     "will use default config!"
 )
 
@@ -134,7 +134,7 @@ def test_callback_parses_aiter_line_and_stores_shape(tmp_path: Path) -> None:
     store = ShapeStore(tmp_path)
     cb = build_callback(store)
     cb(_CANONICAL_LINE + "\n")
-    assert (tmp_path / "bf16_gemm.csv").exists()
+    assert (tmp_path / "bf16_tuned_gemm.csv").exists()
 
 
 def test_callback_ignores_non_aiter_lines(tmp_path: Path) -> None:
@@ -155,6 +155,6 @@ def test_callback_dedups_repeated_lines(tmp_path: Path) -> None:
     cb = build_callback(store)
     for _ in range(5):
         cb(_CANONICAL_LINE + "\n")
-    csv_path = tmp_path / "bf16_gemm.csv"
+    csv_path = tmp_path / "bf16_tuned_gemm.csv"
     # Header + one data row.
     assert len(csv_path.read_text().splitlines()) == 2

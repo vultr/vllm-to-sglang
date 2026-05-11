@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from vllm_shim.aiter.capture import REASON_ENABLED, REASON_NO_GPU, CapturePlan
-from vllm_shim.aiter.restore import AITER_CONFIG_DIR, RestorePlan
+from vllm_shim.aiter.restore import RestorePlan
 from vllm_shim.cli import info
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
@@ -16,9 +16,7 @@ def _disabled_capture() -> CapturePlan:
 
 
 def _disabled_restore() -> RestorePlan:
-    return RestorePlan(
-        enabled=False, source=None, target=AITER_CONFIG_DIR, reason=REASON_NO_GPU
-    )
+    return RestorePlan(enabled=False, source=None, reason=REASON_NO_GPU)
 
 
 def _sample_args() -> dict[str, object]:
@@ -34,7 +32,7 @@ def _sample_args() -> dict[str, object]:
         "dropped_args": ("--enable-chunked-prefill",),
         "aiter_capture": _disabled_capture(),
         "aiter_restore": _disabled_restore(),
-        "aiter_restored": (),
+        "aiter_restored": {},
     }
 
 
@@ -133,10 +131,12 @@ def test_collect_aiter_restore_enabled_shape() -> None:
     args["aiter_restore"] = RestorePlan(
         enabled=True,
         source=Path("/data/hf/vllm-shim/aiter-configs/gfx942-304cu"),
-        target=AITER_CONFIG_DIR,
         reason=REASON_ENABLED,
     )
-    args["aiter_restored"] = ("bf16_gemm.csv", "fp8_blockscale_gemm.csv")
+    args["aiter_restored"] = {
+        "AITER_CONFIG_GEMM_BF16": "/data/hf/.../bf16_tuned_gemm.csv",
+        "AITER_CONFIG_GEMM_A8W8": "/data/hf/.../a8w8_tuned_gemm.csv",
+    }
     out = info.collect(
         **args,  # type: ignore[arg-type]
         parent_env={},
@@ -146,11 +146,13 @@ def test_collect_aiter_restore_enabled_shape() -> None:
     assert out["aiter_restore"]["source"] == str(
         Path("/data/hf/vllm-shim/aiter-configs/gfx942-304cu")
     )
-    assert out["aiter_restore"]["target"] == str(AITER_CONFIG_DIR)
-    assert out["aiter_restore"]["restored"] == [
-        "bf16_gemm.csv",
-        "fp8_blockscale_gemm.csv",
-    ]
+    # The serialized overrides are the env-var -> path mapping AITER
+    # will read at import time; tests assert on the dict directly so
+    # any divergence between the in-memory and dumped shapes is loud.
+    assert out["aiter_restore"]["overrides"] == {
+        "AITER_CONFIG_GEMM_BF16": "/data/hf/.../bf16_tuned_gemm.csv",
+        "AITER_CONFIG_GEMM_A8W8": "/data/hf/.../a8w8_tuned_gemm.csv",
+    }
 
 
 def test_collect_aiter_restore_disabled_shape() -> None:
@@ -162,9 +164,8 @@ def test_collect_aiter_restore_disabled_shape() -> None:
     assert out["aiter_restore"] == {
         "enabled": False,
         "source": None,
-        "target": str(AITER_CONFIG_DIR),
         "reason": REASON_NO_GPU,
-        "restored": [],
+        "overrides": {},
     }
 
 
@@ -185,9 +186,8 @@ _DISABLED_CAPTURE_DICT: dict[str, object] = {
 _DISABLED_RESTORE_DICT: dict[str, object] = {
     "enabled": False,
     "source": None,
-    "target": "/tmp/aiter_configs",
     "reason": REASON_NO_GPU,
-    "restored": [],
+    "overrides": {},
 }
 
 
@@ -271,7 +271,7 @@ def test_print_summary_shows_capture_path_when_enabled(
     )
 
 
-def test_print_summary_shows_restore_count_and_names_when_enabled(
+def test_print_summary_shows_restore_count_and_env_vars_when_enabled(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     info.print_summary(
@@ -287,19 +287,20 @@ def test_print_summary_shows_restore_count_and_names_when_enabled(
             "aiter_restore": {
                 "enabled": True,
                 "source": "/data/hf/vllm-shim/aiter-configs/gfx942-304cu",
-                "target": "/tmp/aiter_configs",
                 "reason": REASON_ENABLED,
-                "restored": ["bf16_gemm.csv", "fp8_blockscale_gemm.csv"],
+                "overrides": {
+                    "AITER_CONFIG_GEMM_BF16": "/data/hf/.../bf16_tuned_gemm.csv",
+                    "AITER_CONFIG_GEMM_A8W8": "/data/hf/.../a8w8_tuned_gemm.csv",
+                },
             },
         }
     )
     err = capsys.readouterr().err
-    # The count + names together give the operator everything they need
-    # to confirm AITER picked up the right configs without having to ls
-    # the target directory.
+    # The count + env-var names tell the operator which AITER targets
+    # were picked up. Paths are in the JSON dump if anyone wants them.
     assert "aiter restore: 2 configs from" in err
-    assert "bf16_gemm.csv" in err
-    assert "fp8_blockscale_gemm.csv" in err
+    assert "AITER_CONFIG_GEMM_BF16" in err
+    assert "AITER_CONFIG_GEMM_A8W8" in err
 
 
 def test_print_summary_says_nothing_to_restore_when_source_empty(
@@ -322,9 +323,8 @@ def test_print_summary_says_nothing_to_restore_when_source_empty(
             "aiter_restore": {
                 "enabled": True,
                 "source": "/data/hf/vllm-shim/aiter-configs/gfx942-304cu",
-                "target": "/tmp/aiter_configs",
                 "reason": REASON_ENABLED,
-                "restored": [],
+                "overrides": {},
             },
         }
     )

@@ -80,14 +80,21 @@ def main() -> int:
     backend_env = backend.env.translate(os.environ)
 
     # AITER integration: probe ROCm + resolve HF cache once, then drive both
-    # the restore (seed /tmp/aiter_configs from previously tuned data) and
-    # capture (record shape misses for the next tuner run) decisions off the
-    # same shared environment. Restore runs synchronously so the symlinks
-    # are in place before the backend touches AITER.
+    # the restore (point AITER's AITER_CONFIG_* env vars at previously tuned
+    # CSVs on the PV) and capture (record shape misses for the next tuner
+    # run) decisions off the same shared environment. Restore overrides land
+    # in backend_env before spawn so AITER picks them up at import time.
     hf_home = resolve_hf_home()
     gpu = probe_rocm()
     restore_plan = plan_restore(hf_home=hf_home, gpu=gpu)
-    restored = restore_configs(restore_plan)
+    # Operator-set AITER_CONFIG_* env vars win over our restore. Same
+    # principle as translate_env_with_map: if the operator wrote it
+    # into the pod spec, they meant it. The launch-info dump shows
+    # only the overrides that actually took effect.
+    restored = {
+        k: v for k, v in restore_configs(restore_plan).items() if k not in backend_env
+    }
+    backend_env.update(restored)
     capture_plan = plan_capture(
         hf_home=hf_home,
         gpu=gpu,
