@@ -13,6 +13,7 @@ dependencies = [
 vllm = "vllm_shim.cli.entrypoint:main"
 vllm-shim-middleware = "vllm_shim.middleware.app:run"
 vllm-shim-info = "vllm_shim.cli.info:main"
+vllm-shim-tune = "vllm_shim.aiter.tune:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,358 @@
+"""Tests for the ``vllm-shim-tune`` orchestration."""
+
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+from vllm_shim.aiter import tune
+from vllm_shim.aiter.tune import (
+    TuneResult,
+    build_command,
+    discover_shape_files,
+    known_targets,
+    main,
+    merge_shape_files,
+    tune_target,
+)
+
+_HEADER = "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle"
+_ROW_A = "1024,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+_ROW_B = "2048,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+_ROW_C = "4096,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+
+
+def _write(path: Path, *rows: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join((_HEADER, *rows)) + "\n")
+    return path
+
+
+# ---------- known_targets / _SPECS contract ----------
+
+
+def test_known_targets_covers_all_restorable_targets() -> None:
+    # Same keyspace as restore._TARGET_ENV minus the deliberately
+    # excluded ``tuned_fmoe``. If a tuner is added for fmoe, this
+    # assertion needs to flip and tuned_fmoe should appear here too.
+    from vllm_shim.aiter.restore import _TARGET_ENV
+
+    assert set(known_targets()) == set(_TARGET_ENV.keys()) - {"tuned_fmoe"}
+
+
+def test_blockscale_bpreshuffle_reuses_blockscale_script() -> None:
+    # Important AITER quirk worth pinning: the bpreshuffle variant is
+    # the same script with one extra flag, not a separate file.
+    plain = tune._SPECS["a8w8_blockscale_tuned_gemm"]
+    pre = tune._SPECS["a8w8_blockscale_bpreshuffle_tuned_gemm"]
+    assert plain.script == pre.script
+    assert "--preshuffle" in pre.extra_args
+    assert "--preshuffle" not in plain.extra_args
+
+
+# ---------- discover_shape_files ----------
+
+
+def test_discover_returns_empty_when_bucket_dir_missing(tmp_path: Path) -> None:
+    assert discover_shape_files(tmp_path, "gfx942-304cu", "bf16_tuned_gemm") == []
+
+
+def test_discover_walks_model_and_parallelism(tmp_path: Path) -> None:
+    bucket = tmp_path / "aiter" / "shapes" / "gfx942-304cu"
+    a = _write(bucket / "modelA" / "tp8" / "bf16_tuned_gemm.csv", _ROW_A)
+    b = _write(bucket / "modelB" / "tp4-ep4" / "bf16_tuned_gemm.csv", _ROW_B)
+    _write(bucket / "modelB" / "tp4-ep4" / "a8w8_tuned_gemm.csv", _ROW_C)
+    found = discover_shape_files(tmp_path, "gfx942-304cu", "bf16_tuned_gemm")
+    assert found == sorted([a, b])
+
+
+# ---------- merge_shape_files ----------
+
+
+def test_merge_dedups_across_files(tmp_path: Path) -> None:
+    f1 = _write(tmp_path / "f1.csv", _ROW_A, _ROW_B)
+    f2 = _write(tmp_path / "f2.csv", _ROW_A, _ROW_C)
+    dest = tmp_path / "merged" / "out.csv"
+    rows = merge_shape_files([f1, f2], dest)
+    assert rows == 3  # A, B, C (one A dropped)
+    text = dest.read_text().splitlines()
+    assert text[0] == _HEADER
+    assert set(text[1:]) == {_ROW_A, _ROW_B, _ROW_C}
+
+
+def test_merge_empty_list_writes_nothing(tmp_path: Path) -> None:
+    dest = tmp_path / "merged" / "out.csv"
+    assert merge_shape_files([], dest) == 0
+    assert not dest.exists()
+
+
+def test_merge_rejects_header_mismatch(tmp_path: Path) -> None:
+    f1 = _write(tmp_path / "f1.csv", _ROW_A)
+    f2 = tmp_path / "f2.csv"
+    f2.write_text("M,N,K\n1024,7168,512\n")
+    with pytest.raises(ValueError, match="header mismatch"):
+        merge_shape_files([f1, f2], tmp_path / "out.csv")
+
+
+# ---------- build_command ----------
+
+
+def test_build_command_gradlib_shape() -> None:
+    spec = tune._SPECS["bf16_tuned_gemm"]
+    python = Path("/opt/venv/bin/python")
+    aiter_root = Path("/sgl-workspace/aiter")
+    untuned = Path("/tmp/untuned.csv")
+    tuned = Path("/data/tuned.csv")
+    cmd = build_command(
+        spec,
+        python=python,
+        aiter_root=aiter_root,
+        untuned_file=untuned,
+        tuned_file=tuned,
+        retune=False,
+    )
+    # gradlib uses --input_file / --tuned_file; csrc spelling would
+    # silently mis-bind. Pin both flag spellings + their pairing.
+    # Paths are stringified through ``str(Path(...))`` so the test
+    # passes on both POSIX and Windows separator conventions.
+    assert cmd == [
+        str(python),
+        str(aiter_root / "gradlib" / "gradlib" / "gemm_tuner.py"),
+        "--input_file",
+        str(untuned),
+        "--tuned_file",
+        str(tuned),
+    ]
+
+
+def test_build_command_csrc_passes_libtype(tmp_path: Path) -> None:
+    spec = tune._SPECS["a8w8_tuned_gemm"]
+    cmd = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=False,
+    )
+    assert "--untune_file" in cmd
+    assert "--tune_file" in cmd
+    i = cmd.index("--libtype")
+    assert cmd[i : i + 2] == ["--libtype", "all"]
+
+
+def test_build_command_blockscale_bpreshuffle_includes_preshuffle() -> None:
+    spec = tune._SPECS["a8w8_blockscale_bpreshuffle_tuned_gemm"]
+    cmd = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=False,
+    )
+    assert "--preshuffle" in cmd
+
+
+def test_build_command_retune_appends_all() -> None:
+    spec = tune._SPECS["a8w8_tuned_gemm"]
+    cmd = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=True,
+    )
+    # --all is AITER's incremental-bypass flag; without it the tuner
+    # already skips already-tuned shapes (which is what we want by
+    # default).
+    assert cmd[-1] == "--all"
+
+
+# ---------- tune_target ----------
+
+
+def _spy_runner() -> tuple[Callable[[list[str]], int], list[list[str]]]:
+    calls: list[list[str]] = []
+
+    def runner(cmd: list[str]) -> int:
+        calls.append(cmd)
+        return 0
+
+    return runner, calls
+
+
+def test_tune_target_no_shapes_yields_skipped(tmp_path: Path) -> None:
+    # Pre-tuner pod: shapes directory empty. The orchestrator must
+    # report the skip rather than invoke AITER with an empty input.
+    runner, calls = _spy_runner()
+    result = tune_target(
+        "bf16_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=False,
+        run=runner,
+    )
+    assert result.skipped_reason == "no captured shapes"
+    assert result.rows_in == 0
+    assert calls == []
+
+
+def test_tune_target_dry_run_builds_command_but_does_not_invoke(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv",
+        _ROW_A,
+    )
+    runner, calls = _spy_runner()
+    result = tune_target(
+        "bf16_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=True,
+        run=runner,
+    )
+    assert result.skipped_reason == "dry-run"
+    assert result.rows_in == 1
+    assert calls == []
+    assert "--input_file" in result.command
+
+
+def test_tune_target_invokes_runner_when_not_dry(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "a8w8_tuned_gemm.csv",
+        _ROW_A,
+        _ROW_B,
+    )
+    runner, calls = _spy_runner()
+    result = tune_target(
+        "a8w8_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=False,
+        run=runner,
+    )
+    assert result.returncode == 0
+    assert result.rows_in == 2
+    assert len(calls) == 1
+    # The merged untuned CSV must exist on disk before the tuner is
+    # invoked; otherwise AITER's argparse-bound file open will fail.
+    assert result.untuned_file.exists()
+
+
+def test_tune_target_runner_failure_surfaces_returncode(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv",
+        _ROW_A,
+    )
+
+    def failing(_: list[str]) -> int:
+        return 7
+
+    result = tune_target(
+        "bf16_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=False,
+        run=failing,
+    )
+    assert result.returncode == 7
+
+
+# ---------- main() ----------
+
+
+def test_main_errors_when_shim_home_unresolvable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(tune, "resolve_shim_home", lambda: None)
+    rc = main(["--bucket", "gfx942-304cu"])
+    assert rc == 1
+    assert "could not resolve VLLM_SHIM_HOME" in capsys.readouterr().err
+
+
+def test_main_errors_when_bucket_unresolvable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # No --bucket and no ROCm GPU: explicit failure rather than silent
+    # tuning under the wrong bucket key.
+    monkeypatch.setattr(tune, "probe_rocm", lambda: None)
+    rc = main(["--shim-home", str(tmp_path)])
+    assert rc == 1
+    assert "no ROCm GPU detected" in capsys.readouterr().err
+
+
+def test_main_list_prints_per_target_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv",
+        _ROW_A,
+    )
+    (tmp_path / "aiter" / "configs" / "gfx942-304cu").mkdir(parents=True)
+    (tmp_path / "aiter" / "configs" / "gfx942-304cu" / "a8w8_tuned_gemm.csv").write_text(
+        "header\n"
+    )
+    rc = main(
+        ["--shim-home", str(tmp_path), "--bucket", "gfx942-304cu", "--list"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    # Captured but not tuned:
+    assert "bf16_tuned_gemm: 1 shape file(s), untuned" in out
+    # Tuned but no captures (legacy from a previous bucket):
+    assert "a8w8_tuned_gemm: 0 shape file(s), tuned" in out
+
+
+def test_main_dry_run_iterates_only_chosen_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "a8w8_tuned_gemm.csv",
+        _ROW_A,
+    )
+    invoked: list[list[str]] = []
+
+    def fake_tune_target(target: str, **kw: object) -> TuneResult:
+        # Capture the per-target call so we can assert on its identity.
+        invoked.append([target])
+        return TuneResult(
+            target=target,
+            untuned_file=Path("u.csv"),
+            tuned_file=Path("t.csv"),
+            rows_in=1,
+            command=["echo"],
+            returncode=None,
+            skipped_reason="dry-run",
+        )
+
+    monkeypatch.setattr(tune, "tune_target", fake_tune_target)
+    rc = main(
+        [
+            "--shim-home",
+            str(tmp_path),
+            "--bucket",
+            "gfx942-304cu",
+            "--target",
+            "a8w8_tuned_gemm",
+            "--dry-run",
+        ]
+    )
+    assert rc == 0
+    assert invoked == [["a8w8_tuned_gemm"]]
+    assert "skipped (dry-run)" in capsys.readouterr().err

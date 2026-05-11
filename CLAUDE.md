@@ -78,10 +78,10 @@ Once translation is settled the entrypoint calls `vllm_shim.cli.info.collect`, w
 
 On ROCm backends (SGLang on AMD GPUs today), the entrypoint also does two AITER-specific things, gated on a ROCm GPU detection plus a resolvable HF cache:
 
-1. **Restore.** Before launching the backend, symlink any tuned configs from `$HF_HOME/vllm-shim/aiter-configs/<bucket>/` into `/tmp/aiter_configs/` (AITER's hardcoded read location). Idempotent and per-file error tolerant. See `vllm_shim.aiter.restore`.
-2. **Capture.** Spawn the backend with `stderr=PIPE` and start a `StreamTee` daemon (`vllm_shim.aiter.stream_tee`) that forwards every line to the real stderr while parsing `[aiter] shape is M:... not found tuned config ...` lines and appending them, deduped, to `$HF_HOME/vllm-shim/aiter-shapes/<bucket>/<sanitized_model>/<parallelism>/<target>.csv`. The parallelism segment comes from the backend's `ParallelismExtractor` reading the *post-translation* argv (operators can pass either vLLM-style or backend-native flags, so we can't trust input-side flag names). See `vllm_shim.aiter.capture`.
+1. **Restore.** Before launching the backend, point AITER's `AITER_CONFIG_*` env vars at any tuned CSVs found under `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`. AITER reads the env at import time, so no symlinks or `/tmp` writes are needed. Operator-set `AITER_CONFIG_*` values always win. See `vllm_shim.aiter.restore`.
+2. **Capture.** Spawn the backend with `stderr=PIPE` and start a `StreamTee` daemon (`vllm_shim.aiter.stream_tee`) that forwards every line to the real stderr while parsing `shape is M:... not found tuned config ...` lines and appending them, deduped, to `$VLLM_SHIM_HOME/aiter/shapes/<bucket>/<sanitized_model>/<parallelism>/<target>.csv`. The parallelism segment comes from the backend's `ParallelismExtractor` reading the *post-translation* argv (operators can pass either vLLM-style or backend-native flags, so we can't trust input-side flag names). See `vllm_shim.aiter.capture`.
 
-On CUDA hosts and dev boxes both halves no-op silently with stable reason strings in the launch-info dump. The tuner step that turns captured shapes into tuned configs is offline today; the operator drops the result under `aiter-configs/`. See `docs/aiter.md` for path layout, prerequisites, and the operator surface.
+On CUDA hosts and dev boxes both halves no-op silently with stable reason strings in the launch-info dump. `$VLLM_SHIM_HOME` defaults to `~/.vllm-shim`; operators point it at a PV in production. The tuner step that turns captured shapes into tuned configs is the `vllm-shim-tune` console script (`vllm_shim.aiter.tune`); an operator runs it from a pod shell after capture has accumulated misses, and it writes into `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`. See `docs/aiter.md` for path layout, prerequisites, the tuner CLI, and the operator surface.
 
 ### The `vllm-entrypoints` stub package
 
@@ -105,6 +105,7 @@ The shim has no config file. Behavior is driven by CLI args (the `vllm serve` in
 | Env var | Default | Effect |
 |---|---|---|
 | `VLLM_SHIM_BACKEND`        | `sglang`         | `sglang` or `trtllm`. |
+| `VLLM_SHIM_HOME`           | `~/.vllm-shim`   | Root for the shim's persistent state (AITER capture + tuned configs). Point at a PV in production. |
 | `VLLM_SHIM_LOG`            | `/tmp/vllm-shim.log` | Where 4xx/5xx error dumps are appended. Read once at module import. |
 | `SGLANG_TOOL_CALL_PARSER`  | `qwen3_coder`    | Forwarded to SGLang's `--tool-call-parser`. |
 | `VLLM_SHIM_BACKEND_HOST` / `VLLM_SHIM_BACKEND_PORT` / `VLLM_SHIM_MIDDLEWARE_PORT` | derived | Set by the supervisor when spawning the middleware; not normally set by hand. |

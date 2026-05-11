@@ -9,7 +9,7 @@ The shim closes this loop in two halves:
 
 Both halves are silent no-ops when their prerequisites aren't met (no ROCm GPU, no resolvable shim home), so the same image runs on CUDA hosts and dev boxes without surprise behavior.
 
-The tuner itself (turning captured shapes into tuned configs) is not part of the shim today; that work happens offline, and the operator drops the result under the `aiter/configs/` tree before the next launch.
+The tuner step that turns captured shapes into tuned configs is wired up as a separate operator-driven console script, `vllm-shim-tune`. It reads from `aiter/shapes/<bucket>/.../<target>.csv`, shells out to AITER's per-target tuner, and writes to `aiter/configs/<bucket>/<target>.csv`. See "Running the tuner" below.
 
 ## Why a dedicated `$VLLM_SHIM_HOME`
 
@@ -187,6 +187,51 @@ An operator who explicitly wants laziness for MoE can set `AITER_ONLINE_TUNE=1` 
 
 **Log level pin**: when capture is enabled, the entrypoint sets `AITER_LOG_LEVEL=INFO` in `backend_env` via `setdefault`. AITER emits the shape-not-found line at `logger.info`; an operator who raises log level globally would silence capture otherwise. The `setdefault` semantics preserve any explicit override (e.g. someone debugging who has good reason to quiet AITER).
 
+## Running the tuner
+
+`vllm-shim-tune` is a console script that turns captured shapes into tuned configs. Invoke it from a shell inside a pod that has ROCm + AITER available (the SGLang-ROCm shim image does):
+
+```
+vllm-shim-tune              # tune every target for the local GPU bucket
+vllm-shim-tune --list       # show captured/tuned state per target, no work
+vllm-shim-tune --target a8w8_tuned_gemm
+vllm-shim-tune --dry-run    # print the AITER commands without running them
+vllm-shim-tune --retune     # force re-tune of every shape (--all to AITER)
+```
+
+The default behaviour is incremental: AITER's tuners read the existing `configs/<bucket>/<target>.csv`, diff against the merged captured shapes, and only tune the new rows. `--retune` maps to AITER's own `--all` flag and re-tunes from scratch.
+
+Key flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--bucket` | inferred via `rocminfo` | Hardware bucket to tune for (e.g. `gfx942-304cu`). Required when there's no local ROCm GPU (offline tuning on captured CSVs). |
+| `--target` | all known targets | Tune only one tuned-config target. |
+| `--shim-home` | `VLLM_SHIM_HOME`, else `~/.vllm-shim` | Override the persistent root. |
+| `--aiter-root` | `/sgl-workspace/aiter` | Path to the AITER source tree (where the tuner scripts live). |
+| `--python` | `/opt/venv/bin/python` | Python interpreter that has AITER installed. The shim itself runs under `/opt/shim`'s Python 3.12; AITER lives in `/opt/venv`'s 3.10. |
+
+The tuner consolidates inputs per (bucket, target): every captured `shapes/<bucket>/<model>/<parallelism>/<target>.csv` is unioned into one deduped untuned file before AITER is invoked. The intermediate file lands under `$VLLM_SHIM_HOME/aiter/untuned/<bucket>/<target>.csv` so the operator can inspect what was fed into AITER if a tune misbehaves.
+
+### Target -> tuner script mapping
+
+The mapping is hardcoded in `vllm_shim.aiter.tune._SPECS`; AITER doesn't expose it as metadata. Two CLI conventions exist among AITER's own tuners:
+
+| Target | Tuner script | Input flag | Output flag | Extra args |
+|---|---|---|---|---|
+| `bf16_tuned_gemm` | `gradlib/gradlib/gemm_tuner.py` | `--input_file` | `--tuned_file` | |
+| `a4w4_blockscale_tuned_gemm` | `csrc/ck_gemm_a4w4_blockscale/gemm_a4w4_blockscale_tune.py` | `--untune_file` | `--tune_file` | `--libtype all` |
+| `a8w8_tuned_gemm` | `csrc/ck_gemm_a8w8/gemm_a8w8_tune.py` | `--untune_file` | `--tune_file` | `--libtype all` |
+| `a8w8_bpreshuffle_tuned_gemm` | `csrc/ck_gemm_a8w8_bpreshuffle/gemm_a8w8_bpreshuffle_tune.py` | `--untune_file` | `--tune_file` | `--libtype all` |
+| `a8w8_blockscale_tuned_gemm` | `csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py` | `--untune_file` | `--tune_file` | `--libtype all` |
+| `a8w8_blockscale_bpreshuffle_tuned_gemm` | (same script as blockscale) | `--untune_file` | `--tune_file` | `--libtype all --preshuffle` |
+| `bf16_tuned_batched_gemm` | `csrc/ck_batched_gemm_bf16/batched_gemm_bf16_tune.py` | `--untune_file` | `--tune_file` | `--libtype all` |
+| `a8w8_tuned_batched_gemm` | `csrc/ck_batched_gemm_a8w8/batched_gemm_a8w8_tune.py` | `--untune_file` | `--tune_file` | `--libtype all` |
+
+`tuned_fmoe` is deliberately not in the table. Its tuner (`csrc/ck_moe/gemm_moe_tune.py`) uses a third CLI (`-i/-o/-o2/--last`) and its log lines don't match the capture-side parser today, so we'd capture nothing to feed it. Adding it is future work in `log_parser.py` plus a new spec entry.
+
+When AITER adds a new tuned-config target, three places must move in lockstep: the capture-side regex/dataclass in `log_parser.py`, the restore-side env-var mapping in `restore._TARGET_ENV`, and the tuner spec in `tune._SPECS`. The test `test_known_targets_covers_all_restorable_targets` will fail loudly if `_SPECS` and `_TARGET_ENV` drift apart.
+
 ## Module layout
 
 | Module | Role |
@@ -197,6 +242,7 @@ An operator who explicitly wants laziness for MoE can set `AITER_ONLINE_TUNE=1` 
 | `vllm_shim.aiter.path` | `sanitize_model`, `shape_capture_root`. Pure. |
 | `vllm_shim.aiter.capture` | `CapturePlan`, `plan_capture`, `resolve_shim_home`, `build_callback`. |
 | `vllm_shim.aiter.restore` | `RestorePlan`, `plan_restore`, `restore_configs`. |
+| `vllm_shim.aiter.tune` | `TunerSpec`, `_SPECS`, `tune_target`, `main` (the `vllm-shim-tune` console script). |
 | `vllm_shim.cli.rocm_probe` | `parse_rocminfo`, `probe`, `bucket`. Shells out to `rocminfo`. |
 | `vllm_shim.values.parallelism` | `Parallelism` value + `path_segment()`. |
 | `vllm_shim.backend.base.parallelism` | `ParallelismExtractor` ABC. |
@@ -206,6 +252,6 @@ The split into many small modules is deliberate: each piece is pure (or has a si
 
 ## What this is not
 
-- **Not the tuner.** Capturing shapes does not produce tuned configs. That's a separate offline step running AITER's own tuner against the captured CSVs. A future `vllm-shim-tune` subcommand may automate it; today it is an operator-driven step that writes results into `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`.
+- **Not online.** The `vllm-shim-tune` step runs offline (or on-demand from a pod shell) and writes results into `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`. It is not invoked from the serve-time entrypoint; the running backend only picks up tuned configs at the next launch via the restore step.
 - **Not CUDA-relevant.** Capture and restore are no-ops on CUDA hosts (the rocm probe returns None). vLLM-on-CUDA does not use AITER. If a future vLLM-on-ROCm backend lands in the shim, it will reuse this same machinery without changes.
 - **Not coupled to SGLang.** The capture logic reads stderr line patterns AITER itself emits; any backend that uses AITER and produces the same warning format will work. The pattern lives in `log_parser.py` and is intentionally narrow.
