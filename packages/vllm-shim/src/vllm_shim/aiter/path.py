@@ -4,24 +4,26 @@ The captured-shape directory is keyed by every dimension that can change
 which tuned configs are valid: GPU SKU bucket, model, parallel topology.
 Concretely:
 
-    <hf_home>/vllm-shim/aiter-shapes/<bucket>/<model>/<parallelism>/<target>.csv
+    <shim_home>/aiter/shapes/<bucket>/<model>/<parallelism>/<target>.csv
 
 Where ``<bucket>`` comes from ``cli.rocm_probe.bucket`` (``gfx942-304cu``),
 ``<parallelism>`` from ``Parallelism.path_segment`` (``tp8``, ``tp8-ep8``),
-and ``<target>`` is the AITER CSV stem (``bf16_gemm``, ``fp8_blockscale_gemm``).
-``ShapeStore`` writes the per-target file inside the returned root.
+and ``<target>`` is the AITER CSV stem (``bf16_tuned_gemm``,
+``a8w8_blockscale_tuned_gemm``). ``ShapeStore`` writes the per-target file
+inside the returned root.
 
-The layout sits under ``$HF_HOME`` so it survives across pod restarts on
-the same persistent volume used for the model cache; a future
-``vllm-shim-tune`` subcommand can walk the tree and feed each leaf into
-the AITER tuner.
+The layout sits under ``$VLLM_SHIM_HOME`` (or its ``~/.vllm-shim``
+default) so it survives across pod restarts when an operator points the
+env var at a persistent volume. The sibling ``configs/`` tree under the
+same root holds tuned configs in the same bucket partitioning; the
+``vllm-shim-tune`` subcommand walks shapes and produces configs.
 """
 
 from pathlib import Path
 
 from vllm_shim.values.parallelism import Parallelism
 
-_ROOT_SUBDIR = ("vllm-shim", "aiter-shapes")
+_AITER_SHAPES = ("aiter", "shapes")
 
 
 def sanitize_model(model: str) -> str:
@@ -54,16 +56,16 @@ def sanitize_model(model: str) -> str:
 
 
 def shape_capture_root(
-    hf_home: Path,
+    shim_home: Path,
     bucket: str,
     model: str,
     parallelism: Parallelism,
 ) -> Path:
     """Directory where ``ShapeStore`` will land per-target CSVs."""
     return (
-        hf_home
-        / _ROOT_SUBDIR[0]
-        / _ROOT_SUBDIR[1]
+        shim_home
+        / _AITER_SHAPES[0]
+        / _AITER_SHAPES[1]
         / bucket
         / sanitize_model(model)
         / parallelism.path_segment()

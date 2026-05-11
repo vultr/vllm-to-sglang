@@ -26,6 +26,7 @@ INFO_PATH = Path("/tmp/vllm-shim-info.json")
 # operators see it in the launch dump.
 _SHIM_CONFIG_KEYS = (
     "VLLM_SHIM_BACKEND",
+    "VLLM_SHIM_HOME",
     "VLLM_SHIM_LOG",
     "SGLANG_TOOL_CALL_PARSER",
     "TRTLLM_BACKEND",

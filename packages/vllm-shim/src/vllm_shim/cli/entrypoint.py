@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_hf_home
+from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_shim_home
 from vllm_shim.aiter.restore import plan_restore, restore_configs
 from vllm_shim.aiter.shape_store import ShapeStore
 from vllm_shim.aiter.stream_tee import StreamTee
@@ -79,14 +79,15 @@ def main() -> int:
     # in scope; vLLM-side names stay in place and are ignored by the backend.
     backend_env = backend.env.translate(os.environ)
 
-    # AITER integration: probe ROCm + resolve HF cache once, then drive both
-    # the restore (point AITER's AITER_CONFIG_* env vars at previously tuned
-    # CSVs on the PV) and capture (record shape misses for the next tuner
-    # run) decisions off the same shared environment. Restore overrides land
-    # in backend_env before spawn so AITER picks them up at import time.
-    hf_home = resolve_hf_home()
+    # AITER integration: probe ROCm + resolve the shim's persistent home once,
+    # then drive both the restore (point AITER's AITER_CONFIG_* env vars at
+    # previously tuned CSVs on the PV) and capture (record shape misses for
+    # the next tuner run) decisions off the same shared environment. Restore
+    # overrides land in backend_env before spawn so AITER picks them up at
+    # import time.
+    shim_home = resolve_shim_home()
     gpu = probe_rocm()
-    restore_plan = plan_restore(hf_home=hf_home, gpu=gpu)
+    restore_plan = plan_restore(shim_home=shim_home, gpu=gpu)
     # Operator-set AITER_CONFIG_* env vars win over our restore. Same
     # principle as translate_env_with_map: if the operator wrote it
     # into the pod spec, they meant it. The launch-info dump shows
@@ -96,7 +97,7 @@ def main() -> int:
     }
     backend_env.update(restored)
     capture_plan = plan_capture(
-        hf_home=hf_home,
+        shim_home=shim_home,
         gpu=gpu,
         model=parsed.model,
         parallelism=backend.parallelism.extract(backend_args),

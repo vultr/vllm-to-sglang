@@ -4,14 +4,14 @@ Glues the existing pieces (rocm probe, ``ShapeStore``, ``parse_line``,
 ``StreamTee``) into a decision + setup the entrypoint can call once.
 
 Capture is opt-in by environment: it lights up only when a ROCm GPU is
-detected (so AITER is actually involved) AND an HF cache directory can
-be resolved (so the captured CSVs land on the persistent volume that
-survives pod restarts). Either prerequisite missing yields
+detected (so AITER is actually involved) AND the shim's persistent
+home directory can be resolved (so the captured CSVs survive pod
+restarts). Either prerequisite missing yields
 ``CapturePlan(enabled=False, reason=...)`` so the launch-info dump can
 surface why.
 
-The module exposes pure decision logic (``plan_capture``), HF cache
-resolution (``resolve_hf_home``), and a tiny callback builder
+The module exposes pure decision logic (``plan_capture``), persistent
+home resolution (``resolve_shim_home``), and a tiny callback builder
 (``build_callback``); the actual ``StreamTee`` wiring happens in the
 entrypoint where the backend subprocess is spawned.
 """
@@ -28,44 +28,33 @@ from vllm_shim.cli.rocm_probe import GpuAgent, bucket
 from vllm_shim.values.parallelism import Parallelism
 
 REASON_NO_GPU = "no ROCm GPU detected"
-REASON_NO_HF_HOME = "could not resolve HF cache directory"
+REASON_NO_SHIM_HOME = "could not resolve VLLM_SHIM_HOME"
 REASON_ENABLED = "enabled"
 
 
-def resolve_hf_home() -> Path | None:
-    """Best-effort resolution of the HF cache root, matching HF's own rules.
+def resolve_shim_home() -> Path | None:
+    """Resolve the shim's persistent home directory.
 
     Order of preference:
 
-    1. ``huggingface_hub.constants.HF_HOME`` — already handles the
-       ``HF_HOME`` env var, ``XDG_CACHE_HOME`` fallback, and ``~``
-       expansion. This is the same value HF itself uses for reads and
-       writes, so captured shapes share the persistent volume with the
-       model snapshots.
-    2. Direct env var fallback if the import fails for any reason
-       (paranoia: ``huggingface_hub`` is a required dep, but a broken
-       install shouldn't take the whole launch with it).
-    3. ``~/.cache/huggingface`` as a last resort, matching HF's documented
-       default.
+    1. ``$VLLM_SHIM_HOME`` if set. Production deployments set this to
+       the persistent volume mount (typically ``/data/vllm-shim``) so
+       captured shapes and tuned configs survive pod restarts.
+    2. ``~/.vllm-shim`` as the default for dev hosts and operators who
+       haven't picked a mount path yet.
 
-    Returns ``None`` only when home expansion itself fails (e.g. no home
-    directory at all in some container images), so the caller can surface
-    that as a disabled-capture reason.
+    Returns ``None`` only when home expansion itself fails (e.g. some
+    container images run with no home directory at all), so the caller
+    can surface that as a disabled-capture reason.
     """
-    try:
-        from huggingface_hub.constants import HF_HOME as HF_HUB_HF_HOME
-    except ImportError:
-        HF_HUB_HF_HOME = ""
-    if HF_HUB_HF_HOME:
-        return Path(HF_HUB_HF_HOME)
-    env = os.environ.get("HF_HOME")
+    env = os.environ.get("VLLM_SHIM_HOME")
     if env:
         return Path(env).expanduser()
     try:
         home = Path.home()
     except (RuntimeError, OSError):
         return None
-    return home / ".cache" / "huggingface"
+    return home / ".vllm-shim"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,26 +68,26 @@ class CapturePlan:
 
 def plan_capture(
     *,
-    hf_home: Path | None,
+    shim_home: Path | None,
     gpu: GpuAgent | None,
     model: str,
     parallelism: Parallelism,
 ) -> CapturePlan:
     """Decide whether AITER shape capture is feasible for this launch.
 
-    Pure function. ``hf_home`` is the already-resolved HF cache root
-    (use ``resolve_hf_home`` to compute it), or None when no cache
-    location could be determined. ``gpu`` is the first GPU agent from
+    Pure function. ``shim_home`` is the already-resolved shim home dir
+    (use ``resolve_shim_home`` to compute it), or None when even home
+    expansion failed. ``gpu`` is the first GPU agent from
     ``rocm_probe.probe()`` (or None on CUDA hosts and dev boxes). Both
     prerequisites must be present; otherwise the returned plan is
     disabled with a human-readable ``reason`` for the launch-info dump.
     """
     if gpu is None:
         return CapturePlan(enabled=False, root=None, reason=REASON_NO_GPU)
-    if hf_home is None:
-        return CapturePlan(enabled=False, root=None, reason=REASON_NO_HF_HOME)
+    if shim_home is None:
+        return CapturePlan(enabled=False, root=None, reason=REASON_NO_SHIM_HOME)
     root = shape_capture_root(
-        hf_home=hf_home,
+        shim_home=shim_home,
         bucket=bucket(gpu),
         model=model,
         parallelism=parallelism,

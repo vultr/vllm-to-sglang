@@ -4,34 +4,36 @@ AITER is AMD's optimized kernel library, used by SGLang on ROCm. It looks up tun
 
 The shim closes this loop in two halves:
 
-1. **Capture.** Tee the backend's stderr, parse `shape is M:... not found tuned config in <path>` lines, and persist them to `$HF_HOME/vllm-shim/aiter-shapes/...`. Captured shapes are the input the AITER tuner needs.
-2. **Restore.** At startup, point AITER's `AITER_CONFIG_*` env vars at previously tuned configs under `$HF_HOME/vllm-shim/aiter-configs/<bucket>/`. AITER then reads directly from the persistent volume on first lookup (no symlinks, no writes into `/tmp`).
+1. **Capture.** Tee the backend's stderr, parse `shape is M:... not found tuned config in <path>` lines, and persist them to `$VLLM_SHIM_HOME/aiter/shapes/...`. Captured shapes are the input the AITER tuner needs.
+2. **Restore.** At startup, point AITER's `AITER_CONFIG_*` env vars at previously tuned configs under `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`. AITER then reads directly from the persistent volume on first lookup (no symlinks, no writes into `/tmp`).
 
-Both halves are silent no-ops when their prerequisites aren't met (no ROCm GPU, no resolvable HF cache), so the same image runs on CUDA hosts and dev boxes without surprise behavior.
+Both halves are silent no-ops when their prerequisites aren't met (no ROCm GPU, no resolvable shim home), so the same image runs on CUDA hosts and dev boxes without surprise behavior.
 
-The tuner itself (turning captured shapes into tuned configs) is not part of the shim today; that work happens offline, and the operator drops the result under the `aiter-configs/` tree before the next launch.
+The tuner itself (turning captured shapes into tuned configs) is not part of the shim today; that work happens offline, and the operator drops the result under the `aiter/configs/` tree before the next launch.
 
-## Why under `$HF_HOME`
+## Why a dedicated `$VLLM_SHIM_HOME`
 
-The captured shapes and tuned configs need to survive pod restarts. Production Stack already mounts a persistent volume at `$HF_HOME` for model snapshots, so reusing that mount means operators don't have to wire a second PV. The shim resolves `$HF_HOME` via `huggingface_hub.constants.HF_HOME` (which already honors the env var, `$XDG_CACHE_HOME`, and `~/.cache/huggingface` defaults) so the captured/tuned trees automatically follow wherever HF itself is reading and writing.
+The captured shapes and tuned configs need to survive pod restarts. Operators typically point `VLLM_SHIM_HOME` at a persistent volume (e.g. `VLLM_SHIM_HOME=/data/vllm-shim`); the shim falls back to `~/.vllm-shim` when the env var is unset, so dev hosts and forgetful operators both land somewhere coherent without crashing the shim. The resolver is `vllm_shim.aiter.capture.resolve_shim_home`: env var first (with `~` expanded), else `Path.home() / ".vllm-shim"`, else `None`.
+
+The shim deliberately keeps its own tree rather than nesting under `$HF_HOME`. The HF cache is HF's domain; mixing AITER artefacts under it confuses cache tooling and ties our layout to a directory we don't own. A dedicated env var also lets the operator put model weights and tuned configs on different volumes if they want.
 
 AITER's tuned-config CSV locations are env-overridable. Each kernel target has its own `AITER_CONFIG_*` env var (`AITER_CONFIG_GEMM_BF16` for `bf16_tuned_gemm.csv`, `AITER_CONFIG_GEMM_A8W8` for `a8w8_tuned_gemm.csv`, etc.; see `repos/aiter/aiter/jit/core.py` for the full list). Restore sets those env vars in the backend's environment so AITER reads the configs directly off the PV. No symlinks, no writes into `/tmp`, multiple pods on the same PV share the files read-only for free.
 
 ## Path layout
 
 ```
-$HF_HOME/vllm-shim/
-├── aiter-shapes/                          # captured (input to the tuner)
+$VLLM_SHIM_HOME/aiter/
+├── shapes/                                # captured (input to the tuner)
 │   └── <bucket>/                          # e.g. gfx942-304cu
 │       └── <model>/                       # e.g. moonshotai--Kimi-K2.6
 │           └── <parallelism>/             # e.g. tp8-ep8
-│               ├── bf16_gemm.csv
-│               ├── fp8_blockscale_gemm.csv
+│               ├── bf16_tuned_gemm.csv
+│               ├── a8w8_blockscale_tuned_gemm.csv
 │               └── ...
-└── aiter-configs/                         # tuned (output from the tuner)
+└── configs/                               # tuned (output from the tuner)
     └── <bucket>/                          # e.g. gfx942-304cu
-        ├── bf16_gemm.csv
-        ├── fp8_blockscale_gemm.csv
+        ├── bf16_tuned_gemm.csv
+        ├── a8w8_blockscale_tuned_gemm.csv
         └── ...
 ```
 
@@ -64,7 +66,7 @@ StreamTee (daemon thread)              vllm_shim.aiter.stream_tee
         store.add(shape)               vllm_shim.aiter.shape_store
            │
            ▼
-        aiter-shapes/<bucket>/<model>/<parallelism>/<target>.csv
+        aiter/shapes/<bucket>/<model>/<parallelism>/<target>.csv
 ```
 
 A few invariants to know about:
@@ -72,12 +74,12 @@ A few invariants to know about:
 - **`StreamTee` is a daemon thread.** A stalled backend producer cannot keep the supervisor alive past its shutdown deadline; the tee disappears when the process exits.
 - **Callback errors are swallowed.** Tee survival outranks any single shape-capture write. A broken store (disk full, read-only volume) must not silence the backend's stderr.
 - **`ShapeStore` dedups twice.** An in-memory set per target prevents repeat writes during this process, and on first write to a target the existing CSV is loaded into that set so restarts converge on a deduped file. Concurrent writers on a shared persistent volume could in theory produce duplicate rows; we accept that and the operator can dedupe offline if it ever matters.
-- **One CSV per AITER target.** Targets come from the basename of the `/tmp/aiter_configs/...csv` path the log line names. `bf16_gemm.csv`, `fp8_blockscale_gemm.csv`, etc. The directory part of that path is hardcoded by AITER and unrelated to where we write.
+- **One CSV per AITER target.** Targets come from the basename of the AITER config path the log line names. `bf16_tuned_gemm.csv`, `a8w8_blockscale_tuned_gemm.csv`, etc. The directory part of that path is whatever AITER was configured to read (its install dir by default, our `$VLLM_SHIM_HOME/aiter/configs/<bucket>/` when restore is active) and unrelated to where we write the capture file.
 
 ## Restore: how AITER gets pointed at our configs
 
 ```
-$HF_HOME/vllm-shim/aiter-configs/<bucket>/bf16_tuned_gemm.csv
+$VLLM_SHIM_HOME/aiter/configs/<bucket>/bf16_tuned_gemm.csv
                    │
                    ▼  pre-launch, in vllm_shim.aiter.restore.restore_configs
        map basename -> AITER_CONFIG_GEMM_BF16
@@ -105,7 +107,7 @@ The mapping from tuned-config basename to env var lives in `_TARGET_ENV` in `vll
 
 `restore_configs` is read-only: it lists the bucket directory, looks up known basenames in the mapping, and returns the `{env_var: path}` dict. The entrypoint filters out any var the operator has already set, then merges the rest into `backend_env` before spawning. Unknown basenames are skipped (likely a future AITER target the shim doesn't recognise yet; the operator can set the env var manually if needed).
 
-**Precedence**: operator-set `AITER_CONFIG_*` env vars (in the pod spec or container `ENV`) win over restore. Same principle as `translate_env_with_map`: if the operator wrote it down, they meant it. The launch-info dump only lists the overrides that actually took effect, so a missing entry in `aiter_restore.overrides` for a target whose file exists under `$HF_HOME` is the signal that the operator's env beat us to it.
+**Precedence**: operator-set `AITER_CONFIG_*` env vars (in the pod spec or container `ENV`) win over restore. Same principle as `translate_env_with_map`: if the operator wrote it down, they meant it. The launch-info dump only lists the overrides that actually took effect, so a missing entry in `aiter_restore.overrides` for a target whose file exists under `$VLLM_SHIM_HOME/aiter/configs/<bucket>` is the signal that the operator's env beat us to it.
 
 ## Prerequisites and decision flow
 
@@ -114,13 +116,13 @@ Both halves share the same two prerequisites:
 | Check | Where | What it means |
 |---|---|---|
 | ROCm GPU present | `vllm_shim.cli.rocm_probe.probe` shells `rocminfo` | Without ROCm there's no AITER, so capture and restore would have no effect. |
-| HF cache resolvable | `vllm_shim.aiter.capture.resolve_hf_home` | Without a writable cache root, captured data would be ephemeral and pointless. |
+| Shim home resolvable | `vllm_shim.aiter.capture.resolve_shim_home` | Without a writable root, captured data would be ephemeral and tuned configs have nowhere to live. |
 
-Either prerequisite missing yields a disabled plan with a stable `reason` string (`"no ROCm GPU detected"` or `"could not resolve HF cache directory"`) for the launch-info dump. The plans are pure decisions; the entrypoint reads the env once and feeds it to both halves so they stay in sync.
+Either prerequisite missing yields a disabled plan with a stable `reason` string (`"no ROCm GPU detected"` or `"could not resolve VLLM_SHIM_HOME"`) for the launch-info dump. The plans are pure decisions; the entrypoint reads the env once and feeds it to both halves so they stay in sync.
 
 When the prerequisites pass, the entrypoint:
 
-1. Calls `plan_restore` and `restore_configs` *synchronously* before spawning the backend, so the symlinks are in place by the time AITER does its first lookup.
+1. Calls `plan_restore` and `restore_configs` *synchronously* before spawning the backend, so the `AITER_CONFIG_*` env vars are in the backend's environment by the time AITER imports.
 2. Calls `plan_capture` and spawns the backend with `stderr=subprocess.PIPE`, then starts the `StreamTee` daemon. With capture disabled the backend gets the default inherited stderr and no tee.
 
 The PIPE/inherit distinction matters: only spawn with PIPE when we are actually going to read the pipe, otherwise the kernel pipe buffer fills up and the backend blocks on writes.
@@ -148,8 +150,8 @@ The launch-info dump (`vllm-shim-info` and the stderr summary) surfaces both hal
 vllm-shim 0.0.1 -> sglang listening on 0.0.0.0:8000
   model: moonshotai/Kimi-K2.6 -> /data/hub/models--moonshotai--Kimi-K2.6/snapshots/abc
   backend argv: sglang serve --model-path ... --tp 8
-  aiter capture: enabled -> /data/hf/vllm-shim/aiter-shapes/gfx942-304cu/moonshotai--Kimi-K2.6/tp8
-  aiter restore: 2 configs from /data/hf/vllm-shim/aiter-configs/gfx942-304cu (AITER_CONFIG_GEMM_BF16, AITER_CONFIG_GEMM_A8W8)
+  aiter capture: enabled -> /data/vllm-shim/aiter/shapes/gfx942-304cu/moonshotai--Kimi-K2.6/tp8
+  aiter restore: 2 configs from /data/vllm-shim/aiter/configs/gfx942-304cu (AITER_CONFIG_GEMM_BF16, AITER_CONFIG_GEMM_A8W8)
 ```
 
 The restore line has three forms:
@@ -169,7 +171,7 @@ AITER ships with two adjacent mechanisms it's worth being explicit about:
 **`AITER_TUNE_GEMM=1`**: AITER's native shape capture. When set, `tuned_gemm.save_shapes` writes *every* GEMM call (hits and misses) to `<install>/aiter/configs/bf16_untuned_gemm.csv` using the canonical CSV schema. We don't use this for three reasons:
 
 - It captures everything, not just the actionable misses. The tuner only needs the gap between observed and tuned, so the extra rows are waste.
-- The write location is hardcoded inside the AITER install dir (not env-overridable), so we'd have no way to land the file under `$HF_HOME` without monkey-patching AITER.
+- The write location is hardcoded inside the AITER install dir (not env-overridable), so we'd have no way to land the file under `$VLLM_SHIM_HOME` without monkey-patching AITER.
 - It can't partition by model or parallelism; one process writes one global file. Our stderr-tee partitions naturally via the path layout.
 
 Our stderr-tee is more constrained (only matches the BF16 GEMM log format today; other targets like a4w4 emit different formats and aren't yet parsed) but the trade is acceptable: GEMM is the dominant target by call count, and adding new log formats is local work in `log_parser.py`.
@@ -193,7 +195,7 @@ An operator who explicitly wants laziness for MoE can set `AITER_ONLINE_TUNE=1` 
 | `vllm_shim.aiter.shape_store` | `ShapeStore`: append a deduped CSV row per AITER shape. |
 | `vllm_shim.aiter.stream_tee` | `StreamTee`: daemon thread that copies bytes to a sink and lines to a callback. |
 | `vllm_shim.aiter.path` | `sanitize_model`, `shape_capture_root`. Pure. |
-| `vllm_shim.aiter.capture` | `CapturePlan`, `plan_capture`, `resolve_hf_home`, `build_callback`. |
+| `vllm_shim.aiter.capture` | `CapturePlan`, `plan_capture`, `resolve_shim_home`, `build_callback`. |
 | `vllm_shim.aiter.restore` | `RestorePlan`, `plan_restore`, `restore_configs`. |
 | `vllm_shim.cli.rocm_probe` | `parse_rocminfo`, `probe`, `bucket`. Shells out to `rocminfo`. |
 | `vllm_shim.values.parallelism` | `Parallelism` value + `path_segment()`. |
@@ -204,6 +206,6 @@ The split into many small modules is deliberate: each piece is pure (or has a si
 
 ## What this is not
 
-- **Not the tuner.** Capturing shapes does not produce tuned configs. That's a separate offline step running AITER's own tuner against the captured CSVs. A future `vllm-shim-tune` subcommand may automate it; today it is an operator-driven step.
+- **Not the tuner.** Capturing shapes does not produce tuned configs. That's a separate offline step running AITER's own tuner against the captured CSVs. A future `vllm-shim-tune` subcommand may automate it; today it is an operator-driven step that writes results into `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`.
 - **Not CUDA-relevant.** Capture and restore are no-ops on CUDA hosts (the rocm probe returns None). vLLM-on-CUDA does not use AITER. If a future vLLM-on-ROCm backend lands in the shim, it will reuse this same machinery without changes.
 - **Not coupled to SGLang.** The capture logic reads stderr line patterns AITER itself emits; any backend that uses AITER and produces the same warning format will work. The pattern lives in `log_parser.py` and is intentionally narrow.

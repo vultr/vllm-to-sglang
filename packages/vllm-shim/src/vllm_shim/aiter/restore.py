@@ -8,14 +8,14 @@ Defaults point inside the AITER install directory, which is ephemeral
 in a container.
 
 Restore therefore lives in env-translation: for each known target we
-find a matching CSV under ``$HF_HOME/vllm-shim/aiter-configs/<bucket>/``,
+find a matching CSV under ``$VLLM_SHIM_HOME/aiter/configs/<bucket>/``,
 we set the corresponding env var in the backend's environment. AITER
 then reads directly from the persistent volume on first lookup. No
 symlinks, no writes into ``/tmp``, multiple pods on the same PV share
 the same files read-only for free.
 
-Restore is the mirror of capture: same prerequisites (ROCm GPU + HF
-cache resolvable), partitioned by GPU SKU only (no model / parallelism)
+Restore is the mirror of capture: same prerequisites (ROCm GPU + shim
+home resolvable), partitioned by GPU SKU only (no model / parallelism)
 because tuned configs are keyed by shape dimensions and reusable across
 models that hit the same shapes.
 """
@@ -23,7 +23,7 @@ models that hit the same shapes.
 from dataclasses import dataclass
 from pathlib import Path
 
-from vllm_shim.aiter.capture import REASON_ENABLED, REASON_NO_GPU, REASON_NO_HF_HOME
+from vllm_shim.aiter.capture import REASON_ENABLED, REASON_NO_GPU, REASON_NO_SHIM_HOME
 from vllm_shim.cli.rocm_probe import GpuAgent, bucket
 
 # Mapping from AITER tuned-config basename (the ``target`` field of an
@@ -56,20 +56,20 @@ class RestorePlan:
 
 def plan_restore(
     *,
-    hf_home: Path | None,
+    shim_home: Path | None,
     gpu: GpuAgent | None,
 ) -> RestorePlan:
     """Decide whether to restore tuned configs for this launch.
 
     Pure function. Same prerequisites as ``plan_capture``: ROCm GPU
-    (else there's no AITER to feed) and a resolved HF cache (else no
+    (else there's no AITER to feed) and a resolved shim home (else no
     source).
     """
     if gpu is None:
         return RestorePlan(enabled=False, source=None, reason=REASON_NO_GPU)
-    if hf_home is None:
-        return RestorePlan(enabled=False, source=None, reason=REASON_NO_HF_HOME)
-    source = hf_home / "vllm-shim" / "aiter-configs" / bucket(gpu)
+    if shim_home is None:
+        return RestorePlan(enabled=False, source=None, reason=REASON_NO_SHIM_HOME)
+    source = shim_home / "aiter" / "configs" / bucket(gpu)
     return RestorePlan(enabled=True, source=source, reason=REASON_ENABLED)
 
 

@@ -110,7 +110,7 @@ def test_collect_aiter_capture_enabled_shape() -> None:
     args = _sample_args()
     args["aiter_capture"] = CapturePlan(
         enabled=True,
-        root=Path("/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8"),
+        root=Path("/data/vllm-shim/aiter/shapes/gfx942-304cu/m/tp8"),
         reason=REASON_ENABLED,
     )
     out = info.collect(
@@ -121,7 +121,7 @@ def test_collect_aiter_capture_enabled_shape() -> None:
     # Path objects get stringified so the dict is JSON-serialisable as is.
     assert out["aiter_capture"]["enabled"] is True
     assert out["aiter_capture"]["root"] == str(
-        Path("/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8")
+        Path("/data/vllm-shim/aiter/shapes/gfx942-304cu/m/tp8")
     )
     assert out["aiter_capture"]["reason"] == REASON_ENABLED
 
@@ -130,12 +130,12 @@ def test_collect_aiter_restore_enabled_shape() -> None:
     args = _sample_args()
     args["aiter_restore"] = RestorePlan(
         enabled=True,
-        source=Path("/data/hf/vllm-shim/aiter-configs/gfx942-304cu"),
+        source=Path("/data/vllm-shim/aiter/configs/gfx942-304cu"),
         reason=REASON_ENABLED,
     )
     args["aiter_restored"] = {
-        "AITER_CONFIG_GEMM_BF16": "/data/hf/.../bf16_tuned_gemm.csv",
-        "AITER_CONFIG_GEMM_A8W8": "/data/hf/.../a8w8_tuned_gemm.csv",
+        "AITER_CONFIG_GEMM_BF16": "/data/vllm-shim/.../bf16_tuned_gemm.csv",
+        "AITER_CONFIG_GEMM_A8W8": "/data/vllm-shim/.../a8w8_tuned_gemm.csv",
     }
     out = info.collect(
         **args,  # type: ignore[arg-type]
@@ -144,14 +144,14 @@ def test_collect_aiter_restore_enabled_shape() -> None:
     )
     assert out["aiter_restore"]["enabled"] is True
     assert out["aiter_restore"]["source"] == str(
-        Path("/data/hf/vllm-shim/aiter-configs/gfx942-304cu")
+        Path("/data/vllm-shim/aiter/configs/gfx942-304cu")
     )
     # The serialized overrides are the env-var -> path mapping AITER
     # will read at import time; tests assert on the dict directly so
     # any divergence between the in-memory and dumped shapes is loud.
     assert out["aiter_restore"]["overrides"] == {
-        "AITER_CONFIG_GEMM_BF16": "/data/hf/.../bf16_tuned_gemm.csv",
-        "AITER_CONFIG_GEMM_A8W8": "/data/hf/.../a8w8_tuned_gemm.csv",
+        "AITER_CONFIG_GEMM_BF16": "/data/vllm-shim/.../bf16_tuned_gemm.csv",
+        "AITER_CONFIG_GEMM_A8W8": "/data/vllm-shim/.../a8w8_tuned_gemm.csv",
     }
 
 
@@ -255,7 +255,7 @@ def test_print_summary_shows_capture_path_when_enabled(
             "env_translation": {},
             "aiter_capture": {
                 "enabled": True,
-                "root": "/data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8",
+                "root": "/data/vllm-shim/aiter/shapes/gfx942-304cu/m/tp8",
                 "reason": REASON_ENABLED,
             },
             "aiter_restore": _DISABLED_RESTORE_DICT,
@@ -266,7 +266,7 @@ def test_print_summary_shows_capture_path_when_enabled(
     # they can tail the directory while loading; the reason string adds
     # nothing when enabled.
     assert (
-        "aiter capture: enabled -> /data/hf/vllm-shim/aiter-shapes/gfx942-304cu/m/tp8"
+        "aiter capture: enabled -> /data/vllm-shim/aiter/shapes/gfx942-304cu/m/tp8"
         in err
     )
 
@@ -286,11 +286,11 @@ def test_print_summary_shows_restore_count_and_env_vars_when_enabled(
             "aiter_capture": _DISABLED_CAPTURE_DICT,
             "aiter_restore": {
                 "enabled": True,
-                "source": "/data/hf/vllm-shim/aiter-configs/gfx942-304cu",
+                "source": "/data/vllm-shim/aiter/configs/gfx942-304cu",
                 "reason": REASON_ENABLED,
                 "overrides": {
-                    "AITER_CONFIG_GEMM_BF16": "/data/hf/.../bf16_tuned_gemm.csv",
-                    "AITER_CONFIG_GEMM_A8W8": "/data/hf/.../a8w8_tuned_gemm.csv",
+                    "AITER_CONFIG_GEMM_BF16": "/data/vllm-shim/.../bf16_tuned_gemm.csv",
+                    "AITER_CONFIG_GEMM_A8W8": "/data/vllm-shim/.../a8w8_tuned_gemm.csv",
                 },
             },
         }
@@ -322,7 +322,7 @@ def test_print_summary_says_nothing_to_restore_when_source_empty(
             "aiter_capture": _DISABLED_CAPTURE_DICT,
             "aiter_restore": {
                 "enabled": True,
-                "source": "/data/hf/vllm-shim/aiter-configs/gfx942-304cu",
+                "source": "/data/vllm-shim/aiter/configs/gfx942-304cu",
                 "reason": REASON_ENABLED,
                 "overrides": {},
             },

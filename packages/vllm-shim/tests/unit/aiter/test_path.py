@@ -51,15 +51,15 @@ def test_fallback_when_basename_would_be_empty() -> None:
 
 def test_shape_capture_root_full_layout(tmp_path: Path) -> None:
     root = shape_capture_root(
-        hf_home=tmp_path,
+        shim_home=tmp_path,
         bucket="gfx942-304cu",
         model="moonshotai/Kimi-K2.6",
         parallelism=Parallelism(tp=8, ep=8),
     )
     assert root == (
         tmp_path
-        / "vllm-shim"
-        / "aiter-shapes"
+        / "aiter"
+        / "shapes"
         / "gfx942-304cu"
         / "moonshotai--Kimi-K2.6"
         / "tp8-ep8"
@@ -70,7 +70,7 @@ def test_shape_capture_root_single_gpu_topology(tmp_path: Path) -> None:
     # tp=1/ep=1/pp=1 must still produce a well-formed leaf; the segment
     # falls back to ``tp1`` so the layout has no empty components.
     root = shape_capture_root(
-        hf_home=tmp_path,
+        shim_home=tmp_path,
         bucket="gfx942-304cu",
         model="gpt2",
         parallelism=Parallelism(),
@@ -79,12 +79,12 @@ def test_shape_capture_root_single_gpu_topology(tmp_path: Path) -> None:
     assert "gpt2" in root.parts
 
 
-def test_shape_capture_root_lives_under_hf_home(tmp_path: Path) -> None:
-    # The whole point of putting this under HF_HOME is so the captured
-    # shapes share the persistent volume with the model snapshots and
-    # survive pod restarts. Verify the leaf is genuinely a descendant.
+def test_shape_capture_root_lives_under_shim_home(tmp_path: Path) -> None:
+    # The whole point of putting this under VLLM_SHIM_HOME is so the
+    # captured shapes share a persistent volume and survive pod
+    # restarts. Verify the leaf is genuinely a descendant.
     root = shape_capture_root(
-        hf_home=tmp_path,
+        shim_home=tmp_path,
         bucket="gfx942-304cu",
         model="gpt2",
         parallelism=Parallelism(tp=4, pp=2),
@@ -96,7 +96,7 @@ def test_shape_capture_root_local_path_model(tmp_path: Path) -> None:
     # A pod served from a baked-in local model path still gets a stable
     # bucket key (the basename) rather than the full prefix path.
     root = shape_capture_root(
-        hf_home=tmp_path,
+        shim_home=tmp_path,
         bucket="gfx942-304cu",
         model="/data/models/my-model",
         parallelism=Parallelism(tp=8),
