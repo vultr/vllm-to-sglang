@@ -1,0 +1,88 @@
+vllm-shim local patch: use hipBLASLt's matmul heuristic API to bound
+AITER's per-shape kernel candidate set, instead of enumerating every
+algorithm hipBLASLt knows about.
+
+`hipblasLtMatmul_findallsols_wrapper` in gradlib/csrc/hipbsolgemm.cu
+currently calls `hipblaslt_ext::getAllAlgos` to enumerate all kernels
+for the given GemmType + dtype tuple, ignoring the actual matmul
+descriptor (m, n, k, layouts, bias, scaling). For a typical fp8/bf16
+matmul on MI300X this returns ~1365 candidates, and the cheap
+`matmulIsAlgoSupported` filter that follows only checks workspace
+fit; it does not rank. The tuner then benchmarks every surviving
+candidate, which is both slow and includes algorithms that fault
+the GPU on specific shape geometries (the root cause of the
+mp_tuner KeyError storms that the adjacent mp_tuner patch
+papers over).
+
+`hipblasLtMatmulAlgoGetHeuristic` was the original code path here
+(now commented out on the line immediately above the getAllAlgos
+call) and is the right shape: it uses the full matmul descriptor to
+filter and rank candidates by predicted performance, then returns
+the top N. The commented-out version is not drop-in functional
+because the `preference` object and `returnedAlgoCount` int it
+references were removed alongside it; this patch creates both.
+
+The candidate cap is read from the environment so operators can
+dial it without rebuilding the image. Default 10 matches the
+original code's hardcoded N. Set `AITER_MAX_GEMM_CANDIDATES=2048`
+to effectively recover the full sweep behavior.
+
+There is no known upstream PR for this change. The shim's Docker
+images carry it locally until upstream lands an equivalent knob.
+The image-baked cache-key in /etc/vllm-shim/aiter-cache-key picks
+up the change automatically: the SHA of the patches directory
+moves, so `AITER_JIT_DIR` namespaces under a fresh `jit-<key>`
+subdir and AITER recompiles the patched .so on first call instead
+of loading a stale cached binary from the PV.
+
+--- a/gradlib/csrc/hipbsolgemm.cu
++++ b/gradlib/csrc/hipbsolgemm.cu
+@@ -230,21 +230,33 @@
+             matmul, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &scaleC, sizeof(scaleC)));
+     }
+ 
+-    // std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult(10);
+-    // CHECK_HIPBLAS_ERROR(hipblasLtMatmulAlgoGetHeuristic(
+-    //     handle, matmul, matA, matB, matC, matC,
+-    //     preference, 10, heuristicResult.data(), &returnedAlgoCount));
+-    std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
+-    CHECK_HIPBLAS_ERROR(hipblaslt_ext::getAllAlgos(handle,
+-                                                   hipblaslt_ext::GemmType::HIPBLASLT_GEMM,
+-                                                   op_A,
+-                                                   op_B,
+-                                                   intype,
+-                                                   intype,
+-                                                   outtype,
+-                                                   outtype,
+-                                                   HIPBLAS_COMPUTE_32F,
+-                                                   heuristicResult));
++    // vllm-shim patch: use hipBLASLt's matmul heuristic to get the
++    // top-N ranked algorithms for this specific shape/dtype/layout
++    // instead of the full ~1365 candidates from getAllAlgos. The
++    // heuristic uses the matmul descriptor (m/n/k, layouts, bias,
++    // scaling) to filter and rank; benchmarking ranked candidates
++    // for each shape avoids the long tail of algos that fault on
++    // specific geometries. Cap is configurable via env var so an
++    // operator can dial it without rebuilding the image.
++    int max_candidates = 10;
++    if (const char* env = std::getenv("AITER_MAX_GEMM_CANDIDATES")) {
++        int parsed = std::atoi(env);
++        if (parsed > 0) {
++            max_candidates = parsed;
++        }
++    }
++    hipblasLtMatmulPreference_t preference;
++    CHECK_HIPBLAS_ERROR(hipblasLtMatmulPreferenceCreate(&preference));
++    CHECK_HIPBLAS_ERROR(hipblasLtMatmulPreferenceSetAttribute(
++        preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
++        &workspace_size, sizeof(workspace_size)));
++    std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult(max_candidates);
++    int returnedAlgoCount = 0;
++    CHECK_HIPBLAS_ERROR(hipblasLtMatmulAlgoGetHeuristic(
++        handle, matmul, matA, matB, matC, matC,
++        preference, max_candidates, heuristicResult.data(), &returnedAlgoCount));
++    heuristicResult.resize(returnedAlgoCount);
++    CHECK_HIPBLAS_ERROR(hipblasLtMatmulPreferenceDestroy(preference));
+ 
+     std::vector<int> algoIndex;
+     int returned_algo_count = heuristicResult.size();

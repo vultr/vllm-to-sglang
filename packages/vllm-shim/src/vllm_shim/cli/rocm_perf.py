@@ -64,6 +64,31 @@ from pathlib import Path
 
 from vllm_shim.cli.rocm_probe import GpuAgent
 
+# Image-baked key that invalidates the AITER JIT .so cache when the set
+# of local patches changes. The Dockerfile hashes the contents of the
+# patches directory and writes a short digest here before installing
+# AITER, so any future C++ patch (which would change the compiled .so
+# bytes) automatically lands in a new cache namespace and rebuilds.
+# Python-only patches like the current mp_tuner one don't strictly need
+# this invalidation, but the cost is a one-time rebuild per image bump
+# and the alternative is silent staleness; the safer default wins.
+_AITER_CACHE_KEY_FILE = Path("/etc/vllm-shim/aiter-cache-key")
+
+
+def _aiter_cache_key() -> str:
+    """Return the image-baked AITER cache key, or 'default' if unset.
+
+    The file is written by the Dockerfile at image-build time. On dev
+    boxes, CUDA images, and any environment without the file the cache
+    namespace collapses to ``jit-default``, which is fine because those
+    paths share the same unpatched AITER bytes anyway.
+    """
+    try:
+        key = _AITER_CACHE_KEY_FILE.read_text().strip()
+    except OSError:
+        return "default"
+    return key or "default"
+
 
 def rocm_perf_defaults(
     gpu: GpuAgent | None, shim_home: Path | None
@@ -115,8 +140,11 @@ def rocm_perf_defaults(
         # ``~/.aiter/jit/build``, which is lost on pod restart.
         # Anchoring at ``$VLLM_SHIM_HOME/aiter`` puts ``build/``
         # alongside the existing ``configs/`` and ``shapes/`` subdirs
-        # the shim already manages there.
-        "AITER_JIT_DIR": str(shim_home / "aiter"),
+        # the shim already manages there. The ``jit-<key>`` segment
+        # is the image-baked cache key (see ``_aiter_cache_key``) so
+        # a future C++ patch bumps the namespace and AITER recompiles
+        # instead of loading stale unpatched .so files.
+        "AITER_JIT_DIR": str(shim_home / "aiter" / f"jit-{_aiter_cache_key()}"),
     }
 
     # MI300-class (gfx942) specific. The values here are tied to the

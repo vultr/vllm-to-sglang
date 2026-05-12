@@ -318,7 +318,7 @@ The split into many small modules is deliberate: each piece is pure (or has a si
 
 ## Upstream patches
 
-The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives at `docker/sglang/patches/aiter-mp-tuner-mapping-error.patch` and is applied with `patch -p1`. The Dockerfile runs `patch --dry-run` first, so an AITER version bump that breaks the patch fails the image build loudly rather than silently producing an unpatched image.
+The shim's Docker images carry two local patches against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patches live in `docker/sglang/patches/` and are applied in sorted name order with `patch -p1`. The Dockerfile runs `patch --dry-run` per file first, so an AITER version bump that breaks any patch fails the image build loudly rather than silently producing a half-patched image.
 
 ### `aiter-mp-tuner-mapping-error.patch`
 
@@ -328,7 +328,25 @@ The shim's Docker images carry one local patch against AITER, applied at image-b
 
 **Upstream status.** Upstream PR [#2309](https://github.com/ROCm/aiter/pull/2309) proposed the same fix in March 2026 and was closed without merging; reviewer @yzhou103's stated concern was that the mapping error is "caused by other problem" they'd rather diagnose than mask. The adjacent PR [#2662](https://github.com/ROCm/aiter/pull/2662) (merged April 2026) fixed the accelerator-error branch robustly but left this one stubbed out. The patch is therefore a known-temporary local fix. When upstream lands an equivalent, drop the patch file and the `RUN cd /sgl-workspace/aiter && patch` block in `Dockerfile.rocm`.
 
-**What this doesn't fix.** Worker crashes themselves still happen. The root cause is almost certainly that AITER's kernel enumeration (`hipblaslt_get_algos_by_size_and_type`) returns a superset of valid algorithms for a given shape, including ones that fault. Fixing that would require either an AITER source change to use hipBLASLt's per-matmul heuristics API, or a hipBLASLt fix to its enumeration. The shim does not attempt either.
+**What this doesn't fix.** Worker crashes themselves still happen. The root cause is that AITER's `gradlib` kernel enumeration calls `hipblaslt_ext::getAllAlgos`, which returns a superset of valid algorithms (~1365 per fp8/bf16 shape on MI300X) including ones that fault on specific geometries. The companion `aiter-hipblaslt-heuristic.patch` below addresses that enumeration directly.
+
+### `aiter-hipblaslt-heuristic.patch`
+
+**What it changes.** Replaces the `hipblaslt_ext::getAllAlgos` call in `hipblasLtMatmul_findallsols_wrapper` (`gradlib/csrc/hipbsolgemm.cu`) with `hipblasLtMatmulAlgoGetHeuristic`. The heuristic API uses the matmul descriptor (m/n/k, layouts, bias, scaling, dtypes) to filter and rank candidate algorithms by predicted performance and returns the top N. `getAllAlgos` ignores the descriptor and returns every algorithm hipBLASLt knows about for the (GemmType, op_A, op_B, dtype, compute) tuple. The patch also creates the supporting `hipblasLtMatmulPreference_t` and `returnedAlgoCount` objects that the active code had removed.
+
+**Why we need it.** The full enumeration is the source of both the tuner's wall-clock cost and the worker-crash pattern that the `aiter-mp-tuner-mapping-error.patch` mitigates. Most of the algorithms `getAllAlgos` returns are not viable for the specific shape being tuned, and benchmarking them is wasted work; some fault the GPU and require the mp_tuner patch to keep the tuner alive. Restricting the candidate set to the heuristic-ranked top N cuts tune time roughly in proportion to the cap, makes the surviving kernels likely-good rather than unsorted, and pulls most of the crash-prone tail out of the benchmark pool.
+
+**Configurable cap.** The candidate count is read from `AITER_MAX_GEMM_CANDIDATES` at run time (default 10, matching the value the commented-out original code used). Setting `AITER_MAX_GEMM_CANDIDATES=2048` effectively recovers the full sweep behavior; intermediate values trade tune time against the risk of the heuristic mis-ranking the truly-optimal algorithm to position N+1 for some shapes.
+
+**Upstream status.** No known upstream PR. The active `getAllAlgos` call replaced what was originally a `hipblasLtMatmulAlgoGetHeuristic` call (still visible commented-out on the line above it); no rationale for the swap is recorded in AITER's git history. When upstream restores the heuristic call or exposes an equivalent knob, drop this patch.
+
+### JIT cache invalidation across patch revisions
+
+AITER's JIT loader (`aiter/jit/core.py`, `_ensure_loaded`) checks only for `.so` file presence; it does not hash sources. With `AITER_JIT_DIR` anchored on the PV, a pre-existing compiled kernel on disk will be loaded even when the AITER source has been patched in the new image. The `mp_tuner` patch is Python-only and would not be affected, but the heuristic patch above changes the bytes inside `module_hipbsolgemm.so` and would be masked by a stale cached binary without this invalidation.
+
+To handle this without operator intervention, the Dockerfile hashes the contents of `docker/sglang/patches/` after applying them and writes a 12-character SHA-256 digest to `/etc/vllm-shim/aiter-cache-key`. At launch, `vllm_shim.cli.rocm_perf._aiter_cache_key` reads that file and `rocm_perf_defaults` composes `AITER_JIT_DIR` as `$VLLM_SHIM_HOME/aiter/jit-<key>` instead of a bare `aiter/` child. Bumping any patch in the set changes the digest, the JIT dir moves to a fresh subdirectory under the same PV, and AITER recompiles from the patched source on first call. Old `jit-<old-key>/` directories become orphaned but harmless; an operator can prune them whenever they next clean up the PV.
+
+If the file is missing or empty (CUDA images, dev boxes, image builds that did not stage any patches), the key falls back to the literal string `default` and the JIT dir is `$VLLM_SHIM_HOME/aiter/jit-default`. The same fallback applies to any host that does not run the ROCm Dockerfile, so the read side stays well-defined.
 
 ## What this is not
 

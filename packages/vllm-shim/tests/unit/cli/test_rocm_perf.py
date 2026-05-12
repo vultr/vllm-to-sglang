@@ -2,11 +2,28 @@
 
 from pathlib import Path
 
+import pytest
+from vllm_shim.cli import rocm_perf
 from vllm_shim.cli.rocm_perf import rocm_perf_defaults
 from vllm_shim.cli.rocm_probe import GpuAgent
 
 _MI300X = GpuAgent(gfx_target="gfx942", compute_units=304, marketing_name="MI300X")
 _MI250X = GpuAgent(gfx_target="gfx90a", compute_units=104, marketing_name="MI250X")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache_key_file(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point the AITER cache-key file at a guaranteed-absent path.
+
+    Tests must not depend on whether ``/etc/vllm-shim/aiter-cache-key``
+    happens to exist on the host running them. Individual tests that
+    care about the key contents override the path explicitly.
+    """
+    absent = tmp_path_factory.mktemp("etc") / "aiter-cache-key"
+    monkeypatch.setattr(rocm_perf, "_AITER_CACHE_KEY_FILE", absent)
 
 
 def test_no_gpu_returns_empty() -> None:
@@ -42,10 +59,12 @@ def test_jit_cache_paths_anchor_under_shim_home(tmp_path: Path) -> None:
     assert out["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "torchinductor")
     assert out["SGLANG_CACHE_DIR"] == str(tmp_path / "sglang")
     # AITER appends ``/build`` to ``AITER_JIT_DIR`` itself
-    # (``aiter/jit/core.py``), so pointing the var at the shim's
-    # AITER root lands the JIT build dir at
-    # ``$VLLM_SHIM_HOME/aiter/build`` next to ``configs/``/``shapes/``.
-    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter")
+    # (``aiter/jit/core.py``), so pointing the var at a child of the
+    # shim's AITER root lands the JIT build dir at
+    # ``$VLLM_SHIM_HOME/aiter/jit-<key>/build`` next to
+    # ``configs/``/``shapes/``. With no image-baked cache key the
+    # namespace collapses to ``jit-default``.
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-default")
 
 
 def test_miopen_paths_route_under_shim_home(tmp_path: Path) -> None:
@@ -96,3 +115,40 @@ def test_pure_function_no_filesystem_writes(tmp_path: Path) -> None:
     rocm_perf_defaults(_MI300X, tmp_path)
     for name in ("miopen", "triton", "torchinductor", "sglang", "aiter"):
         assert not (tmp_path / name).exists()
+
+
+def test_aiter_jit_dir_uses_key_when_file_populated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Dockerfile writes a 12-char patch-set digest to this file at
+    # image build time. A future C++ patch would change the digest, so
+    # the cache namespace moves and AITER recompiles instead of
+    # loading stale unpatched .so files from the PV.
+    key_file = tmp_path / "aiter-cache-key"
+    key_file.write_text("abc123def456\n")
+    monkeypatch.setattr(rocm_perf, "_AITER_CACHE_KEY_FILE", key_file)
+    out = rocm_perf_defaults(_MI300X, tmp_path)
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-abc123def456")
+
+
+def test_aiter_jit_dir_falls_back_when_file_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty file means the Dockerfile's hash command produced no
+    # output (e.g. no patches in the dir). Treat as 'no key' rather
+    # than namespacing to an empty string, which would yield a bare
+    # ``jit-`` directory.
+    key_file = tmp_path / "aiter-cache-key"
+    key_file.write_text("")
+    monkeypatch.setattr(rocm_perf, "_AITER_CACHE_KEY_FILE", key_file)
+    out = rocm_perf_defaults(_MI300X, tmp_path)
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-default")
+
+
+def test_aiter_jit_dir_falls_back_when_file_missing(tmp_path: Path) -> None:
+    # CUDA images, dev boxes, and any environment without the file
+    # all land here. The cache namespace collapses to ``jit-default``,
+    # which is fine because those paths share the same unpatched
+    # AITER bytes anyway.
+    out = rocm_perf_defaults(_MI300X, tmp_path)
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-default")

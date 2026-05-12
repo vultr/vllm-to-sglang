@@ -18,7 +18,7 @@ Applied whenever `rocm_probe` returns a GPU and `resolve_shim_home` resolves a p
 | `TRITON_CACHE_DIR` | `$VLLM_SHIM_HOME/triton` | Triton's compiled-kernel cache. Triton compiles on first invocation; without this, every pod restart re-pays the compile cost on the first request. AITER's Triton kernels go through this path too. |
 | `TORCHINDUCTOR_CACHE_DIR` | `$VLLM_SHIM_HOME/torchinductor` | TorchInductor's compile-artifact cache. Same persistence story. Applies whenever PyTorch's Inductor path is taken (model-dependent; some SGLang code paths use it without `--enable-torch-compile`). |
 | `SGLANG_CACHE_DIR` | `$VLLM_SHIM_HOME/sglang` | SGLang's own cache root, default `~/.cache/sglang`. With `--enable-torch-compile`, SGLang's compilation manager derives its `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` overrides from this var, so the JIT caches stay on the PV either way. |
-| `AITER_JIT_DIR` | `$VLLM_SHIM_HOME/aiter` | AITER's own JIT root. AITER's `aiter/jit/core.py` derives `bd_dir = $AITER_JIT_DIR/build` for HIP kernels it compiles on first call (CK GEMM/MoE kernels, fused attention paths, etc.). Default fallback is `~/.aiter/jit/build`, lost on pod restart. Anchoring at the shim's existing AITER root puts `build/` next to `configs/` and `shapes/` on the same PV. |
+| `AITER_JIT_DIR` | `$VLLM_SHIM_HOME/aiter/jit-<key>` | AITER's own JIT root. AITER's `aiter/jit/core.py` derives `bd_dir = $AITER_JIT_DIR/build` for HIP kernels it compiles on first call (CK GEMM/MoE kernels, fused attention paths, etc.). Default fallback is `~/.aiter/jit/build`, lost on pod restart. Anchoring under the shim's AITER root puts `build/` alongside `configs/` and `shapes/` on the same PV. The `jit-<key>` segment is an image-baked patch-set digest (or the literal `default` when no patches are baked); see "AITER JIT cache key" below. |
 
 ## A note on JIT cache stickiness
 
@@ -29,6 +29,14 @@ The four JIT-cache vars above are content-addressable inside their respective to
 - Source bytes of the Triton kernel / FX graph.
 
 So persistence helps with: pod restarts, autoscaling churn, node failures, redeploys of the same image. It does NOT help across image upgrades. The first request after an image bump will rebuild every kernel; subsequent restarts on the new image are fast again.
+
+## AITER JIT cache key
+
+`AITER_JIT_DIR` is the one cache var the shim explicitly namespaces by image content. AITER's JIT loader (`aiter/jit/core.py`, `_ensure_loaded`) trusts file presence and does not hash sources, so a stale `.so` on the PV will be loaded even when the AITER source bytes in the image have changed. The shim ships local patches against AITER (see `docs/aiter.md`, "Upstream patches"), and a future C++ patch in that set would silently run pre-patch kernel bytes if the JIT dir were not partitioned.
+
+The Dockerfile defends against that. After applying every file under `docker/sglang/patches/`, it hashes their concatenated contents and writes a 12-character SHA-256 digest to `/etc/vllm-shim/aiter-cache-key`. `vllm_shim.cli.rocm_perf._aiter_cache_key` reads that file at launch, and the resulting `AITER_JIT_DIR` is `$VLLM_SHIM_HOME/aiter/jit-<digest>`. Bumping any patch changes the digest, the JIT dir moves to a fresh subdirectory under the same PV, and AITER recompiles. Old `jit-<old-digest>/` trees become orphaned but harmless; an operator can prune them whenever they next clean up the PV.
+
+When the file is absent or empty (CUDA images, dev boxes, hand-rolled images without the patches stage) the key falls back to the literal `default`, so `AITER_JIT_DIR` becomes `$VLLM_SHIM_HOME/aiter/jit-default`. That branch is fine because those environments share the same unpatched AITER bytes anyway.
 
 ## MI300-class additions
 
