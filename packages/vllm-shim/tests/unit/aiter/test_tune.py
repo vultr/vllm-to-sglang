@@ -8,6 +8,7 @@ from vllm_shim.aiter import tune
 from vllm_shim.aiter.tune import (
     TuneResult,
     build_command,
+    canonicalize_shape_files,
     discover_shape_files,
     known_targets,
     main,
@@ -91,6 +92,96 @@ def test_merge_rejects_header_mismatch(tmp_path: Path) -> None:
     f2.write_text("M,N,K\n1024,7168,512\n")
     with pytest.raises(ValueError, match="header mismatch"):
         merge_shape_files([f1, f2], tmp_path / "out.csv")
+
+
+# ---------- canonicalize_shape_files ----------
+
+
+def test_canonicalize_rewrites_quoted_dtype_in_place(tmp_path: Path) -> None:
+    # Pre-fix capture data on operator volumes stored ``dtype`` and
+    # ``outdtype`` with literal repr quotes (``'torch.bfloat16'``).
+    # AITER's tuner reads those values and dies with "Invalid device
+    # string". The canonicalize pass patches source files in place so
+    # subsequent runs see clean data and operators don't have to
+    # scrub the PV by hand.
+    quoted_row = "1024,7168,512,False,'torch.bfloat16','torch.bfloat16',False,False"
+    f = _write(tmp_path / "pre-fix.csv", quoted_row)
+    rewritten = canonicalize_shape_files([f])
+    assert rewritten == 1
+    # On-disk file is now canonical; the quotes are gone.
+    text = f.read_text().splitlines()
+    assert text[0] == _HEADER
+    assert text[1] == _ROW_A
+    assert "'torch" not in f.read_text()
+
+
+def test_canonicalize_skips_already_clean_files(tmp_path: Path) -> None:
+    # Idempotent: an already-canonical file is not rewritten. This
+    # matters because tune_target runs canonicalize_shape_files on
+    # every invocation; we don't want needless disk churn or atime
+    # noise on already-clean PVs.
+    f = _write(tmp_path / "clean.csv", _ROW_A)
+    mtime_before = f.stat().st_mtime_ns
+    rewritten = canonicalize_shape_files([f])
+    assert rewritten == 0
+    assert f.stat().st_mtime_ns == mtime_before
+
+
+def test_canonicalize_does_not_dedup(tmp_path: Path) -> None:
+    # The pass only fixes per-cell formatting; row-level dedup is the
+    # merge step's job. Keeping the responsibilities separate means
+    # the on-disk file shape is preserved (operator inspecting the
+    # source CSV sees what was captured, minus the quoting bug).
+    f = _write(tmp_path / "dup.csv", _ROW_A, _ROW_A)
+    canonicalize_shape_files([f])
+    lines = f.read_text().splitlines()
+    assert len(lines) == 3  # header + 2 data rows
+
+
+def test_canonicalize_uses_atomic_write(tmp_path: Path) -> None:
+    # Tmp file is renamed over the original. After a successful
+    # canonicalize call, no stray ``.tmp`` should remain in the dir.
+    quoted_row = "1024,7168,512,False,'torch.bfloat16','torch.bfloat16',False,False"
+    f = _write(tmp_path / "pre-fix.csv", quoted_row)
+    canonicalize_shape_files([f])
+    leftovers = list(tmp_path.glob("*.tmp"))
+    assert leftovers == []
+
+
+def test_canonicalize_handles_empty_file(tmp_path: Path) -> None:
+    # Truncated / empty CSV (e.g. a partial capture write that lost
+    # the header) must not raise. We just skip it.
+    empty = tmp_path / "empty.csv"
+    empty.write_text("")
+    assert canonicalize_shape_files([empty]) == 0
+
+
+def test_tune_target_canonicalizes_before_merge(tmp_path: Path) -> None:
+    # End-to-end: a pre-fix shape file under shapes/<bucket>/<model>/
+    # <para>/ gets cleaned in place by tune_target before the merge
+    # produces the untuned input. The source file on disk should be
+    # canonical after tune_target returns, and the merged untuned
+    # file should also be clean.
+    quoted = "1024,7168,512,False,'torch.bfloat16','torch.bfloat16',False,False"
+    source = tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv"
+    _write(source, quoted)
+
+    runner, _calls = _spy_runner()
+    result = tune_target(
+        "bf16_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=False,
+        run=runner,
+    )
+    assert result.returncode == 0
+    # Source file got patched.
+    assert "'torch" not in source.read_text()
+    # Untuned file (the tuner input) is also clean.
+    assert "'torch" not in result.untuned_file.read_text()
 
 
 # ---------- build_command ----------

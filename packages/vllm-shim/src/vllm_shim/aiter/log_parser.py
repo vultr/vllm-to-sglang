@@ -63,7 +63,7 @@ _FIELDS_RE: dict[str, re.Pattern[str]] = {
 }
 
 
-def _unquote(value: str) -> str:
+def strip_dtype_quotes(value: str) -> str:
     """Strip a single layer of matching ASCII quotes around a captured value.
 
     AITER's f-string interpolation wraps string values in repr quotes
@@ -71,6 +71,10 @@ def _unquote(value: str) -> str:
     the CSV poisons the tuner, which then interprets the quoted string
     as a malformed dtype/device. We strip one matched pair only; values
     without quotes pass through unchanged.
+
+    Shared with the CSV-read paths in ``shape_store`` and ``tune`` so
+    that pre-fix capture data on operator volumes is auto-canonicalized
+    on read instead of forcing operators to scrub the PV by hand.
     """
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         return value[1:-1]
@@ -118,8 +122,8 @@ def parse_line(line: str) -> AiterShape | None:
         m=int(fields["m"]),
         n=int(fields["n"]),
         k=int(fields["k"]),
-        dtype=_unquote(fields["dtype"]),
-        outdtype=_unquote(fields["outdtype"]),
+        dtype=strip_dtype_quotes(fields["dtype"]),
+        outdtype=strip_dtype_quotes(fields["outdtype"]),
         bias=fields["bias"] == "True",
         scale_ab=fields["scale_ab"] == "True",
         bpreshuffle=fields["bpreshuffle"] == "True",

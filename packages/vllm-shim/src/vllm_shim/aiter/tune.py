@@ -39,8 +39,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vllm_shim.aiter.capture import resolve_shim_home
+from vllm_shim.aiter.log_parser import strip_dtype_quotes
 from vllm_shim.cli.rocm_probe import bucket as bucket_for_gpu
 from vllm_shim.cli.rocm_probe import probe as probe_rocm
+
+# Columns where pre-fix capture data may carry literal Python repr
+# quotes around the value (``dtype='torch.bfloat16'``). When merging
+# shapes for AITER's tuner we canonicalize these so the tuner doesn't
+# choke on the quoted form.
+_QUOTED_DTYPE_COLUMNS: frozenset[str] = frozenset({"dtype", "outdtype"})
 
 # Default to the layout baked into the SGLang-ROCm shim image. ``/opt/venv``
 # is the Python 3.10 env that ships AITER's tuner; ``/sgl-workspace/aiter``
@@ -161,6 +168,72 @@ def discover_shape_files(shim_home: Path, bucket: str, target: str) -> list[Path
     return sorted(root.glob(f"*/*/{target}.csv"))
 
 
+def canonicalize_shape_files(files: list[Path]) -> int:
+    """Rewrite shape CSVs in place to strip stale ``dtype`` repr quotes.
+
+    Pre-fix capture data on operator volumes carries literal Python
+    repr quotes around ``dtype`` / ``outdtype`` values (e.g.
+    ``'torch.bfloat16'``) because AITER's log line format wraps string
+    values in repr quotes. The tuner can't read that form and dies.
+
+    This pass is idempotent: files that already have canonical
+    (unquoted) values are not touched. Returns the count of files
+    that were rewritten so the caller can surface it for operators.
+
+    Writes go through a sibling ``.tmp`` file plus an atomic
+    ``Path.replace`` so a crash mid-rewrite never leaves a half-
+    written CSV in place. Safe to run at startup-tune time because the
+    backend hasn't launched yet, so no capture process is appending
+    to these files concurrently.
+    """
+    rewritten = 0
+    for path in files:
+        if _canonicalize_one(path):
+            rewritten += 1
+    return rewritten
+
+
+def _canonicalize_one(path: Path) -> bool:
+    """Rewrite ``path`` if any dtype/outdtype cell carries repr quotes.
+
+    Returns True when the file was rewritten, False when it was
+    already canonical (or empty / malformed in a way that doesn't
+    contain the offending columns).
+    """
+    with path.open(newline="") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return False
+        quote_cols = [
+            i for i, name in enumerate(header) if name in _QUOTED_DTYPE_COLUMNS
+        ]
+        if not quote_cols:
+            return False
+        rows = list(reader)
+    cleaned: list[list[str]] = []
+    changed = False
+    for row in rows:
+        new_row = list(row)
+        for i in quote_cols:
+            if i < len(new_row):
+                stripped = strip_dtype_quotes(new_row[i])
+                if stripped != new_row[i]:
+                    new_row[i] = stripped
+                    changed = True
+        cleaned.append(new_row)
+    if not changed:
+        return False
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(cleaned)
+    tmp.replace(path)
+    return True
+
+
 def merge_shape_files(files: list[Path], destination: Path) -> int:
     """Concatenate shape CSVs into ``destination`` with row-level dedup.
 
@@ -169,6 +242,10 @@ def merge_shape_files(files: list[Path], destination: Path) -> int:
     captures with different ``bias`` or ``dtype`` for the same
     ``(M, N, K)`` both survive - the tuner treats them as separate
     inputs. Returns the row count written (excluding the header).
+
+    Callers running this against operator volumes should invoke
+    ``canonicalize_shape_files`` first to scrub pre-fix dtype quoting
+    in place. This function assumes its inputs are already canonical.
     """
     seen: set[tuple[str, ...]] = set()
     header: list[str] | None = None
@@ -279,6 +356,11 @@ def tune_target(
             returncode=None,
             skipped_reason="no captured shapes",
         )
+    # Patch pre-fix dtype quoting in place before feeding the merge
+    # step. After this returns, every source CSV is canonical and
+    # downstream readers (this run plus any future operator-driven
+    # invocations) get clean data. Idempotent on already-clean files.
+    canonicalize_shape_files(files)
     rows = merge_shape_files(files, untuned_file)
     cmd = build_command(
         spec,
