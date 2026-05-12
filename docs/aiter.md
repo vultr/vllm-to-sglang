@@ -213,6 +213,26 @@ Key flags:
 
 The tuner consolidates inputs per (bucket, target): every captured `shapes/<bucket>/<model>/<parallelism>/<target>.csv` is unioned into one deduped untuned file before AITER is invoked. The intermediate file lands under `$VLLM_SHIM_HOME/aiter/untuned/<bucket>/<target>.csv` so the operator can inspect what was fed into AITER if a tune misbehaves.
 
+### Tuning at pod startup
+
+Single-GPU deployments where running a separate tuning Job isn't possible can fold tuning into pod restarts via an env var:
+
+```yaml
+extraEnvs:
+  - name: VLLM_SHIM_TUNE_AT_STARTUP_SECONDS
+    value: "900"   # 15 min budget; 0 / unset = off
+```
+
+When set to a positive integer, the entrypoint runs `vllm-shim-tune --shim-home <...> --bucket <...>` between the AITER restore step and the backend spawn, with that many seconds as a hard wall-clock budget. The GPU is uncontested during this window because the backend hasn't started yet, so tuner benchmark measurements are clean (concurrent serving traffic would poison them).
+
+Failure modes are all swallowed: timeout, missing console script, AITER crash. The supervisor logs a single status line and proceeds to launch the backend. Partial tunes are safe because AITER writes tuned rows incrementally; a killed-mid-shape subprocess leaves a valid (partial) CSV that the next restart picks up.
+
+Choosing a budget:
+
+- Most incremental tunes (a handful of new shapes captured since the last restart) finish in seconds. The budget is a ceiling, not a floor.
+- The first-ever tune of a fresh deployment with hundreds of captured shapes can take minutes to an hour. Set the budget below your k8s `progressDeadlineSeconds` to avoid CrashLoopBackOff while AITER works through the queue. Partial tunes accumulate across restarts.
+- Operators who don't want this behaviour leave the env var unset; the entrypoint then behaves exactly like before.
+
 ### Target -> tuner script mapping
 
 The mapping is hardcoded in `vllm_shim.aiter.tune._SPECS`; AITER doesn't expose it as metadata. Two CLI conventions exist among AITER's own tuners:

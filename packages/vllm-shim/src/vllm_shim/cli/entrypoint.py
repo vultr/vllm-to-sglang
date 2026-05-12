@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_shim_home
@@ -16,12 +17,87 @@ from vllm_shim.cli.haproxy import launch as launch_haproxy
 from vllm_shim.cli.model_resolver import resolve_model
 from vllm_shim.cli.parser import ArgParser
 from vllm_shim.cli.rocm_perf import rocm_perf_defaults
+from vllm_shim.cli.rocm_probe import GpuAgent
+from vllm_shim.cli.rocm_probe import bucket as bucket_for_gpu
 from vllm_shim.cli.rocm_probe import probe as probe_rocm
 from vllm_shim.cli.supervisor import ManagedProcess, Supervisor
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
 
 HAPROXY_CONFIG_PATH = Path("/tmp/haproxy-shim.cfg")
+
+
+def _parse_tune_budget(env_value: str | None) -> int:
+    """Read VLLM_SHIM_TUNE_AT_STARTUP_SECONDS as a non-negative int.
+
+    Unset, empty, "0", or anything that doesn't parse cleanly means
+    "tuning at startup is off". A positive integer opts in with that
+    many seconds as the hard wall-clock budget.
+    """
+    if not env_value:
+        return 0
+    try:
+        n = int(env_value)
+    except ValueError:
+        return 0
+    return n if n > 0 else 0
+
+
+def _maybe_run_startup_tune(
+    *,
+    shim_home: Path | None,
+    gpu: GpuAgent | None,
+    budget_seconds: int,
+    run: Callable[[list[str], int], int] | None = None,
+) -> None:
+    """Best-effort vllm-shim-tune subprocess before the backend launches.
+
+    Gated on ``budget_seconds > 0`` plus the same prerequisites as
+    AITER restore (ROCm GPU + resolvable shim home). The tuner inherits
+    stderr so its progress lands in pod logs. Any failure - timeout,
+    crash, missing console script - is logged and swallowed; tuning is
+    never allowed to block the backend from launching.
+
+    Hard wall-clock cap matters: without it, a fresh-from-empty tune
+    of a large MoE on a single GPU could spend an hour benchmarking,
+    blowing through k8s ``progressDeadlineSeconds`` and CrashLoopBackOff
+    the pod. Partial tunes are safe - AITER writes tuned rows
+    incrementally, so a killed-mid-shape subprocess leaves a valid
+    (partial) tuned CSV that the next restart picks up where it left
+    off.
+    """
+    if budget_seconds <= 0 or gpu is None or shim_home is None:
+        return
+    cmd = [
+        "vllm-shim-tune",
+        "--shim-home",
+        str(shim_home),
+        "--bucket",
+        bucket_for_gpu(gpu),
+    ]
+    sys.stderr.write(
+        f"vllm-shim startup tune: running ({budget_seconds}s budget)\n"
+    )
+    runner = run if run is not None else _default_tune_runner
+    try:
+        rc = runner(cmd, budget_seconds)
+        sys.stderr.write(f"vllm-shim startup tune: exit {rc}\n")
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            f"vllm-shim startup tune: exceeded {budget_seconds}s budget; "
+            "continuing with whatever was tuned so far\n"
+        )
+    except Exception as e:
+        # Broad on purpose: missing console script, AITER blowups,
+        # permission errors all map to "skip and continue". Tuning is
+        # never allowed to block the backend from launching.
+        sys.stderr.write(
+            f"vllm-shim startup tune: failed ({e}); continuing\n"
+        )
+
+
+def _default_tune_runner(cmd: list[str], timeout: int) -> int:
+    return subprocess.run(cmd, timeout=timeout, check=False).returncode
 
 
 def _pin_served_model_name(
@@ -121,6 +197,22 @@ def main() -> int:
         if k not in backend_env
     }
     backend_env.update(rocm_perf_applied)
+
+    # Opt-in startup tune: turns a pod restart into a tune+serve cycle
+    # on single-GPU deployments where running a separate tuning job
+    # isn't possible. Off by default; operator sets
+    # VLLM_SHIM_TUNE_AT_STARTUP_SECONDS to a positive integer to enable
+    # with that wall-clock budget. Runs after restore so the tuner sees
+    # what's already tuned (incremental by default), and before the
+    # backend spawn so the freshly tuned configs land in AITER's first
+    # import. See docs/aiter.md.
+    _maybe_run_startup_tune(
+        shim_home=shim_home,
+        gpu=gpu,
+        budget_seconds=_parse_tune_budget(
+            os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_SECONDS")
+        ),
+    )
 
     # Snapshot every translation/resolution decision to disk + stderr so
     # vllm-shim-info can echo it from a pod shell and pod logs show the
