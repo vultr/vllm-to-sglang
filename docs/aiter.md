@@ -216,6 +216,7 @@ vllm-shim-tune --list       # show captured/tuned state per target, no work
 vllm-shim-tune --target a8w8_tuned_gemm
 vllm-shim-tune --dry-run    # print the AITER commands without running them
 vllm-shim-tune --retune     # force re-tune of every shape (--all to AITER)
+vllm-shim-tune --hot 100    # tune the 100 hottest shapes per target only
 ```
 
 The default behaviour is incremental: AITER's tuners read the existing `configs/<bucket>/<target>.csv`, diff against the merged captured shapes, and only tune the new rows. `--retune` maps to AITER's own `--all` flag and re-tunes from scratch.
@@ -229,28 +230,54 @@ Key flags:
 | `--shim-home` | `VLLM_SHIM_HOME`, else `~/.vllm-shim` | Override the persistent root. |
 | `--aiter-root` | `/sgl-workspace/aiter` | Path to the AITER source tree (where the tuner scripts live). |
 | `--python` | `/opt/venv/bin/python` | Python interpreter that has AITER installed. The shim itself runs under `/opt/shim`'s Python 3.12; AITER lives in `/opt/venv`'s 3.10. |
+| `--hot N` | unset (tune all) | Tune only the N hottest shapes per target. See "Hot-shape filtering" below. |
 
 The tuner consolidates inputs per (bucket, target): every captured `shapes/<bucket>/<model>/<parallelism>/<target>.csv` is unioned into one deduped untuned file before AITER is invoked. The intermediate file lands under `$VLLM_SHIM_HOME/aiter/untuned/<bucket>/<target>.csv` so the operator can inspect what was fed into AITER if a tune misbehaves.
 
+### Hot-shape filtering
+
+`--hot N` truncates the merged untuned CSV to the N shapes most likely to dominate runtime call count, before handing it to AITER's tuner. The summary line in the tuner's stderr output reports how many shapes were kept vs. dropped:
+
+```
+  bf16_tuned_gemm: 100 of 247 shapes (hot) -> /data/.../bf16_tuned_gemm.csv [ok]
+```
+
+**Heuristic, not measured frequency.** "Hot" is currently defined as smallest `(M, N, K)` first. In autoregressive LLM serving the decode phase runs at `M = active_batch` (small, typically 1-256) and invokes every layer's GEMMs once per token, while prefill shapes are large M but run once per request. Call count therefore skews orders of magnitude toward small-M shapes, so the M-ascending sort puts decode at the front of the queue and truncating preserves the long tail that actually moves serving latency.
+
+When `--hot` is a poor fit:
+
+- Long-context single-shot prefill workloads (large M, few decode steps) shouldn't use `--hot`, or should set N wide enough to cover the prefill shapes.
+- Static-batch workloads where all captured shapes share the same M see arbitrary truncation; either skip `--hot` or set N to the total shape count.
+
+**Composes with `--retune`.** Default incremental mode (no `--retune`) makes AITER diff the input against the existing tuned CSV and only tune new rows, so growing `--hot` across runs (e.g. 100 today, 500 next week, full set later) converges on full coverage without redoing earlier work.
+
+**Future work.** The heuristic is a stand-in for measured frequency. Adding a count column to the capture path is a follow-up; the `--hot` knob will keep its current name and semantics so operator workflows don't have to change.
+
 ### Tuning at pod startup
 
-Single-GPU deployments where running a separate tuning Job isn't possible can fold tuning into pod restarts via an env var:
+Single-GPU deployments where running a separate tuning Job isn't possible can fold tuning into pod restarts via env vars:
 
 ```yaml
 extraEnvs:
   - name: VLLM_SHIM_TUNE_AT_STARTUP_SECONDS
-    value: "900"   # 15 min budget; 0 / unset = off
+    value: "900"   # 15 min wall-clock budget; 0 / unset = off
+  - name: VLLM_SHIM_TUNE_AT_STARTUP_HOT
+    value: "100"   # tune only the 100 hottest shapes per target;
+                   # 0 / unset = tune everything that was captured
 ```
 
-When set to a positive integer, the entrypoint runs `vllm-shim-tune --shim-home <...> --bucket <...>` between the AITER restore step and the backend spawn, with that many seconds as a hard wall-clock budget. The GPU is uncontested during this window because the backend hasn't started yet, so tuner benchmark measurements are clean (concurrent serving traffic would poison them).
+When `VLLM_SHIM_TUNE_AT_STARTUP_SECONDS` is set to a positive integer, the entrypoint runs `vllm-shim-tune --shim-home <...> --bucket <...>` between the AITER restore step and the backend spawn, with that many seconds as a hard wall-clock budget. The GPU is uncontested during this window because the backend hasn't started yet, so tuner benchmark measurements are clean (concurrent serving traffic would poison them).
+
+`VLLM_SHIM_TUNE_AT_STARTUP_HOT` appends `--hot N` to that command (see "Hot-shape filtering" above for what the heuristic does). Use it together with the budget when the captured-shape set is too large to tune in full within `progressDeadlineSeconds`: hot-filtering shrinks the input so the budget is far less likely to truncate mid-shape, and the remaining shapes accumulate on subsequent restarts (incremental mode skips already-tuned rows).
 
 Failure modes are all swallowed: timeout, missing console script, AITER crash. The supervisor logs a single status line and proceeds to launch the backend. Partial tunes are safe because AITER writes tuned rows incrementally; a killed-mid-shape subprocess leaves a valid (partial) CSV that the next restart picks up.
 
-Choosing a budget:
+Choosing a budget and hot count:
 
 - Most incremental tunes (a handful of new shapes captured since the last restart) finish in seconds. The budget is a ceiling, not a floor.
 - The first-ever tune of a fresh deployment with hundreds of captured shapes can take minutes to an hour. Set the budget below your k8s `progressDeadlineSeconds` to avoid CrashLoopBackOff while AITER works through the queue. Partial tunes accumulate across restarts.
-- Operators who don't want this behaviour leave the env var unset; the entrypoint then behaves exactly like before.
+- For latency-sensitive LLM serving workloads, `VLLM_SHIM_TUNE_AT_STARTUP_HOT=100` (or similar, depending on how much variety lives in your decode-phase shapes) typically captures most of the perf win at a fraction of the tune cost. Operators tracking exact coverage can step it up across deploys (100 → 500 → unset) without re-tuning earlier rows.
+- Operators who don't want this behaviour leave both env vars unset; the entrypoint then behaves exactly like before.
 
 ### Target -> tuner script mapping
 

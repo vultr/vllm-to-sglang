@@ -244,6 +244,66 @@ def _canonicalize_one(path: Path) -> bool:
     return True
 
 
+def apply_hot_filter(path: Path, top_k: int) -> tuple[int, int]:
+    """Truncate ``path`` to the top-k heuristically-hottest shapes.
+
+    Hot = smallest ``(M, N, K)`` first. In autoregressive LLM serving
+    the decode phase runs at ``M = active_batch`` (small, typically
+    1-256) and calls every layer's GEMMs once per token; prefill
+    shapes are large M but run once per request. Call count therefore
+    skews orders of magnitude toward small-M shapes, so sorting M
+    ascending and truncating keeps the long tail that dominates
+    real-world performance at a fraction of the tuning cost.
+
+    Returns ``(rows_before, rows_after)``. When ``rows_before <=
+    top_k`` the file is left untouched. Idempotent and safe to run on
+    files lacking the schema columns (no-op + same-length return).
+
+    The heuristic is a stand-in for measured call frequency. Workloads
+    dominated by long-context single-shot prefill (rather than
+    chat-style decode) should set ``top_k`` wide enough to cover
+    their shapes, or skip the filter entirely.
+    """
+    with path.open(newline="") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return (0, 0)
+        rows = list(reader)
+    rows_before = len(rows)
+    if rows_before <= top_k:
+        return (rows_before, rows_before)
+    try:
+        m_col = header.index(_M_COLUMN)
+        n_col = header.index("N")
+        k_col = header.index("K")
+    except ValueError:
+        # File lacks the canonical schema (corrupt or pre-shim);
+        # leave it alone rather than reorder rows of unknown meaning.
+        return (rows_before, rows_before)
+
+    def sort_key(row: list[str]) -> tuple[int, int, int]:
+        try:
+            return (int(row[m_col]), int(row[n_col]), int(row[k_col]))
+        except (ValueError, IndexError):
+            # Malformed row sorts to the end so the well-formed shapes
+            # at the top of the order are the ones that actually get
+            # tuned. Stable sort within the bucket preserves capture
+            # order for any operator-side debugging.
+            return (sys.maxsize, sys.maxsize, sys.maxsize)
+
+    rows.sort(key=sort_key)
+    rows = rows[:top_k]
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+    tmp.replace(path)
+    return (rows_before, top_k)
+
+
 def merge_shape_files(files: list[Path], destination: Path) -> int:
     """Concatenate shape CSVs into ``destination`` with row-level dedup.
 
@@ -325,12 +385,19 @@ def build_command(
 
 @dataclass(frozen=True, slots=True)
 class TuneResult:
-    """Outcome of tuning one target. ``returncode`` is None on dry-run / skip."""
+    """Outcome of tuning one target. ``returncode`` is None on dry-run / skip.
+
+    ``rows_in`` is the row count actually fed to AITER's tuner (after
+    ``--hot`` truncation). ``rows_total`` is the merged count before
+    truncation; equal to ``rows_in`` when ``--hot`` wasn't set or
+    didn't trigger.
+    """
 
     target: str
     untuned_file: Path
     tuned_file: Path
     rows_in: int
+    rows_total: int
     command: list[str]
     returncode: int | None
     skipped_reason: str | None = None
@@ -345,6 +412,7 @@ def tune_target(
     python: Path,
     retune: bool,
     dry_run: bool,
+    hot: int | None = None,
     run: Callable[[list[str]], int] | None = None,
 ) -> TuneResult:
     """Tune one target end-to-end: discover, merge, invoke.
@@ -363,6 +431,7 @@ def tune_target(
             untuned_file=untuned_file,
             tuned_file=tuned_file,
             rows_in=0,
+            rows_total=0,
             command=[],
             returncode=None,
             skipped_reason="no captured shapes",
@@ -373,6 +442,9 @@ def tune_target(
     # invocations) get canonical data. Idempotent on already-clean files.
     canonicalize_shape_files(files)
     rows = merge_shape_files(files, untuned_file)
+    rows_total = rows
+    if hot is not None and rows > 0:
+        rows_total, rows = apply_hot_filter(untuned_file, hot)
     cmd = build_command(
         spec,
         python=python,
@@ -387,6 +459,7 @@ def tune_target(
             untuned_file=untuned_file,
             tuned_file=tuned_file,
             rows_in=rows,
+            rows_total=rows_total,
             command=cmd,
             returncode=None,
             skipped_reason="dry-run",
@@ -399,6 +472,7 @@ def tune_target(
         untuned_file=untuned_file,
         tuned_file=tuned_file,
         rows_in=rows,
+        rows_total=rows_total,
         command=cmd,
         returncode=rc,
     )
@@ -442,8 +516,12 @@ def _print_result(result: TuneResult) -> None:
             sys.stderr.write(f"    would run: {' '.join(result.command)}\n")
         return
     status = "ok" if result.returncode == 0 else f"failed (rc={result.returncode})"
+    if result.rows_in < result.rows_total:
+        shapes = f"{result.rows_in} of {result.rows_total} shapes (hot)"
+    else:
+        shapes = f"{result.rows_in} shapes"
     sys.stderr.write(
-        f"  {result.target}: {result.rows_in} shapes -> {result.tuned_file} [{status}]\n"
+        f"  {result.target}: {shapes} -> {result.tuned_file} [{status}]\n"
     )
 
 
@@ -511,6 +589,20 @@ def main(argv: list[str] | None = None) -> int:
             "have a tuned row."
         ),
     )
+    parser.add_argument(
+        "--hot",
+        type=int,
+        metavar="N",
+        help=(
+            "Tune only the N hottest shapes per target. 'Hot' is "
+            "currently a heuristic: smallest (M, N, K) first, which "
+            "approximates the decode-phase GEMMs that dominate call "
+            "count in autoregressive serving. Default: tune every "
+            "captured shape. Composes with --retune; with the default "
+            "(incremental) mode AITER skips already-tuned rows, so "
+            "growing --hot across runs converges on the full set."
+        ),
+    )
     args = parser.parse_args(argv)
 
     shim_home = args.shim_home or resolve_shim_home()
@@ -542,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
             python=args.python,
             retune=args.retune,
             dry_run=args.dry_run,
+            hot=args.hot,
         )
         _print_result(result)
         if result.returncode not in (None, 0):

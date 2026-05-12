@@ -47,11 +47,29 @@ def _parse_tune_budget(env_value: str | None) -> int:
     return n if n > 0 else 0
 
 
+def _parse_tune_hot(env_value: str | None) -> int | None:
+    """Read VLLM_SHIM_TUNE_AT_STARTUP_HOT as an optional positive int.
+
+    Unset, empty, "0", or anything that doesn't parse cleanly means
+    "no --hot flag is passed to vllm-shim-tune" (tune every captured
+    shape). A positive integer opts into hot-shape filtering with
+    that many shapes per target.
+    """
+    if not env_value:
+        return None
+    try:
+        n = int(env_value)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
 def _maybe_run_startup_tune(
     *,
     shim_home: Path | None,
     gpu: GpuAgent | None,
     budget_seconds: int,
+    hot: int | None = None,
     run: Callable[[list[str], int], int] | None = None,
 ) -> None:
     """Best-effort vllm-shim-tune subprocess before the backend launches.
@@ -69,6 +87,12 @@ def _maybe_run_startup_tune(
     incrementally, so a killed-mid-shape subprocess leaves a valid
     (partial) tuned CSV that the next restart picks up where it left
     off.
+
+    ``hot`` (driven by ``VLLM_SHIM_TUNE_AT_STARTUP_HOT``) opts the
+    subprocess into per-target hot-shape filtering. The wall-clock
+    budget is still a hard ceiling; ``--hot N`` reduces the input set
+    so the budget is far less likely to truncate mid-shape, which is
+    the common reason a startup tune ships an under-covered config.
     """
     if budget_seconds <= 0 or gpu is None or shim_home is None:
         return
@@ -79,8 +103,11 @@ def _maybe_run_startup_tune(
         "--bucket",
         bucket_for_gpu(gpu),
     ]
+    if hot is not None:
+        cmd.extend(["--hot", str(hot)])
+    hot_note = f", --hot {hot}" if hot is not None else ""
     sys.stderr.write(
-        f"vllm-shim startup tune: running ({budget_seconds}s budget)\n"
+        f"vllm-shim startup tune: running ({budget_seconds}s budget{hot_note})\n"
     )
     runner = run if run is not None else _default_tune_runner
     try:
@@ -224,6 +251,7 @@ def main() -> int:
         budget_seconds=_parse_tune_budget(
             os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_SECONDS")
         ),
+        hot=_parse_tune_hot(os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_HOT")),
     )
 
     # Snapshot every translation/resolution decision to disk + stderr so

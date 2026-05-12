@@ -7,6 +7,7 @@ import pytest
 from vllm_shim.cli.entrypoint import (
     _maybe_run_startup_tune,
     _parse_tune_budget,
+    _parse_tune_hot,
     _pin_served_model_name,
 )
 from vllm_shim.cli.rocm_probe import GpuAgent
@@ -78,6 +79,36 @@ def test_parse_tune_budget_non_numeric_means_off() -> None:
 def test_parse_tune_budget_positive_int_is_returned_verbatim() -> None:
     assert _parse_tune_budget("900") == 900
     assert _parse_tune_budget("3600") == 3600
+
+
+# ---------- _parse_tune_hot ----------
+
+
+def test_parse_tune_hot_unset_means_no_filter() -> None:
+    # None == "tune all captured shapes"; default off.
+    assert _parse_tune_hot(None) is None
+    assert _parse_tune_hot("") is None
+
+
+def test_parse_tune_hot_zero_means_no_filter() -> None:
+    # "0" reads as "off" so it composes cleanly with helm chart
+    # patterns that fill an unset env with "0".
+    assert _parse_tune_hot("0") is None
+
+
+def test_parse_tune_hot_negative_means_no_filter() -> None:
+    assert _parse_tune_hot("-1") is None
+    assert _parse_tune_hot("-100") is None
+
+
+def test_parse_tune_hot_non_numeric_means_no_filter() -> None:
+    assert _parse_tune_hot("hot") is None
+    assert _parse_tune_hot("true") is None
+
+
+def test_parse_tune_hot_positive_int_is_returned_verbatim() -> None:
+    assert _parse_tune_hot("100") == 100
+    assert _parse_tune_hot("500") == 500
 
 
 # ---------- _maybe_run_startup_tune ----------
@@ -154,6 +185,35 @@ def test_tune_invokes_runner_with_bucket_and_budget() -> None:
     assert cmd[cmd.index("--bucket") + 1] == "gfx942-304cu"
     assert "--shim-home" in cmd
     assert timeout == 900
+    # Without VLLM_SHIM_TUNE_AT_STARTUP_HOT set, the subprocess gets
+    # no --hot flag and tunes every captured shape (existing behavior).
+    assert "--hot" not in cmd
+
+
+def test_tune_passes_hot_flag_when_set(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    received: list[list[str]] = []
+
+    def runner(cmd: list[str], _timeout: int) -> int:
+        received.append(cmd)
+        return 0
+
+    _maybe_run_startup_tune(
+        shim_home=Path("/data/vllm-shim"),
+        gpu=_MI300X,
+        budget_seconds=900,
+        hot=100,
+        run=runner,
+    )
+    cmd = received[0]
+    assert "--hot" in cmd
+    assert cmd[cmd.index("--hot") + 1] == "100"
+    # Pod-log line surfaces both knobs so an operator scanning the
+    # startup banner can confirm both took effect.
+    err = capsys.readouterr().err
+    assert "900s budget" in err
+    assert "--hot 100" in err
 
 
 def test_tune_swallows_timeout(capsys: pytest.CaptureFixture[str]) -> None:

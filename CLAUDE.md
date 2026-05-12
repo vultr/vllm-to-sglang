@@ -111,6 +111,7 @@ The shim has no config file. Behavior is driven by CLI args (the `vllm serve` in
 | `VLLM_SHIM_HOME`           | `~/.vllm-shim`   | Root for the shim's persistent state (AITER capture + tuned configs). Point at a PV in production. |
 | `VLLM_SHIM_LOG`            | `/tmp/vllm-shim.log` | Where 4xx/5xx error dumps are appended. Read once at module import. |
 | `VLLM_SHIM_TUNE_AT_STARTUP_SECONDS` | unset (off) | When set to a positive integer, the entrypoint runs `vllm-shim-tune` between restore and backend spawn, with that many seconds as a hard wall-clock budget. Single-GPU deployments use this to fold tuning into pod restarts. See `docs/aiter.md`. |
+| `VLLM_SHIM_TUNE_AT_STARTUP_HOT`     | unset (off) | When set to a positive integer alongside `VLLM_SHIM_TUNE_AT_STARTUP_SECONDS`, appends `--hot N` to the startup tuner so it only tunes the N hottest shapes per target. Cuts startup tune work to the decode-dominant tail. See `docs/aiter.md`. |
 | `SGLANG_TOOL_CALL_PARSER`  | `qwen3_coder`    | Forwarded to SGLang's `--tool-call-parser`. |
 | `VLLM_SHIM_BACKEND_HOST` / `VLLM_SHIM_BACKEND_PORT` / `VLLM_SHIM_MIDDLEWARE_PORT` | derived | Set by the supervisor when spawning the middleware; not normally set by hand. |
 | `TRTLLM_BACKEND`           | `pytorch`        | `pytorch`, `tensorrt`, or `_autodeploy`. |

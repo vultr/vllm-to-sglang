@@ -7,6 +7,7 @@ import pytest
 from vllm_shim.aiter import tune
 from vllm_shim.aiter.tune import (
     TuneResult,
+    apply_hot_filter,
     build_command,
     canonicalize_shape_files,
     discover_shape_files,
@@ -92,6 +93,76 @@ def test_merge_rejects_header_mismatch(tmp_path: Path) -> None:
     f2.write_text("M,N,K\n1024,7168,512\n")
     with pytest.raises(ValueError, match="header mismatch"):
         merge_shape_files([f1, f2], tmp_path / "out.csv")
+
+
+# ---------- apply_hot_filter ----------
+
+
+def test_hot_filter_noop_when_rows_fit_under_top_k(tmp_path: Path) -> None:
+    # No truncation needed: file should be byte-identical, no rewrite.
+    path = _write(tmp_path / "in.csv", _ROW_A, _ROW_B)
+    before_text = path.read_text()
+    before, after = apply_hot_filter(path, top_k=10)
+    assert (before, after) == (2, 2)
+    assert path.read_text() == before_text
+
+
+def test_hot_filter_sorts_by_m_ascending_then_truncates(tmp_path: Path) -> None:
+    # _ROW_A = M 1024, _ROW_B = M 2048, _ROW_C = M 4096. Hot-filter to
+    # 2 must keep A and B (the two smallest M's) and drop C.
+    path = _write(tmp_path / "in.csv", _ROW_C, _ROW_A, _ROW_B)
+    before, after = apply_hot_filter(path, top_k=2)
+    assert (before, after) == (3, 2)
+    lines = path.read_text().splitlines()
+    assert lines[0] == _HEADER
+    # Order matters: smallest M first so the operator can confirm
+    # which shapes the heuristic kept.
+    assert lines[1] == _ROW_A
+    assert lines[2] == _ROW_B
+
+
+def test_hot_filter_secondary_sort_by_n_then_k(tmp_path: Path) -> None:
+    # Same M; secondary sort orders by (N, K) for deterministic output.
+    same_m_small_n = "256,4096,256,False,torch.bfloat16,torch.bfloat16,False,False"
+    same_m_big_n = "256,8192,256,False,torch.bfloat16,torch.bfloat16,False,False"
+    same_m_small_k = "256,4096,128,False,torch.bfloat16,torch.bfloat16,False,False"
+    path = _write(tmp_path / "in.csv", same_m_big_n, same_m_small_n, same_m_small_k)
+    before, after = apply_hot_filter(path, top_k=2)
+    assert (before, after) == (3, 2)
+    lines = path.read_text().splitlines()
+    # (256, 4096, 128) < (256, 4096, 256) < (256, 8192, 256)
+    assert lines[1] == same_m_small_k
+    assert lines[2] == same_m_small_n
+
+
+def test_hot_filter_handles_empty_file(tmp_path: Path) -> None:
+    # Edge: file has only the header. Function must not blow up on
+    # next(reader) -> StopIteration when iterating rows.
+    path = tmp_path / "in.csv"
+    path.write_text("")
+    before, after = apply_hot_filter(path, top_k=5)
+    assert (before, after) == (0, 0)
+
+
+def test_hot_filter_leaves_unknown_schema_alone(tmp_path: Path) -> None:
+    # Defensive: a file without the M column shouldn't get sorted to
+    # arbitrary garbage. The function returns the row count unchanged
+    # and doesn't rewrite.
+    path = tmp_path / "in.csv"
+    path.write_text("foo,bar\n1,2\n3,4\n5,6\n")
+    before_text = path.read_text()
+    before, after = apply_hot_filter(path, top_k=1)
+    assert (before, after) == (3, 3)
+    assert path.read_text() == before_text
+
+
+def test_hot_filter_writes_atomically_via_tmp(tmp_path: Path) -> None:
+    # Atomic rewrite: no leftover .tmp file after a successful pass.
+    # If a crash interrupts the write, the original survives intact.
+    path = _write(tmp_path / "in.csv", _ROW_C, _ROW_A, _ROW_B)
+    apply_hot_filter(path, top_k=1)
+    siblings = sorted(p.name for p in tmp_path.iterdir())
+    assert siblings == ["in.csv"]
 
 
 # ---------- canonicalize_shape_files ----------
@@ -360,6 +431,99 @@ def test_tune_target_runner_failure_surfaces_returncode(tmp_path: Path) -> None:
     assert result.returncode == 7
 
 
+def test_tune_target_hot_filter_truncates_merged_input(tmp_path: Path) -> None:
+    # Three shapes captured, hot=2: tuner sees only the two smallest M
+    # shapes. ``rows_total`` preserves the pre-truncation count so the
+    # operator-facing summary can report "2 of 3 shapes (hot)".
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv",
+        _ROW_C,
+        _ROW_A,
+        _ROW_B,
+    )
+    runner, calls = _spy_runner()
+    result = tune_target(
+        "bf16_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=False,
+        hot=2,
+        run=runner,
+    )
+    assert result.rows_in == 2
+    assert result.rows_total == 3
+    assert len(calls) == 1
+    # Verify on disk that AITER will read exactly the two smallest M's.
+    rows = result.untuned_file.read_text().splitlines()
+    assert rows[1:] == [_ROW_A, _ROW_B]
+
+
+def test_tune_target_hot_filter_noop_when_under_top_k(tmp_path: Path) -> None:
+    # hot=10 with 2 shapes captured: no truncation, rows_in == rows_total.
+    # Operator's summary should NOT show the "(hot)" marker in this case.
+    _write(
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv",
+        _ROW_A,
+        _ROW_B,
+    )
+    runner, _ = _spy_runner()
+    result = tune_target(
+        "bf16_tuned_gemm",
+        shim_home=tmp_path,
+        bucket="gfx942-304cu",
+        aiter_root=Path("/aiter"),
+        python=Path("py"),
+        retune=False,
+        dry_run=False,
+        hot=10,
+        run=runner,
+    )
+    assert result.rows_in == 2
+    assert result.rows_total == 2
+
+
+def test_print_result_marks_hot_when_truncated(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tune._print_result(
+        TuneResult(
+            target="bf16_tuned_gemm",
+            untuned_file=Path("/u.csv"),
+            tuned_file=Path("/t.csv"),
+            rows_in=100,
+            rows_total=247,
+            command=["echo"],
+            returncode=0,
+        )
+    )
+    err = capsys.readouterr().err
+    # The operator should see the truncation count so they can decide
+    # whether to widen --hot on the next run.
+    assert "100 of 247 shapes (hot)" in err
+
+
+def test_print_result_omits_hot_marker_when_no_truncation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tune._print_result(
+        TuneResult(
+            target="bf16_tuned_gemm",
+            untuned_file=Path("/u.csv"),
+            tuned_file=Path("/t.csv"),
+            rows_in=42,
+            rows_total=42,
+            command=["echo"],
+            returncode=0,
+        )
+    )
+    err = capsys.readouterr().err
+    assert "42 shapes" in err
+    assert "(hot)" not in err
+
+
 # ---------- main() ----------
 
 
@@ -426,6 +590,7 @@ def test_main_dry_run_iterates_only_chosen_target(
             untuned_file=Path("u.csv"),
             tuned_file=Path("t.csv"),
             rows_in=1,
+            rows_total=1,
             command=["echo"],
             returncode=None,
             skipped_reason="dry-run",
