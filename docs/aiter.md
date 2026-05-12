@@ -109,6 +109,25 @@ The mapping from tuned-config basename to env var lives in `_TARGET_ENV` in `vll
 
 **Precedence**: operator-set `AITER_CONFIG_*` env vars (in the pod spec or container `ENV`) win over restore. Same principle as `translate_env_with_map`: if the operator wrote it down, they meant it. The launch-info dump only lists the overrides that actually took effect, so a missing entry in `aiter_restore.overrides` for a target whose file exists under `$VLLM_SHIM_HOME/aiter/configs/<bucket>` is the signal that the operator's env beat us to it.
 
+## HIP online tuning anchor
+
+When the operator sets `HIP_ONLINE_TUNING=1` (or `=true`), AITER's gradlib enters its hipBLASLt online-tuning path. On the first call for each new shape it runs a short measurement, picks the fastest hipBLASLt algorithm, and appends a row to `hip_online_tuning_res.csv`. Subsequent calls for the same shape read back the cached algorithm. The full process takes several minutes the first time; subsequent restarts are fast if the file is reused.
+
+The catch: the CSV path is hardcoded *relative to the current working directory* in gradlib's C++ source (`repos/aiter/gradlib/csrc/hipbsolgemm.cu`, `get_algoIdx_hip_tuning_csv` / `append_hip_tuning_csv`). No env var redirects it. Default container layout puts CWD on an ephemeral layer, so without intervention every pod re-pays the full tune cost.
+
+The shim's anchor: when `HIP_ONLINE_TUNING` is on, keep the canonical CSV at `$VLLM_SHIM_HOME/hip_online_tuning_res.csv` and symlink `<cwd>/hip_online_tuning_res.csv` onto it. AITER's relative-path open transparently follows the symlink and lands on the PV. See `vllm_shim.aiter.hip_online_tuning`.
+
+The anchor is the right knob (not a copy-on-shutdown hook) because gradlib appends per-shape. A pod that exits abnormally between tune and shutdown would lose any rows accumulated since the last save; the symlink keeps every successful append on the PV in real time.
+
+Edge cases the planner handles:
+
+- **Symlink already correct**: idempotent no-op on restart; the existing file's accumulated rows survive.
+- **Wrong-pointing symlink**: replaced (image upgrade moved the storage path, operator hand-linked somewhere else).
+- **Regular file already at the CWD path**: refuse to clobber it. The launch info reports `non-symlink file at target`; the operator decides whether to move it onto the PV manually.
+- **No shim home**: no anchor; launch info reports `no shim home` so the operator sees the data is going to be ephemeral.
+
+The launch-info dump surfaces the state under `hip_online_tuning` (`enabled`, `storage`, `target`, `reason`). The stderr summary line prints only when the operator opted in, so the common (env-not-set) case stays silent. Format: `hip online tuning: <cwd-path> -> <pv-path>` for the anchored case, `hip online tuning: not anchored (<reason>)` for the failure cases.
+
 ## Prerequisites and decision flow
 
 Both halves share the same two prerequisites:

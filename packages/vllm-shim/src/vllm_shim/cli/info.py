@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from vllm_shim.aiter.capture import CapturePlan
+from vllm_shim.aiter.hip_online_tuning import (
+    REASON_ALREADY_LINKED,
+    REASON_DISABLED,
+    REASON_WILL_LINK,
+    HipTuningPlan,
+)
 from vllm_shim.aiter.restore import RestorePlan
 from vllm_shim.values.port_allocation import PortAllocation
 from vllm_shim.values.service_address import ServiceAddress
@@ -63,6 +69,7 @@ def collect(
     aiter_restore: RestorePlan,
     aiter_restored: Mapping[str, str],
     rocm_perf: Mapping[str, str],
+    hip_online_tuning: HipTuningPlan,
 ) -> dict[str, Any]:
     """Assemble the info dict from already-decided launch state."""
     env_translation = {k: v for k, v in backend_env.items() if k not in parent_env}
@@ -100,6 +107,16 @@ def collect(
             "overrides": dict(aiter_restored),
         },
         "rocm_perf": dict(rocm_perf),
+        "hip_online_tuning": {
+            "enabled": hip_online_tuning.enabled,
+            "storage": (
+                str(hip_online_tuning.storage) if hip_online_tuning.storage else None
+            ),
+            "target": (
+                str(hip_online_tuning.target) if hip_online_tuning.target else None
+            ),
+            "reason": hip_online_tuning.reason,
+        },
     }
 
 
@@ -145,6 +162,18 @@ def print_summary(info: dict[str, Any]) -> None:
     if rocm_perf:
         envs = ", ".join(sorted(rocm_perf.keys()))
         sys.stderr.write(f"  rocm perf: {len(rocm_perf)} defaults ({envs})\n")
+    # HIP online tuning anchor: print only when the operator opted in
+    # via HIP_ONLINE_TUNING. Disabled-by-default is the common case
+    # and would just add noise to pod logs.
+    hot = info.get("hip_online_tuning") or {}
+    reason = hot.get("reason")
+    if reason and reason != REASON_DISABLED:
+        if reason in (REASON_WILL_LINK, REASON_ALREADY_LINKED):
+            sys.stderr.write(
+                f"  hip online tuning: {hot['target']} -> {hot['storage']}\n"
+            )
+        else:
+            sys.stderr.write(f"  hip online tuning: not anchored ({reason})\n")
 
 
 def main() -> int:

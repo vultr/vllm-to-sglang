@@ -7,6 +7,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_shim_home
+from vllm_shim.aiter.hip_online_tuning import (
+    apply_hip_online_tuning,
+    plan_hip_online_tuning,
+)
 from vllm_shim.aiter.restore import plan_restore, restore_configs
 from vllm_shim.aiter.shape_store import ShapeStore
 from vllm_shim.aiter.stream_tee import StreamTee
@@ -198,6 +202,14 @@ def main() -> int:
     }
     backend_env.update(rocm_perf_applied)
 
+    # When the operator opted into AITER's HIP_ONLINE_TUNING, anchor
+    # ./hip_online_tuning_res.csv on the PV via symlink. The path is
+    # hardcoded relative to the backend's CWD in gradlib's C++ source,
+    # so a symlink is the only way to persist accumulated tuning data
+    # across pod restarts. See vllm_shim/aiter/hip_online_tuning.py.
+    hip_tuning_plan = plan_hip_online_tuning(os.environ, gpu, shim_home, Path.cwd())
+    apply_hip_online_tuning(hip_tuning_plan)
+
     # Opt-in startup tune: turns a pod restart into a tune+serve cycle
     # on single-GPU deployments where running a separate tuning job
     # isn't possible. Off by default; operator sets
@@ -233,6 +245,7 @@ def main() -> int:
         aiter_restore=restore_plan,
         aiter_restored=restored,
         rocm_perf=rocm_perf_applied,
+        hip_online_tuning=hip_tuning_plan,
     )
     info.write(launch_info)
     info.print_summary(launch_info)

@@ -5,6 +5,13 @@ from pathlib import Path
 
 import pytest
 from vllm_shim.aiter.capture import REASON_ENABLED, REASON_NO_GPU, CapturePlan
+from vllm_shim.aiter.hip_online_tuning import (
+    REASON_ALREADY_LINKED,
+    REASON_BLOCKED,
+    REASON_DISABLED,
+    REASON_WILL_LINK,
+    HipTuningPlan,
+)
 from vllm_shim.aiter.restore import RestorePlan
 from vllm_shim.cli import info
 from vllm_shim.values.port_allocation import PortAllocation
@@ -17,6 +24,12 @@ def _disabled_capture() -> CapturePlan:
 
 def _disabled_restore() -> RestorePlan:
     return RestorePlan(enabled=False, source=None, reason=REASON_NO_GPU)
+
+
+def _disabled_hip_tuning() -> HipTuningPlan:
+    return HipTuningPlan(
+        enabled=False, storage=None, target=None, reason=REASON_DISABLED
+    )
 
 
 def _sample_args() -> dict[str, object]:
@@ -34,6 +47,7 @@ def _sample_args() -> dict[str, object]:
         "aiter_restore": _disabled_restore(),
         "aiter_restored": {},
         "rocm_perf": {},
+        "hip_online_tuning": _disabled_hip_tuning(),
     }
 
 
@@ -199,6 +213,43 @@ def test_collect_rocm_perf_empty_when_disabled() -> None:
     assert out["rocm_perf"] == {}
 
 
+def test_collect_hip_online_tuning_disabled_shape() -> None:
+    out = info.collect(
+        **_sample_args(),  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    assert out["hip_online_tuning"] == {
+        "enabled": False,
+        "storage": None,
+        "target": None,
+        "reason": REASON_DISABLED,
+    }
+
+
+def test_collect_hip_online_tuning_will_link_serializes_paths() -> None:
+    args = _sample_args()
+    args["hip_online_tuning"] = HipTuningPlan(
+        enabled=True,
+        storage=Path("/data/vllm-shim/hip_online_tuning_res.csv"),
+        target=Path("/sgl-workspace/hip_online_tuning_res.csv"),
+        reason=REASON_WILL_LINK,
+    )
+    out = info.collect(
+        **args,  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    # Paths get stringified so the JSON dump is consumable without
+    # any custom encoder. The serialized shape mirrors aiter_capture.
+    assert out["hip_online_tuning"] == {
+        "enabled": True,
+        "storage": str(Path("/data/vllm-shim/hip_online_tuning_res.csv")),
+        "target": str(Path("/sgl-workspace/hip_online_tuning_res.csv")),
+        "reason": REASON_WILL_LINK,
+    }
+
+
 def test_write_produces_pretty_json_with_trailing_newline(tmp_path: Path) -> None:
     target = tmp_path / "info.json"
     info.write({"a": 1, "b": [2, 3]}, path=target)
@@ -218,6 +269,12 @@ _DISABLED_RESTORE_DICT: dict[str, object] = {
     "source": None,
     "reason": REASON_NO_GPU,
     "overrides": {},
+}
+_DISABLED_HIP_TUNING_DICT: dict[str, object] = {
+    "enabled": False,
+    "storage": None,
+    "target": None,
+    "reason": REASON_DISABLED,
 }
 
 
@@ -410,6 +467,118 @@ def test_print_summary_says_nothing_to_restore_when_source_empty(
     )
     err = capsys.readouterr().err
     assert "aiter restore: enabled, nothing to restore from" in err
+
+
+def test_print_summary_omits_hip_online_tuning_when_disabled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The vast majority of pods will not have HIP_ONLINE_TUNING set;
+    # printing "disabled" for every one would be noise. Mirror how
+    # rocm_perf is handled - present in JSON, silent in stderr.
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
+            "hip_online_tuning": _DISABLED_HIP_TUNING_DICT,
+        }
+    )
+    assert "hip online tuning" not in capsys.readouterr().err
+
+
+def test_print_summary_shows_hip_online_tuning_when_will_link(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
+            "hip_online_tuning": {
+                "enabled": True,
+                "storage": "/data/vllm-shim/hip_online_tuning_res.csv",
+                "target": "/sgl-workspace/hip_online_tuning_res.csv",
+                "reason": REASON_WILL_LINK,
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    # The arrow direction (target -> storage) matches the symlink's
+    # logical direction so the operator can read it as "CWD path goes
+    # to PV path".
+    assert (
+        "hip online tuning: /sgl-workspace/hip_online_tuning_res.csv -> "
+        "/data/vllm-shim/hip_online_tuning_res.csv"
+    ) in err
+
+
+def test_print_summary_warns_when_hip_online_tuning_blocked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Operator opted in but a real file at the CWD path keeps the
+    # shim from anchoring. The stderr line must say so loudly enough
+    # that pod log scrapers will catch it.
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
+            "hip_online_tuning": {
+                "enabled": True,
+                "storage": "/data/vllm-shim/hip_online_tuning_res.csv",
+                "target": "/sgl-workspace/hip_online_tuning_res.csv",
+                "reason": REASON_BLOCKED,
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    assert f"hip online tuning: not anchored ({REASON_BLOCKED})" in err
+
+
+def test_print_summary_shows_hip_online_tuning_when_already_linked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Restart case: prior pod created the symlink; the line still
+    # prints so operators can confirm the PV mount lit up correctly.
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
+            "hip_online_tuning": {
+                "enabled": True,
+                "storage": "/data/vllm-shim/hip_online_tuning_res.csv",
+                "target": "/sgl-workspace/hip_online_tuning_res.csv",
+                "reason": REASON_ALREADY_LINKED,
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    assert "hip online tuning: /sgl-workspace/hip_online_tuning_res.csv" in err
 
 
 def test_main_prints_file_when_present(
