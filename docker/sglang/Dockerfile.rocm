@@ -5,8 +5,20 @@ FROM ${BASE_IMAGE}
 COPY --from=ghcr.io/astral-sh/uv:0.11.11 /uv /uvx /bin/
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends haproxy && \
+    apt-get install -y --no-install-recommends haproxy patch && \
     rm -rf /var/lib/apt/lists/*
+
+# Apply local patches to AITER before installing. The mapping-error
+# patch fixes a tuner hang when mp.Pool silently replaces a crashed
+# worker; see the patch's leading comment block and
+# docs/aiter.md "Upstream patches" for the rationale. --dry-run first
+# so an AITER bump that breaks the patch fails the image build loudly
+# instead of silently producing an unpatched image.
+COPY docker/sglang/patches/aiter-mp-tuner-mapping-error.patch /tmp/patches/aiter-mp-tuner-mapping-error.patch
+RUN cd /sgl-workspace/aiter && \
+    patch --dry-run -p1 < /tmp/patches/aiter-mp-tuner-mapping-error.patch && \
+    patch -p1 < /tmp/patches/aiter-mp-tuner-mapping-error.patch && \
+    rm -rf /tmp/patches
 
 # AMD's aiter kernels belong with SGLang in its existing 3.10 venv.
 RUN uv pip install --no-cache --python /opt/venv/bin/python /sgl-workspace/aiter

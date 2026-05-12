@@ -1,0 +1,59 @@
+vllm-shim local patch: fix mp_tuner.py mapping-error handler so the
+tuner doesn't hang forever when mp.Pool silently replaces a crashed
+worker.
+
+When a worker dies (typically from a hipBLASLt kernel that faults
+the GPU on a specific shape geometry), mp.Pool spawns a replacement
+with a new PID. AITER's gpu_map was built once at pool startup, so
+the new worker's PID isn't in it. The next task on that worker raises
+KeyError(pid). Upstream's mapping_error branch appends to a never-read
+dummy_failed_tasks list, doesn't record a dummy result, doesn't mark
+the task completed, and doesn't trigger a pool restart, so the task
+stays in remaining_tasks and re-raises KeyError on every polling
+iteration. The tuner hangs.
+
+This patch mirrors the accelerator_error branch immediately below:
+record a dummy result, mark the task completed, and force a pool
+restart so the existing restart path re-harvests PIDs and rebuilds
+gpu_map. We lose two benchmark results per crash event (the worker
+that died, and the task that hit the replacement worker) but the
+tuner finishes; AITER's tuned-config writer picks the best surviving
+kernel from the remaining ~1363 of 1365 candidates for the shape.
+
+Upstream PR https://github.com/ROCm/aiter/pull/2309 proposed the same
+fix in March 2026 and was closed without merging. PR #2662 (merged
+April 9, 2026) fixed the parallel accelerator_error path but left
+this branch stubbed out. Until upstream lands an equivalent fix, the
+shim's Docker images carry this patch.
+
+--- a/aiter/utility/mp_tuner.py
++++ b/aiter/utility/mp_tuner.py
+@@ -472,10 +472,24 @@
+                 error_type = type(e).__name__
+                 is_mapping_error = _is_mapping_error(e)
+                 is_accelerator_error = _is_accelerator_error(e)
+-                # not restart as this is not root use
+-                if is_mapping_error:
+-                    error_msg = f"[Mapping Error] Task {k} - Process PID not in GPU map: {error_type} - {e}"
+-                    dummy_failed_tasks.append((k, "mapping error"))
++                # vllm-shim patch: treat mapping_error like accelerator_error.
++                # mp.Pool silently spawned a replacement worker after a crash,
++                # so GPUIDMap doesn't know the new PID. Without this fix the
++                # task stays in remaining_tasks forever, re-raising KeyError
++                # on every loop iteration. Upstream PR #2309 proposed the
++                # same fix in March 2026 and was closed without merging.
++                if is_mapping_error:
++                    error_msg = f"[Mapping Error] Task {k} - Process PID not in GPU map: {error_type} - {e}"
++                    print(error_msg, flush=True)
++                    failed_tasks.append((k, "mapping error"))
++                    dummy_results = []
++                    add_dummy_result(k, dummy_results)
++                    result_dict[k] = (
++                        dummy_results if shape_grouped else [dummy_results[0]]
++                    )
++                    completed_this_round.append((k, async_result))
++                    pool_restart_needed = True
++                    break
+                 elif is_accelerator_error:
+                     # GPU fault (e.g. illegal memory access): worker returns exception instead of
+                     # hanging. Unlike hang->timeout, the faulting worker may stay alive and accept

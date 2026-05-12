@@ -316,6 +316,20 @@ When AITER adds a new tuned-config target, three places must move in lockstep: t
 
 The split into many small modules is deliberate: each piece is pure (or has a single well-defined side effect) and testable in isolation. The orchestration in `capture.py` and `restore.py` is the only place that knows about the cross-cutting decision.
 
+## Upstream patches
+
+The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives at `docker/sglang/patches/aiter-mp-tuner-mapping-error.patch` and is applied with `patch -p1`. The Dockerfile runs `patch --dry-run` first, so an AITER version bump that breaks the patch fails the image build loudly rather than silently producing an unpatched image.
+
+### `aiter-mp-tuner-mapping-error.patch`
+
+**What it changes.** Rewrites the `mapping_error` branch in `aiter/utility/mp_tuner.py:476-478` to mirror the adjacent `accelerator_error` branch: record a dummy result, mark the task completed, append to `completed_this_round`, and set `pool_restart_needed = True`. Without the patch, the branch appends to a never-read `dummy_failed_tasks` list and never marks the task done, so the failing task sits in `remaining_tasks` and re-raises `KeyError` on every polling iteration until the tuner is killed.
+
+**Why we need it.** AITER's tuner uses an `mp.Pool` whose `gpu_map = {worker_pid: gpu_idx}` is built once at pool startup. When a worker dies (typically from a hipBLASLt kernel that faults the GPU on a specific shape geometry; the offending kernel solution depends on the shape and crashes are deterministic), `mp.Pool` silently spawns a replacement with a new PID. The next task on that worker raises `KeyError(pid)`. Upstream's broken branch turns the crash into an indefinite hang. The patch turns it into "lose two benchmark results per crash event (the worker that died, plus the task that hit the replacement worker) and continue"; the tuner's final config is the best surviving kernel from the remaining ~1363 of 1365 candidates per shape, which is close to optimal in practice.
+
+**Upstream status.** Upstream PR [#2309](https://github.com/ROCm/aiter/pull/2309) proposed the same fix in March 2026 and was closed without merging; reviewer @yzhou103's stated concern was that the mapping error is "caused by other problem" they'd rather diagnose than mask. The adjacent PR [#2662](https://github.com/ROCm/aiter/pull/2662) (merged April 2026) fixed the accelerator-error branch robustly but left this one stubbed out. The patch is therefore a known-temporary local fix. When upstream lands an equivalent, drop the patch file and the `RUN cd /sgl-workspace/aiter && patch` block in `Dockerfile.rocm`.
+
+**What this doesn't fix.** Worker crashes themselves still happen. The root cause is almost certainly that AITER's kernel enumeration (`hipblaslt_get_algos_by_size_and_type`) returns a superset of valid algorithms for a given shape, including ones that fault. Fixing that would require either an AITER source change to use hipBLASLt's per-matmul heuristics API, or a hipBLASLt fix to its enumeration. The shim does not attempt either.
+
 ## What this is not
 
 - **Not online.** The `vllm-shim-tune` step runs offline (or on-demand from a pod shell) and writes results into `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`. It is not invoked from the serve-time entrypoint; the running backend only picks up tuned configs at the next launch via the restore step.
