@@ -3,7 +3,7 @@
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from vllm_shim.aiter.capture import build_callback, plan_capture, resolve_shim_home
@@ -70,7 +70,8 @@ def _maybe_run_startup_tune(
     gpu: GpuAgent | None,
     budget_seconds: int,
     hot: int | None = None,
-    run: Callable[[list[str], int], int] | None = None,
+    env: Mapping[str, str] | None = None,
+    run: Callable[[list[str], int, Mapping[str, str] | None], int] | None = None,
 ) -> None:
     """Best-effort vllm-shim-tune subprocess before the backend launches.
 
@@ -93,6 +94,16 @@ def _maybe_run_startup_tune(
     budget is still a hard ceiling; ``--hot N`` reduces the input set
     so the budget is far less likely to truncate mid-shape, which is
     the common reason a startup tune ships an under-covered config.
+
+    ``env`` is the dict the supervisor will later hand to the backend
+    (i.e. ``backend_env`` from main()). Forwarding it to the tune
+    subprocess matters: rocm_perf_defaults injects ``AITER_JIT_DIR``
+    into backend_env, and AITER's JIT loader only uses the patched
+    source path when that var is set (``get_module_custom_op`` in
+    ``aiter/jit/core.py``). Without it, the tuner inherits a plain
+    ``os.environ``, the bare import falls back to ``aiter.jit.<md>``,
+    and the loader picks up the base-image-shipped .so from
+    site-packages instead of the patched build.
     """
     if budget_seconds <= 0 or gpu is None or shim_home is None:
         return
@@ -111,7 +122,7 @@ def _maybe_run_startup_tune(
     )
     runner = run if run is not None else _default_tune_runner
     try:
-        rc = runner(cmd, budget_seconds)
+        rc = runner(cmd, budget_seconds, env)
         sys.stderr.write(f"vllm-shim startup tune: exit {rc}\n")
     except subprocess.TimeoutExpired:
         sys.stderr.write(
@@ -127,8 +138,15 @@ def _maybe_run_startup_tune(
         )
 
 
-def _default_tune_runner(cmd: list[str], timeout: int) -> int:
-    return subprocess.run(cmd, timeout=timeout, check=False).returncode
+def _default_tune_runner(
+    cmd: list[str], timeout: int, env: Mapping[str, str] | None
+) -> int:
+    # env=None preserves subprocess.run's default (inherit os.environ).
+    # A populated env is the merged backend_env (parent + translations
+    # + rocm_perf_defaults), which is what AITER's JIT loader expects.
+    return subprocess.run(
+        cmd, timeout=timeout, check=False, env=dict(env) if env is not None else None
+    ).returncode
 
 
 def _pin_served_model_name(
@@ -252,6 +270,7 @@ def main() -> int:
             os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_SECONDS")
         ),
         hot=_parse_tune_hot(os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_HOT")),
+        env=backend_env,
     )
 
     # Snapshot every translation/resolution decision to disk + stderr so

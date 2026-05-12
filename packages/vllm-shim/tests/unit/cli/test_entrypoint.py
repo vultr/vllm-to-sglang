@@ -1,6 +1,7 @@
 """Tests for entrypoint helpers (orchestration is exercised in integration)."""
 
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -117,7 +118,7 @@ def test_parse_tune_hot_positive_int_is_returned_verbatim() -> None:
 def test_tune_skipped_when_budget_zero() -> None:
     calls: list[list[str]] = []
 
-    def runner(cmd: list[str], _timeout: int) -> int:
+    def runner(cmd: list[str], _timeout: int, _env: Mapping[str, str] | None) -> int:
         calls.append(cmd)
         return 0
 
@@ -135,7 +136,7 @@ def test_tune_skipped_when_no_gpu() -> None:
     # a ROCm GPU there's nothing to tune.
     calls: list[list[str]] = []
 
-    def runner(cmd: list[str], _timeout: int) -> int:
+    def runner(cmd: list[str], _timeout: int, _env: Mapping[str, str] | None) -> int:
         calls.append(cmd)
         return 0
 
@@ -151,7 +152,7 @@ def test_tune_skipped_when_no_gpu() -> None:
 def test_tune_skipped_when_no_shim_home() -> None:
     calls: list[list[str]] = []
 
-    def runner(cmd: list[str], _timeout: int) -> int:
+    def runner(cmd: list[str], _timeout: int, _env: Mapping[str, str] | None) -> int:
         calls.append(cmd)
         return 0
 
@@ -167,7 +168,7 @@ def test_tune_skipped_when_no_shim_home() -> None:
 def test_tune_invokes_runner_with_bucket_and_budget() -> None:
     received: list[tuple[list[str], int]] = []
 
-    def runner(cmd: list[str], timeout: int) -> int:
+    def runner(cmd: list[str], timeout: int, _env: Mapping[str, str] | None) -> int:
         received.append((cmd, timeout))
         return 0
 
@@ -195,7 +196,7 @@ def test_tune_passes_hot_flag_when_set(
 ) -> None:
     received: list[list[str]] = []
 
-    def runner(cmd: list[str], _timeout: int) -> int:
+    def runner(cmd: list[str], _timeout: int, _env: Mapping[str, str] | None) -> int:
         received.append(cmd)
         return 0
 
@@ -216,10 +217,39 @@ def test_tune_passes_hot_flag_when_set(
     assert "--hot 100" in err
 
 
+def test_tune_forwards_env_to_runner() -> None:
+    # backend_env carries AITER_JIT_DIR (from rocm_perf_defaults) and
+    # any AITER_CONFIG_* overrides from the restore step. Without
+    # forwarding, AITER's JIT loader falls back to its package-relative
+    # site-packages .so (the unset-AITER_JIT_DIR branch in
+    # aiter/jit/core.py:get_module_custom_op) and the patched kernel
+    # source is never compiled. The base image's pre-built .so wins
+    # and shim-local AITER patches are silently masked.
+    received: list[Mapping[str, str] | None] = []
+
+    def runner(_cmd: list[str], _timeout: int, env: Mapping[str, str] | None) -> int:
+        received.append(env)
+        return 0
+
+    backend_env = {
+        "AITER_JIT_DIR": "/data/vllm-shim/aiter/jit-abc123",
+        "AITER_CONFIG_BF16_TUNED_GEMM": "/data/vllm-shim/aiter/configs/x.csv",
+        "PATH": "/opt/shim/bin:/opt/venv/bin",
+    }
+    _maybe_run_startup_tune(
+        shim_home=Path("/data/vllm-shim"),
+        gpu=_MI300X,
+        budget_seconds=900,
+        env=backend_env,
+        run=runner,
+    )
+    assert received == [backend_env]
+
+
 def test_tune_swallows_timeout(capsys: pytest.CaptureFixture[str]) -> None:
     # Hard cap exists precisely to keep one bad tune from crashlooping
     # the pod via k8s progressDeadline. The exception must NOT propagate.
-    def runner(_cmd: list[str], _timeout: int) -> int:
+    def runner(_cmd: list[str], _timeout: int, _env: Mapping[str, str] | None) -> int:
         raise subprocess.TimeoutExpired(cmd="vllm-shim-tune", timeout=10)
 
     _maybe_run_startup_tune(
@@ -235,7 +265,7 @@ def test_tune_swallows_timeout(capsys: pytest.CaptureFixture[str]) -> None:
 def test_tune_swallows_other_failures(capsys: pytest.CaptureFixture[str]) -> None:
     # File-not-found (vllm-shim-tune not on PATH), permission errors,
     # AITER blowups - all best-effort. Backend still launches.
-    def runner(_cmd: list[str], _timeout: int) -> int:
+    def runner(_cmd: list[str], _timeout: int, _env: Mapping[str, str] | None) -> int:
         raise FileNotFoundError("vllm-shim-tune not found")
 
     _maybe_run_startup_tune(
