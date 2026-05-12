@@ -44,9 +44,43 @@ _HEADER: tuple[str, ...] = (
 _ShapeKey = tuple[int, int, int, bool, str, str, bool, bool]
 
 
+def padded_m_gl0(m: int) -> int:
+    """Bucket ``m`` onto AITER's fine-grained tuning grid.
+
+    Ports ``getPaddedM(M, N, K, gl=0)`` from
+    ``repos/aiter/csrc/py_itfs_cu/gemm_common.cu``. AITER's runtime
+    pads M into a discrete bucket before its tuned-config lookup:
+
+      M <= 256:    round up to nearest multiple of 16
+      M <= 1024:   round up to nearest multiple of 32
+      M <= 4096:   round up to nearest multiple of 64
+      M >  4096:   round up to nearest multiple of 128
+
+    Continuous batching produces a different raw M on essentially
+    every step; capturing the raw values would bloat the shape CSVs
+    without giving the tuner anything new to do, because AITER's
+    runtime won't query the tuned config at an off-grid M. Bucketing
+    at capture time collapses thousands of raw values into ~180
+    grid values per (N, K) pair.
+
+    Keep in lockstep with AITER's C source: if AMD changes the
+    padding regime in a future ROCm release, the comment + the
+    constants below need to follow.
+    """
+    if m <= 0:
+        return m
+    if m <= 256:
+        return (m + 15) // 16 * 16
+    if m <= 1024:
+        return (m + 31) // 32 * 32
+    if m <= 4096:
+        return (m + 63) // 64 * 64
+    return (m + 127) // 128 * 128
+
+
 def _key(shape: AiterShape) -> _ShapeKey:
     return (
-        shape.m,
+        padded_m_gl0(shape.m),
         shape.n,
         shape.k,
         shape.bias,
@@ -59,7 +93,7 @@ def _key(shape: AiterShape) -> _ShapeKey:
 
 def _row(shape: AiterShape) -> list[str]:
     return [
-        str(shape.m),
+        str(padded_m_gl0(shape.m)),
         str(shape.n),
         str(shape.k),
         str(shape.bias),
@@ -71,8 +105,14 @@ def _row(shape: AiterShape) -> list[str]:
 
 
 def _row_to_key(row: dict[str, str]) -> _ShapeKey:
+    # ``padded_m_gl0`` here makes the in-memory dedup set consistent
+    # with the bucketing rule even when the on-disk CSV still carries
+    # raw M values from a pre-bucketing capture run. New writes go
+    # through ``_key``/``_row`` which also pad, so disk converges to
+    # canonical as new shapes accumulate; the formal cleanup of any
+    # remaining raw M rows happens in ``tune.canonicalize_shape_files``.
     return (
-        int(row["M"]),
+        padded_m_gl0(int(row["M"])),
         int(row["N"]),
         int(row["K"]),
         row["bias"] == "True",

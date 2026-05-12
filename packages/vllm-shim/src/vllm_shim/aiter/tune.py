@@ -40,6 +40,7 @@ from pathlib import Path
 
 from vllm_shim.aiter.capture import resolve_shim_home
 from vllm_shim.aiter.log_parser import strip_dtype_quotes
+from vllm_shim.aiter.shape_store import padded_m_gl0
 from vllm_shim.cli.rocm_probe import bucket as bucket_for_gpu
 from vllm_shim.cli.rocm_probe import probe as probe_rocm
 
@@ -48,6 +49,11 @@ from vllm_shim.cli.rocm_probe import probe as probe_rocm
 # shapes for AITER's tuner we canonicalize these so the tuner doesn't
 # choke on the quoted form.
 _QUOTED_DTYPE_COLUMNS: frozenset[str] = frozenset({"dtype", "outdtype"})
+
+# Column containing AITER's M (batch * seq) dimension. Pre-bucketing
+# capture writes raw values that have to be rounded up to AITER's
+# tuning grid before the tuner can do anything useful with them.
+_M_COLUMN: str = "M"
 
 # Default to the layout baked into the SGLang-ROCm shim image. ``/opt/venv``
 # is the Python 3.10 env that ships AITER's tuner; ``/sgl-workspace/aiter``
@@ -169,16 +175,22 @@ def discover_shape_files(shim_home: Path, bucket: str, target: str) -> list[Path
 
 
 def canonicalize_shape_files(files: list[Path]) -> int:
-    """Rewrite shape CSVs in place to strip stale ``dtype`` repr quotes.
+    """Rewrite shape CSVs in place to the canonical persisted form.
 
-    Pre-fix capture data on operator volumes carries literal Python
-    repr quotes around ``dtype`` / ``outdtype`` values (e.g.
-    ``'torch.bfloat16'``) because AITER's log line format wraps string
-    values in repr quotes. The tuner can't read that form and dies.
+    Two transformations, both idempotent on already-clean files:
 
-    This pass is idempotent: files that already have canonical
-    (unquoted) values are not touched. Returns the count of files
-    that were rewritten so the caller can surface it for operators.
+    1. **Strip ``dtype`` / ``outdtype`` repr quotes.** Pre-fix capture
+       stored ``'torch.bfloat16'`` (with literal quotes) because AITER's
+       log line format wraps string values in repr quotes. The tuner
+       can't read that form and dies.
+    2. **Pad raw M values onto AITER's tuning grid.** Pre-bucketing
+       capture stored the raw M from the log line; AITER's runtime
+       lookup pads M into discrete buckets before checking the tuned
+       config, so off-grid raw values are dead weight for the tuner.
+
+    After either transformation, rows that collapse to identical
+    tuples are deduplicated so the file shrinks toward its canonical
+    minimum. Returns the count of files actually rewritten.
 
     Writes go through a sibling ``.tmp`` file plus an atomic
     ``Path.replace`` so a crash mid-rewrite never leaves a half-
@@ -194,11 +206,11 @@ def canonicalize_shape_files(files: list[Path]) -> int:
 
 
 def _canonicalize_one(path: Path) -> bool:
-    """Rewrite ``path`` if any dtype/outdtype cell carries repr quotes.
+    """Rewrite ``path`` if any row needs unquoting, M padding, or dedup.
 
-    Returns True when the file was rewritten, False when it was
-    already canonical (or empty / malformed in a way that doesn't
-    contain the offending columns).
+    Returns True when the file was rewritten, False when every row is
+    already canonical (or the file is empty / malformed in a way that
+    doesn't include the offending columns).
     """
     with path.open(newline="") as f:
         reader = csv.reader(f)
@@ -209,10 +221,15 @@ def _canonicalize_one(path: Path) -> bool:
         quote_cols = [
             i for i, name in enumerate(header) if name in _QUOTED_DTYPE_COLUMNS
         ]
-        if not quote_cols:
+        try:
+            m_col: int | None = header.index(_M_COLUMN)
+        except ValueError:
+            m_col = None
+        if not quote_cols and m_col is None:
             return False
         rows = list(reader)
     cleaned: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
     changed = False
     for row in rows:
         new_row = list(row)
@@ -222,6 +239,24 @@ def _canonicalize_one(path: Path) -> bool:
                 if stripped != new_row[i]:
                     new_row[i] = stripped
                     changed = True
+        if m_col is not None and m_col < len(new_row):
+            try:
+                m_raw = int(new_row[m_col])
+            except ValueError:
+                m_raw = None
+            if m_raw is not None:
+                padded = padded_m_gl0(m_raw)
+                if padded != m_raw:
+                    new_row[m_col] = str(padded)
+                    changed = True
+        key = tuple(new_row)
+        if key in seen:
+            # Two raw rows collapsed onto the same padded bucket
+            # (or were already identical). Drop the duplicate;
+            # the rewrite below shrinks the file accordingly.
+            changed = True
+            continue
+        seen.add(key)
         cleaned.append(new_row)
     if not changed:
         return False

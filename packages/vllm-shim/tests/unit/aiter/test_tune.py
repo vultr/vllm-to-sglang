@@ -127,15 +127,36 @@ def test_canonicalize_skips_already_clean_files(tmp_path: Path) -> None:
     assert f.stat().st_mtime_ns == mtime_before
 
 
-def test_canonicalize_does_not_dedup(tmp_path: Path) -> None:
-    # The pass only fixes per-cell formatting; row-level dedup is the
-    # merge step's job. Keeping the responsibilities separate means
-    # the on-disk file shape is preserved (operator inspecting the
-    # source CSV sees what was captured, minus the quoting bug).
+def test_canonicalize_collapses_duplicate_rows(tmp_path: Path) -> None:
+    # Once padding is applied, the canonical row tuple is the only
+    # thing that matters for tune fidelity; identical rows are pure
+    # waste. Canonicalize collapses them so the on-disk file shrinks
+    # toward its minimal representation.
     f = _write(tmp_path / "dup.csv", _ROW_A, _ROW_A)
     canonicalize_shape_files([f])
     lines = f.read_text().splitlines()
-    assert len(lines) == 3  # header + 2 data rows
+    assert len(lines) == 2  # header + 1 data row
+
+
+def test_canonicalize_pads_raw_m_and_dedups(tmp_path: Path) -> None:
+    # Raw M values from pre-bucketing capture (e.g. m=257) round up
+    # to AITER's tuning-grid bucket (272 in this case). Two raw rows
+    # captured at different real M values may collapse onto the same
+    # bucket; canonicalize dedups so the resulting file has one row
+    # per (padded_m, ...) tuple.
+    raw_257 = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+    raw_258 = "258,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+    f = _write(tmp_path / "raw.csv", raw_257, raw_258)
+    rewritten = canonicalize_shape_files([f])
+    assert rewritten == 1
+    lines = f.read_text().splitlines()
+    # Both raw values pad to 272 (M<=1024 -> multiple of 32, 257 -> 288, 258 -> 288).
+    # Wait: 257 rounds to nearest 32 mult: (257+31)//32*32 = 288.
+    # Verify the actual bucket and confirm dedup.
+    assert lines[0] == _HEADER
+    assert len(lines) == 2  # header + one canonical row
+    # The M column should now be 288 (raw 257/258 both pad to 288).
+    assert lines[1].startswith("288,")
 
 
 def test_canonicalize_uses_atomic_write(tmp_path: Path) -> None:

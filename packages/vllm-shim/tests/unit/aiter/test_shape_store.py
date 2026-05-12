@@ -3,8 +3,9 @@
 import csv
 from pathlib import Path
 
+import pytest
 from vllm_shim.aiter.log_parser import AiterShape
-from vllm_shim.aiter.shape_store import ShapeStore
+from vllm_shim.aiter.shape_store import ShapeStore, padded_m_gl0
 
 
 def _shape(**overrides: object) -> AiterShape:
@@ -120,6 +121,84 @@ def test_header_written_only_once(tmp_path: Path) -> None:
     with (tmp_path / "bf16_tuned_gemm.csv").open() as f:
         header_count = sum(1 for line in f if line.startswith("M,"))
     assert header_count == 1
+
+
+# ---------- padded_m_gl0 ----------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # M <= 256: ceil to multiple of 16
+        (1, 16),
+        (15, 16),
+        (16, 16),       # already on grid
+        (17, 32),
+        (256, 256),     # boundary, stays on grid
+        # 256 < M <= 1024: ceil to multiple of 32
+        (257, 288),
+        (1024, 1024),
+        # 1024 < M <= 4096: ceil to multiple of 64
+        (1025, 1088),
+        (4096, 4096),
+        # M > 4096: ceil to multiple of 128
+        (4097, 4224),
+        (16384, 16384),
+        (16385, 16512),
+    ],
+)
+def test_padded_m_gl0_grids(raw: int, expected: int) -> None:
+    # Mirrors AITER's getPaddedM(M, N, K, gl=0) from
+    # repos/aiter/csrc/py_itfs_cu/gemm_common.cu. Boundary values
+    # (16, 256, 1024, 4096) must stay on the grid; off-grid values
+    # round UP to the next bucket.
+    assert padded_m_gl0(raw) == expected
+
+
+def test_padded_m_gl0_handles_nonpositive() -> None:
+    # AITER never logs M<=0 in practice, but the helper must not
+    # blow up if a corrupt CSV row feeds in a stray value: the
+    # canonicalize pass calls this on every existing row.
+    assert padded_m_gl0(0) == 0
+    assert padded_m_gl0(-5) == -5
+
+
+def test_add_collapses_raw_m_onto_grid_bucket(tmp_path: Path) -> None:
+    # Two captures of the same shape with different raw M values
+    # that fall onto the same AITER lookup bucket should land as
+    # one row. Without bucketing, continuous batching would write
+    # thousands of essentially equivalent rows.
+    store = ShapeStore(tmp_path)
+    assert store.add(_shape(m=257)) is True
+    # 258 also pads to 288. Dedup hits.
+    assert store.add(_shape(m=258)) is False
+    rows = _read_rows(tmp_path / "bf16_tuned_gemm.csv")
+    assert len(rows) == 1
+    # CSV stores the padded form, not the raw value.
+    assert rows[0]["M"] == "288"
+
+
+def test_add_writes_padded_m_when_raw_is_off_grid(tmp_path: Path) -> None:
+    # Even a single off-grid raw value is persisted as its bucket
+    # value so future dedup against this row uses the canonical key.
+    store = ShapeStore(tmp_path)
+    store.add(_shape(m=4097))
+    rows = _read_rows(tmp_path / "bf16_tuned_gemm.csv")
+    assert rows[0]["M"] == "4224"  # 4097 rounds up to next 128 = 4224
+
+
+def test_dedup_against_pre_bucketing_raw_row(tmp_path: Path) -> None:
+    # Existing CSV has a raw M=257 row from before bucketing was
+    # added. A new capture of M=258 must dedup against it (both pad
+    # to 288). Without this, we'd accumulate two rows for what AITER
+    # sees as a single bucket.
+    path = tmp_path / "bf16_tuned_gemm.csv"
+    path.write_text(
+        "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle\n"
+        "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False\n"
+    )
+    store = ShapeStore(tmp_path)
+    assert store.add(_shape(m=258)) is False
 
 
 def test_corrupt_existing_row_does_not_block_writes(tmp_path: Path) -> None:
