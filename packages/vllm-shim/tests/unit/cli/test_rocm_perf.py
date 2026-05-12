@@ -33,6 +33,16 @@ def test_generic_defaults_apply_to_any_rocm_gpu(tmp_path: Path) -> None:
     assert "TORCH_NCCL_HIGH_PRIORITY" not in out
 
 
+def test_jit_cache_paths_anchor_under_shim_home(tmp_path: Path) -> None:
+    # Triton + TorchInductor + SGLang caches all share the PV so JIT
+    # artifacts survive pod restarts. Without this, first request on
+    # every restart re-pays the compile cost.
+    out = rocm_perf_defaults(_MI300X, tmp_path)
+    assert out["TRITON_CACHE_DIR"] == str(tmp_path / "triton")
+    assert out["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "torchinductor")
+    assert out["SGLANG_CACHE_DIR"] == str(tmp_path / "sglang")
+
+
 def test_miopen_paths_route_under_shim_home(tmp_path: Path) -> None:
     # Both vars point at the same dir so MIOpen finds its db where it
     # caches its custom kernels. Routing under shim_home means the
@@ -64,14 +74,19 @@ def test_keys_are_a_known_set(tmp_path: Path) -> None:
         "MIOPEN_USER_DB_PATH",
         "MIOPEN_CUSTOM_CACHE_DIR",
         "TORCH_BLAS_PREFER_HIPBLASLT",
+        "TRITON_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
+        "SGLANG_CACHE_DIR",
         "GPU_MAX_HW_QUEUES",
         "TORCH_NCCL_HIGH_PRIORITY",
     }
 
 
 def test_pure_function_no_filesystem_writes(tmp_path: Path) -> None:
-    # The MIOpen cache dir does not need to exist at the time we set
-    # the env var; MIOpen creates it on first write. Asserting we
-    # don't pre-create catches accidental mkdir creep.
+    # Cache dirs (miopen/triton/torchinductor/sglang) do not need to
+    # exist at the time we set the env vars; the consumers create
+    # them on first write. Asserting we don't pre-create catches
+    # accidental mkdir creep.
     rocm_perf_defaults(_MI300X, tmp_path)
-    assert not (tmp_path / "miopen").exists()
+    for name in ("miopen", "triton", "torchinductor", "sglang"):
+        assert not (tmp_path / name).exists()

@@ -15,6 +15,19 @@ Applied whenever `rocm_probe` returns a GPU and `resolve_shim_home` resolves a p
 | `MIOPEN_USER_DB_PATH` | `$VLLM_SHIM_HOME/miopen` | MIOpen kernel-finder DB. Without persistence, MIOpen re-runs its find phase on every pod restart and the first batch eats the latency cost. SGLang's own CI scripts set the same two vars. |
 | `MIOPEN_CUSTOM_CACHE_DIR` | `$VLLM_SHIM_HOME/miopen` | Companion to the above. Same path. |
 | `TORCH_BLAS_PREFER_HIPBLASLT` | `1` | PyTorch BLAS dispatch picks hipBLASLt over rocBLAS. PyTorch falls back to rocBLAS automatically when hipBLASLt has no kernel for a shape, so worst case is a no-op. |
+| `TRITON_CACHE_DIR` | `$VLLM_SHIM_HOME/triton` | Triton's compiled-kernel cache. Triton compiles on first invocation; without this, every pod restart re-pays the compile cost on the first request. AITER's Triton kernels go through this path too. |
+| `TORCHINDUCTOR_CACHE_DIR` | `$VLLM_SHIM_HOME/torchinductor` | TorchInductor's compile-artifact cache. Same persistence story. Applies whenever PyTorch's Inductor path is taken (model-dependent; some SGLang code paths use it without `--enable-torch-compile`). |
+| `SGLANG_CACHE_DIR` | `$VLLM_SHIM_HOME/sglang` | SGLang's own cache root, default `~/.cache/sglang`. With `--enable-torch-compile`, SGLang's compilation manager derives its `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` overrides from this var, so the JIT caches stay on the PV either way. |
+
+## A note on JIT cache stickiness
+
+The three JIT-cache vars above are content-addressable inside their respective tools. Cache hits depend on bit-exact matches of:
+
+- GPU SKU (gfx target + CU count). Already partitioned via the shim's bucket key elsewhere, but Triton/Inductor hash the architecture themselves.
+- PyTorch + Triton + AITER + ROCm versions. **Image upgrades invalidate the cache.** That's correct behavior, not a bug.
+- Source bytes of the Triton kernel / FX graph.
+
+So persistence helps with: pod restarts, autoscaling churn, node failures, redeploys of the same image. It does NOT help across image upgrades. The first request after an image bump will rebuild every kernel; subsequent restarts on the new image are fast again.
 
 ## MI300-class additions
 
@@ -35,6 +48,8 @@ Operators can set these by hand if their workload benefits; the shim doesn't shi
 - `MIOPEN_FIND_ENFORCE`, `MIOPEN_FIND_MODE`, `PYTORCH_MIOPEN_SUGGEST_NHWC` -- conv-heavy workload knobs that don't move the needle for transformer LLM serving.
 - `VLLM_USE_TRITON_FLASH_ATTN=0` -- vLLM-side env name; SGLang selects its attention implementation through its own flags. No equivalent passthrough.
 - `RCCL_MSCCL_ENABLE`, `NCCL_IB_*` -- topology- and fabric-specific. Operators with multi-node deployments will know their own values.
+- `FLYDSL_RUNTIME_CACHE_DIR` -- AITER manages this itself. On import, AITER's `__init__.py` points the env var at its install-bundled AOT FlyDSL cache if present; the bundled cache holds pre-built kernels for the shapes AITER's CI tunes ahead of time. Setting our own path would *disable* the bundled AOT cache and force runtime re-JIT.
+- `AMD_COMGR_CACHE` -- HIPRTC compilation cache; default `=1`. Setting `=0` would disable.
 
 ## Operator surface
 

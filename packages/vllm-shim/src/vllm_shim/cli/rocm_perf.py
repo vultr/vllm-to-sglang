@@ -4,14 +4,23 @@ The SGLang-ROCm base image (`lmsysorg/sglang-rocm:...`) already pins the
 high-impact MI300X knobs via its own `ENV` block (HIP_FORCE_DEV_KERNARG,
 HSA_NO_SCRATCH_RECLAIM, SGLANG_USE_AITER, NCCL_MIN_NCHANNELS=112, the
 two TORCHINDUCTOR_MAX_AUTOTUNE flags, ...). The shim's contribution is
-two narrower categories the base image doesn't cover:
+three narrower categories the base image doesn't cover:
 
 1. **Persistence vars** that complement the AITER restore path: route
-   MIOpen's kernel-finder DB under ``$VLLM_SHIM_HOME`` so kernel
-   selection survives pod restarts on the same PV that holds tuned
-   AITER configs. Same survival semantics, same volume.
+   MIOpen's kernel-finder DB, Triton's compiled-kernel cache,
+   TorchInductor's compile-artifact cache, and SGLang's torch.compile
+   cache under ``$VLLM_SHIM_HOME`` so JIT artifacts survive pod
+   restarts on the same PV that holds tuned AITER configs. Same
+   survival semantics, same volume. Without this, every pod restart
+   pays the full Triton/Inductor compile cost on first request even
+   though the resulting binaries are byte-for-byte identical to the
+   previous pod's.
 
-2. **Recent AMD-recommended always-on vars** that landed in the MI300X
+2. **PyTorch BLAS dispatch.** ``TORCH_BLAS_PREFER_HIPBLASLT=1`` so
+   matmuls land on hipBLASLt by default; PyTorch falls back to
+   rocBLAS automatically for shapes hipBLASLt can't serve.
+
+3. **Recent AMD-recommended always-on vars** that landed in the MI300X
    workload optimization guide after the base image was cut
    (``GPU_MAX_HW_QUEUES=2``, ``TORCH_NCCL_HIGH_PRIORITY=1``). Both are
    gated on ``gfx942`` because the values are MI300-class specific;
@@ -34,6 +43,13 @@ hand if their workload benefits):
 - ``VLLM_USE_TRITON_FLASH_ATTN=0`` -- vLLM-side env name; SGLang
   selects its attention impl through its own flags, no equivalent
   passthrough.
+- ``FLYDSL_RUNTIME_CACHE_DIR`` -- AITER already manages this itself
+  in ``aiter/__init__.py``, pointing at its install-bundled AOT
+  FlyDSL cache when present. Overriding would *disable* the AOT
+  cache and force runtime re-JIT, which is the opposite of what we
+  want.
+- ``AMD_COMGR_CACHE`` -- HIPRTC compilation cache; default enables
+  it. Setting ``=0`` would disable.
 
 References:
 - AMD MI300X workload optimization guide (latest):
@@ -79,6 +95,20 @@ def rocm_perf_defaults(
         # PyTorch falls back to rocBLAS automatically when hipBLASLt
         # has no kernel for a shape, so worst case is a no-op.
         "TORCH_BLAS_PREFER_HIPBLASLT": "1",
+        # JIT compilation caches: route Triton and TorchInductor onto
+        # the PV so pod restarts don't re-pay the compile cost on the
+        # first request. AITER's Triton kernels go through this path
+        # too. Without ``--enable-torch-compile`` these settings stick
+        # verbatim; with torch.compile enabled, SGLang's compilation
+        # manager overrides them with paths derived from
+        # ``SGLANG_CACHE_DIR`` (also set below), which is on the same
+        # PV, so either way we land on the persistent volume.
+        "TRITON_CACHE_DIR": str(shim_home / "triton"),
+        "TORCHINDUCTOR_CACHE_DIR": str(shim_home / "torchinductor"),
+        # SGLang's own cache root. Defaults to ``~/.cache/sglang``;
+        # we anchor it on the PV so SGLang's torch.compile artifacts
+        # and any future SGLang-owned cache content lands there too.
+        "SGLANG_CACHE_DIR": str(shim_home / "sglang"),
     }
 
     # MI300-class (gfx942) specific. The values here are tied to the
