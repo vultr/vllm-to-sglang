@@ -4,14 +4,24 @@ AITER (the AMD kernel library SGLang uses on ROCm) emits a line for
 every GEMM shape it can't find a tuned config for. The canonical form
 comes from ``repos/aiter/aiter/tuned_gemm.py``::
 
-    shape is M:1024, N:7168, K:512 dtype=torch.bfloat16 \
-otype=torch.bfloat16 bias=False, scaleAB=False, bpreshuffle=False, \
+    shape is M:1024, N:7168, K:512 dtype='torch.bfloat16' \
+otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, \
 not found tuned config in <path-to>/bf16_tuned_gemm.csv, will use \
 default config!
 
 The optional ``[aiter]`` prefix depends on whichever logging formatter
 sits in front of AITER's ``logging.getLogger("aiter")``; we match the
 inner anchor so the parser works regardless.
+
+Quoting gotcha: AITER builds this line via Python's ``f"{dtype=}"``
+syntax, which is ``f"dtype={dtype!r}"`` under the hood. When ``dtype``
+is a string (as it is in current AITER), repr wraps it in quotes
+(``dtype='torch.bfloat16'``). Older AITER versions passed a real
+``torch.dtype`` and produced unquoted output. The parser strips
+leading/trailing ASCII quotes from dtype/outdtype so both forms map
+to the same canonical CSV value. Persisting the literal quoted form
+poisoned the tuner downstream, which interpreted ``'torch.bfloat16'``
+as a device string.
 
 Field naming gotcha: AITER's log line uses ``otype=`` but its CSV
 schema (and the tuner) uses ``outdtype`` for the same value. We follow
@@ -51,6 +61,20 @@ _FIELDS_RE: dict[str, re.Pattern[str]] = {
     "scale_ab": re.compile(r"\bscaleAB=(True|False)\b"),
     "bpreshuffle": re.compile(r"\bbpreshuffle=(True|False)\b"),
 }
+
+
+def _unquote(value: str) -> str:
+    """Strip a single layer of matching ASCII quotes around a captured value.
+
+    AITER's f-string interpolation wraps string values in repr quotes
+    (``dtype='torch.bfloat16'``). Storing the literal quoted form into
+    the CSV poisons the tuner, which then interprets the quoted string
+    as a malformed dtype/device. We strip one matched pair only; values
+    without quotes pass through unchanged.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +118,8 @@ def parse_line(line: str) -> AiterShape | None:
         m=int(fields["m"]),
         n=int(fields["n"]),
         k=int(fields["k"]),
-        dtype=fields["dtype"],
-        outdtype=fields["outdtype"],
+        dtype=_unquote(fields["dtype"]),
+        outdtype=_unquote(fields["outdtype"]),
         bias=fields["bias"] == "True",
         scale_ab=fields["scale_ab"] == "True",
         bpreshuffle=fields["bpreshuffle"] == "True",

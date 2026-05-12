@@ -127,3 +127,57 @@ def test_parses_line_with_trailing_newline() -> None:
     shape = parse_line(CANONICAL + "\n")
     assert shape is not None
     assert shape.target == "bf16_tuned_gemm"
+
+
+# AITER's actual ``tuned_gemm.py`` formats this line via Python's
+# ``f"{dtype=}"`` syntax, which is shorthand for ``f"dtype={dtype!r}"``.
+# When ``dtype`` is a string (the form newer AITER uses), repr wraps
+# the value in single quotes (``dtype='torch.bfloat16'``). Storing the
+# literal quoted form into the CSV poisons the downstream tuner, which
+# tries to interpret ``'torch.bfloat16'`` as a dtype/device and dies.
+# These tests pin the unquoting behaviour so a future regression on
+# the parser side is caught before it hits the PV.
+QUOTED = (
+    "shape is M:1024, N:7168, K:512 "
+    "dtype='torch.bfloat16' otype='torch.bfloat16' "
+    "bias=False, scaleAB=False, bpreshuffle=False, "
+    "not found tuned config in /opt/aiter/aiter/configs/bf16_tuned_gemm.csv, "
+    "will use default config!"
+)
+
+
+def test_parses_quoted_dtype_form() -> None:
+    shape = parse_line(QUOTED)
+    assert shape is not None
+    # Quotes stripped: the canonical CSV value is the unquoted dtype.
+    assert shape.dtype == "torch.bfloat16"
+    assert shape.outdtype == "torch.bfloat16"
+
+
+def test_parses_double_quoted_dtype_form() -> None:
+    # Defensive: if AITER ever switches its repr quote style (e.g. via
+    # a custom formatter using ``%r`` on a value containing a quote),
+    # we still want to land on the unquoted canonical form.
+    line = QUOTED.replace("'torch.bfloat16'", '"torch.bfloat16"')
+    shape = parse_line(line)
+    assert shape is not None
+    assert shape.dtype == "torch.bfloat16"
+    assert shape.outdtype == "torch.bfloat16"
+
+
+def test_unquoted_dtype_still_works() -> None:
+    # Older AITER versions log without quotes; the unquote helper
+    # must be a no-op on values that have no quotes.
+    shape = parse_line(CANONICAL)
+    assert shape is not None
+    assert shape.dtype == "torch.bfloat16"
+
+
+def test_mixed_quoted_and_unquoted_in_same_line() -> None:
+    # Pathological but defensible: one field quoted, one not. Both
+    # should land on the unquoted canonical form.
+    line = QUOTED.replace("otype='torch.bfloat16'", "otype=torch.float8_e4m3fn")
+    shape = parse_line(line)
+    assert shape is not None
+    assert shape.dtype == "torch.bfloat16"
+    assert shape.outdtype == "torch.float8_e4m3fn"
