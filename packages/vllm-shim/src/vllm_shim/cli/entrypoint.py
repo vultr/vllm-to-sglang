@@ -15,6 +15,7 @@ from vllm_shim.cli.haproxy import HAProxyConfig, write_error_file
 from vllm_shim.cli.haproxy import launch as launch_haproxy
 from vllm_shim.cli.model_resolver import resolve_model
 from vllm_shim.cli.parser import ArgParser
+from vllm_shim.cli.rocm_perf import rocm_perf_defaults
 from vllm_shim.cli.rocm_probe import probe as probe_rocm
 from vllm_shim.cli.supervisor import ManagedProcess, Supervisor
 from vllm_shim.values.port_allocation import PortAllocation
@@ -110,6 +111,17 @@ def main() -> int:
     if capture_plan.enabled:
         backend_env.setdefault("AITER_LOG_LEVEL", "INFO")
 
+    # Opinionated ROCm perf defaults (MIOpen cache on PV, hipBLASLt
+    # preference, MI300X-specific HW-queue/RCCL knobs). Same setdefault
+    # discipline as restore: only fill in what the operator left blank.
+    # See cli/rocm_perf.py for source links and rationale.
+    rocm_perf_applied = {
+        k: v
+        for k, v in rocm_perf_defaults(gpu, shim_home).items()
+        if k not in backend_env
+    }
+    backend_env.update(rocm_perf_applied)
+
     # Snapshot every translation/resolution decision to disk + stderr so
     # vllm-shim-info can echo it from a pod shell and pod logs show the
     # final backend invocation without grepping the supervisor's output.
@@ -128,6 +140,7 @@ def main() -> int:
         aiter_capture=capture_plan,
         aiter_restore=restore_plan,
         aiter_restored=restored,
+        rocm_perf=rocm_perf_applied,
     )
     info.write(launch_info)
     info.print_summary(launch_info)

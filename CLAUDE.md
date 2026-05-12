@@ -83,6 +83,8 @@ On ROCm backends (SGLang on AMD GPUs today), the entrypoint also does two AITER-
 
 On CUDA hosts and dev boxes both halves no-op silently with stable reason strings in the launch-info dump. `$VLLM_SHIM_HOME` defaults to `~/.vllm-shim`; operators point it at a PV in production. The tuner step that turns captured shapes into tuned configs is the `vllm-shim-tune` console script (`vllm_shim.aiter.tune`); an operator runs it from a pod shell after capture has accumulated misses, and it writes into `$VLLM_SHIM_HOME/aiter/configs/<bucket>/`. See `docs/aiter.md` for path layout, prerequisites, the tuner CLI, and the operator surface.
 
+Adjacent to AITER restore, the entrypoint also applies a small set of ROCm performance env-var defaults via `vllm_shim.cli.rocm_perf.rocm_perf_defaults(gpu, shim_home)` (generic + `gfx942`-gated additions, all `setdefault` so operator values win). MIOpen kernel cache lands under `$VLLM_SHIM_HOME/miopen` to share the PV survival story with AITER configs. The applied dict appears in the launch-info dump under `rocm_perf`. See `docs/rocm-perf.md`.
+
 ### The `vllm-entrypoints` stub package
 
 `packages/vllm-entrypoints/src/vllm/` is a namespace stub whose `__main__.py` files redirect every `python -m vllm.X` invocation (e.g. `vllm.entrypoints.openai.api_server`) into `vllm_shim.cli.entrypoint.main`. Each leaf module is three lines: import `main`, `raise SystemExit(main())`. Do not add real vLLM API surface here; it exists purely to occupy the import namespace. See `docs/entrypoints.md`.
@@ -121,4 +123,4 @@ The directory layout `docker/<backend>/Dockerfile.<platform>` *is* the matrix. J
 
 ## Where to read more
 
-Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.
+Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `rocm-perf.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.

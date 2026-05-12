@@ -33,6 +33,7 @@ def _sample_args() -> dict[str, object]:
         "aiter_capture": _disabled_capture(),
         "aiter_restore": _disabled_restore(),
         "aiter_restored": {},
+        "rocm_perf": {},
     }
 
 
@@ -169,6 +170,35 @@ def test_collect_aiter_restore_disabled_shape() -> None:
     }
 
 
+def test_collect_rocm_perf_carries_applied_defaults() -> None:
+    args = _sample_args()
+    args["rocm_perf"] = {
+        "GPU_MAX_HW_QUEUES": "2",
+        "MIOPEN_USER_DB_PATH": "/data/vllm-shim/miopen",
+    }
+    out = info.collect(
+        **args,  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    # Surfaces the applied defaults verbatim so operators can see
+    # *exactly* what the shim injected (vs. what the base image or
+    # their own pod spec set).
+    assert out["rocm_perf"] == {
+        "GPU_MAX_HW_QUEUES": "2",
+        "MIOPEN_USER_DB_PATH": "/data/vllm-shim/miopen",
+    }
+
+
+def test_collect_rocm_perf_empty_when_disabled() -> None:
+    out = info.collect(
+        **_sample_args(),  # type: ignore[arg-type]
+        parent_env={},
+        backend_env={},
+    )
+    assert out["rocm_perf"] == {}
+
+
 def test_write_produces_pretty_json_with_trailing_newline(tmp_path: Path) -> None:
     target = tmp_path / "info.json"
     info.write({"a": 1, "b": [2, 3]}, path=target)
@@ -301,6 +331,56 @@ def test_print_summary_shows_restore_count_and_env_vars_when_enabled(
     assert "aiter restore: 2 configs from" in err
     assert "AITER_CONFIG_GEMM_BF16" in err
     assert "AITER_CONFIG_GEMM_A8W8" in err
+
+
+def test_print_summary_shows_rocm_perf_when_applied(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
+            "rocm_perf": {
+                "GPU_MAX_HW_QUEUES": "2",
+                "TORCH_BLAS_PREFER_HIPBLASLT": "1",
+            },
+        }
+    )
+    err = capsys.readouterr().err
+    # Operator-facing line: count + sorted env var names. Paths and
+    # values live in the JSON dump; the stderr summary stays compact.
+    assert "rocm perf: 2 defaults" in err
+    assert "GPU_MAX_HW_QUEUES" in err
+    assert "TORCH_BLAS_PREFER_HIPBLASLT" in err
+
+
+def test_print_summary_omits_rocm_perf_when_empty(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    info.print_summary(
+        {
+            "shim_version": "0.0.1",
+            "backend": "sglang",
+            "listen": "0.0.0.0:8000",
+            "model": {"original": "m", "resolved": "m", "revision": None},
+            "backend_argv": ["python", "-m", "sglang.launch_server"],
+            "dropped_args": [],
+            "env_translation": {},
+            "aiter_capture": _DISABLED_CAPTURE_DICT,
+            "aiter_restore": _DISABLED_RESTORE_DICT,
+            "rocm_perf": {},
+        }
+    )
+    err = capsys.readouterr().err
+    # No GPU / disabled path: don't print a useless line.
+    assert "rocm perf" not in err
 
 
 def test_print_summary_says_nothing_to_restore_when_source_empty(

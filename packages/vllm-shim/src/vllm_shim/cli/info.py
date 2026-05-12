@@ -62,6 +62,7 @@ def collect(
     aiter_capture: CapturePlan,
     aiter_restore: RestorePlan,
     aiter_restored: Mapping[str, str],
+    rocm_perf: Mapping[str, str],
 ) -> dict[str, Any]:
     """Assemble the info dict from already-decided launch state."""
     env_translation = {k: v for k, v in backend_env.items() if k not in parent_env}
@@ -98,6 +99,7 @@ def collect(
             "reason": aiter_restore.reason,
             "overrides": dict(aiter_restored),
         },
+        "rocm_perf": dict(rocm_perf),
     }
 
 
@@ -139,6 +141,10 @@ def print_summary(info: dict[str, Any]) -> None:
         sys.stderr.write(
             f"  aiter restore: enabled, nothing to restore from {restore['source']}\n"
         )
+    rocm_perf = info.get("rocm_perf") or {}
+    if rocm_perf:
+        envs = ", ".join(sorted(rocm_perf.keys()))
+        sys.stderr.write(f"  rocm perf: {len(rocm_perf)} defaults ({envs})\n")
 
 
 def main() -> int:
