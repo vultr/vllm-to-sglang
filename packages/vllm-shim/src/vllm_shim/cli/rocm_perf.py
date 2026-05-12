@@ -64,14 +64,15 @@ from pathlib import Path
 
 from vllm_shim.cli.rocm_probe import GpuAgent
 
-# Image-baked key that invalidates the AITER JIT .so cache when the set
-# of local patches changes. The Dockerfile hashes the contents of the
-# patches directory and writes a short digest here before installing
-# AITER, so any future C++ patch (which would change the compiled .so
-# bytes) automatically lands in a new cache namespace and rebuilds.
-# Python-only patches like the current mp_tuner one don't strictly need
-# this invalidation, but the cost is a one-time rebuild per image bump
-# and the alternative is silent staleness; the safer default wins.
+# Image-baked key that namespaces the AITER JIT .so cache by AITER
+# version. The Dockerfile writes ``git rev-parse --short=12 HEAD`` from
+# /sgl-workspace/aiter here, so bumping AITER's pinned tag rotates the
+# cache namespace and AITER recompiles from the new source on first
+# call instead of silently loading a stale .so from the PV.
+# Note: local-patch edits to docker/sglang/patches/ do NOT rotate the
+# key; if you change a patch without bumping AITER, clear
+# $VLLM_SHIM_HOME/aiter/jit/<sha>/ on the PV manually. See
+# docs/aiter.md "JIT cache namespacing by AITER commit" for rationale.
 _AITER_CACHE_KEY_FILE = Path("/etc/vllm-shim/aiter-cache-key")
 
 
@@ -80,7 +81,7 @@ def _aiter_cache_key() -> str:
 
     The file is written by the Dockerfile at image-build time. On dev
     boxes, CUDA images, and any environment without the file the cache
-    namespace collapses to ``jit-default``, which is fine because those
+    namespace collapses to ``jit/default``, which is fine because those
     paths share the same unpatched AITER bytes anyway.
     """
     try:
@@ -138,13 +139,13 @@ def rocm_perf_defaults(
         # first call via ``aiter/jit/core.py``; ``bd_dir`` derives as
         # ``$AITER_JIT_DIR/build``. Default fallback is
         # ``~/.aiter/jit/build``, which is lost on pod restart.
-        # Anchoring at ``$VLLM_SHIM_HOME/aiter`` puts ``build/``
-        # alongside the existing ``configs/`` and ``shapes/`` subdirs
-        # the shim already manages there. The ``jit-<key>`` segment
-        # is the image-baked cache key (see ``_aiter_cache_key``) so
-        # a future C++ patch bumps the namespace and AITER recompiles
-        # instead of loading stale unpatched .so files.
-        "AITER_JIT_DIR": str(shim_home / "aiter" / f"jit-{_aiter_cache_key()}"),
+        # Anchoring under ``$VLLM_SHIM_HOME/aiter/jit/<sha>`` puts
+        # the .so cache alongside the existing ``configs/`` and
+        # ``shapes/`` subdirs the shim already manages, namespaced
+        # by AITER's commit SHA (see ``_aiter_cache_key``). Bumping
+        # the AITER pin rotates the namespace and AITER recompiles
+        # instead of loading a stale .so from the PV.
+        "AITER_JIT_DIR": str(shim_home / "aiter" / "jit" / _aiter_cache_key()),
     }
 
     # MI300-class (gfx942) specific. The values here are tied to the

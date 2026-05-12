@@ -232,7 +232,7 @@ def test_tune_forwards_env_to_runner() -> None:
         return 0
 
     backend_env = {
-        "AITER_JIT_DIR": "/data/vllm-shim/aiter/jit-abc123",
+        "AITER_JIT_DIR": "/data/vllm-shim/aiter/jit/abc123def456",
         "AITER_CONFIG_BF16_TUNED_GEMM": "/data/vllm-shim/aiter/configs/x.csv",
         "PATH": "/opt/shim/bin:/opt/venv/bin",
     }
@@ -244,6 +244,45 @@ def test_tune_forwards_env_to_runner() -> None:
         run=runner,
     )
     assert received == [backend_env]
+
+
+def test_tune_strips_hip_online_tuning_from_env() -> None:
+    # gradlib's hipblasLtMatmul_sol_wrapper reads HIP_ONLINE_TUNING
+    # at every matmul and, when set, overwrites the caller's explicit
+    # solution_index with a CSV lookup followed by its own internal
+    # benchmark sweep (see repos/aiter/gradlib/csrc/hipbsolgemm.cu,
+    # the `if (online_tuning && n <= decode_max_n)` blocks). When the
+    # tuner subprocess inherits HIP_ONLINE_TUNING=1, that sweep fights
+    # the tuner's per-candidate benchmarking, hits crash-prone algos,
+    # and triggers the worker-respawn -> KeyError cascade in mp_tuner.
+    # The tune subprocess must never see it, no matter what the
+    # operator pod env has.
+    received: list[Mapping[str, str] | None] = []
+
+    def runner(_cmd: list[str], _timeout: int, env: Mapping[str, str] | None) -> int:
+        received.append(env)
+        return 0
+
+    backend_env = {
+        "AITER_JIT_DIR": "/data/vllm-shim/aiter/jit/abc",
+        "HIP_ONLINE_TUNING": "1",
+        "PATH": "/opt/shim/bin",
+    }
+    _maybe_run_startup_tune(
+        shim_home=Path("/data/vllm-shim"),
+        gpu=_MI300X,
+        budget_seconds=900,
+        env=backend_env,
+        run=runner,
+    )
+    forwarded = received[0]
+    assert forwarded is not None
+    assert "HIP_ONLINE_TUNING" not in forwarded
+    # Other keys flow through untouched.
+    assert forwarded["AITER_JIT_DIR"] == "/data/vllm-shim/aiter/jit/abc"
+    assert forwarded["PATH"] == "/opt/shim/bin"
+    # The caller's env dict is not mutated.
+    assert backend_env["HIP_ONLINE_TUNING"] == "1"
 
 
 def test_tune_swallows_timeout(capsys: pytest.CaptureFixture[str]) -> None:

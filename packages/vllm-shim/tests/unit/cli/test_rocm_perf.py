@@ -61,10 +61,10 @@ def test_jit_cache_paths_anchor_under_shim_home(tmp_path: Path) -> None:
     # AITER appends ``/build`` to ``AITER_JIT_DIR`` itself
     # (``aiter/jit/core.py``), so pointing the var at a child of the
     # shim's AITER root lands the JIT build dir at
-    # ``$VLLM_SHIM_HOME/aiter/jit-<key>/build`` next to
+    # ``$VLLM_SHIM_HOME/aiter/jit/<sha>/build`` next to
     # ``configs/``/``shapes/``. With no image-baked cache key the
-    # namespace collapses to ``jit-default``.
-    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-default")
+    # namespace collapses to ``jit/default``.
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit" / "default")
 
 
 def test_miopen_paths_route_under_shim_home(tmp_path: Path) -> None:
@@ -120,35 +120,38 @@ def test_pure_function_no_filesystem_writes(tmp_path: Path) -> None:
 def test_aiter_jit_dir_uses_key_when_file_populated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The Dockerfile writes a 12-char patch-set digest to this file at
-    # image build time. A future C++ patch would change the digest, so
-    # the cache namespace moves and AITER recompiles instead of
-    # loading stale unpatched .so files from the PV.
+    # The Dockerfile writes AITER's 12-char commit SHA to this file at
+    # image build time. Bumping the AITER pin in scripts/sync-repos.sh
+    # changes the SHA, so the cache namespace moves and AITER
+    # recompiles from the new source instead of loading a stale .so
+    # from the PV.
     key_file = tmp_path / "aiter-cache-key"
     key_file.write_text("abc123def456\n")
     monkeypatch.setattr(rocm_perf, "_AITER_CACHE_KEY_FILE", key_file)
     out = rocm_perf_defaults(_MI300X, tmp_path)
-    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-abc123def456")
+    assert out["AITER_JIT_DIR"] == str(
+        tmp_path / "aiter" / "jit" / "abc123def456"
+    )
 
 
 def test_aiter_jit_dir_falls_back_when_file_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # An empty file means the Dockerfile's hash command produced no
-    # output (e.g. no patches in the dir). Treat as 'no key' rather
-    # than namespacing to an empty string, which would yield a bare
-    # ``jit-`` directory.
+    # An empty file means the Dockerfile's rev-parse step produced no
+    # output (e.g. /sgl-workspace/aiter not a git repo). Treat as 'no
+    # key' rather than namespacing to an empty string, which would
+    # yield a bare ``jit/`` directory with the .so at its root.
     key_file = tmp_path / "aiter-cache-key"
     key_file.write_text("")
     monkeypatch.setattr(rocm_perf, "_AITER_CACHE_KEY_FILE", key_file)
     out = rocm_perf_defaults(_MI300X, tmp_path)
-    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-default")
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit" / "default")
 
 
 def test_aiter_jit_dir_falls_back_when_file_missing(tmp_path: Path) -> None:
     # CUDA images, dev boxes, and any environment without the file
-    # all land here. The cache namespace collapses to ``jit-default``,
+    # all land here. The cache namespace collapses to ``jit/default``,
     # which is fine because those paths share the same unpatched
     # AITER bytes anyway.
     out = rocm_perf_defaults(_MI300X, tmp_path)
-    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit-default")
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit" / "default")

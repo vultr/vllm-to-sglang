@@ -9,25 +9,26 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Apply local patches to AITER before installing. See
-# docs/aiter.md "Upstream patches" for the rationale on each patch.
-# Every patch in docker/sglang/patches/ is applied in sorted name
-# order; --dry-run runs first so an AITER bump that breaks any patch
-# fails the image build loudly instead of silently producing a
-# half-patched image.
+# docs/aiter.md "Upstream patches" for the rationale. Every patch in
+# docker/sglang/patches/ is applied in sorted name order; --dry-run
+# runs first so an AITER bump that breaks any patch fails the image
+# build loudly instead of silently producing a half-patched image.
+# Capture AITER's commit SHA to /etc/vllm-shim/aiter-cache-key so the
+# shim can namespace AITER's JIT .so cache by AITER version at
+# runtime: bumping the pinned AITER tag rotates the namespace and
+# AITER recompiles from the new source instead of silently loading
+# a stale .so from the PV. See vllm_shim.cli.rocm_perf._aiter_cache_key
+# for the read side, and docs/aiter.md "JIT cache namespacing by
+# AITER commit" for the rationale (incl. the deliberate decision not
+# to also hash the patches dir).
 COPY docker/sglang/patches/ /tmp/patches/
-# Hash the patch set into /etc/vllm-shim/aiter-cache-key so the shim
-# can namespace AITER's JIT .so cache by patch contents at runtime.
-# Adding or changing a patch changes the digest, which moves
-# AITER_JIT_DIR to a fresh subdir and forces a recompile instead
-# of silently loading stale unpatched .so files from the PV. See
-# vllm_shim.cli.rocm_perf._aiter_cache_key for the read side.
 RUN cd /sgl-workspace/aiter && \
     for p in $(find /tmp/patches -type f -name '*.patch' | sort); do \
         patch --dry-run -p1 < "$p" && patch -p1 < "$p" || exit 1; \
     done && \
     mkdir -p /etc/vllm-shim && \
-    find /tmp/patches -type f -name '*.patch' | sort | xargs cat | \
-        sha256sum | cut -c1-12 > /etc/vllm-shim/aiter-cache-key && \
+    git -C /sgl-workspace/aiter rev-parse --short=12 HEAD \
+        > /etc/vllm-shim/aiter-cache-key && \
     rm -rf /tmp/patches
 
 # AMD's aiter kernels belong with SGLang in its existing 3.10 venv.

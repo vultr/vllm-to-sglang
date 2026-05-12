@@ -104,6 +104,23 @@ def _maybe_run_startup_tune(
     ``os.environ``, the bare import falls back to ``aiter.jit.<md>``,
     and the loader picks up the base-image-shipped .so from
     site-packages instead of the patched build.
+
+    ``HIP_ONLINE_TUNING`` is stripped here even when forwarded in
+    ``env``: gradlib's ``hipblasLtMatmul_sol_wrapper`` reads the var
+    at every matmul and, when set, *overwrites* the caller's
+    explicit ``solution_index`` with a CSV lookup and falls back to
+    its own internal benchmark sweep
+    (``repos/aiter/gradlib/csrc/hipbsolgemm.cu``, the
+    ``if (online_tuning && n <= decode_max_n)`` blocks). That sweep
+    fights the tuner's own per-candidate benchmarking, hits
+    crash-prone algos that the tuner would have ranked or skipped,
+    and crashes the worker. The crash respawns the worker, the new
+    PID isn't in ``mp_tuner``'s ``gpu_map``, and every subsequent
+    task on that worker raises ``KeyError`` until the tuner exits.
+    Online tuning during offline tuning is incoherent anyway:
+    serving-path online tuning is the runtime fallback when there's
+    no tuned CSV; the offline tuner is the thing that *produces*
+    the tuned CSV that makes online tuning unnecessary.
     """
     if budget_seconds <= 0 or gpu is None or shim_home is None:
         return
@@ -120,9 +137,14 @@ def _maybe_run_startup_tune(
     sys.stderr.write(
         f"vllm-shim startup tune: running ({budget_seconds}s budget{hot_note})\n"
     )
+    tune_env = (
+        None
+        if env is None
+        else {k: v for k, v in env.items() if k != "HIP_ONLINE_TUNING"}
+    )
     runner = run if run is not None else _default_tune_runner
     try:
-        rc = runner(cmd, budget_seconds, env)
+        rc = runner(cmd, budget_seconds, tune_env)
         sys.stderr.write(f"vllm-shim startup tune: exit {rc}\n")
     except subprocess.TimeoutExpired:
         sys.stderr.write(
