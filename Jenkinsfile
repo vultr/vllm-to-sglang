@@ -2,10 +2,10 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'BRANCH',   defaultValue: 'master',  description: 'Git branch to checkout')
-        string(name: 'TAG',      defaultValue: 'nightly', description: 'Base tag; final image tag is ${TAG}-${BACKEND}-${PLATFORM}')
-        string(name: 'BACKEND',  defaultValue: '',        description: 'Optional filter: build only this backend (e.g. "sglang"). Empty = all backends found under docker/.')
-        string(name: 'PLATFORM', defaultValue: '',        description: 'Optional filter: build only this platform (e.g. "rocm", "cuda"). Empty = all platforms.')
+        string(name: 'BRANCH',   defaultValue: 'dev',    description: 'Git branch to checkout')
+        string(name: 'TAG',      defaultValue: 'dev',    description: 'Base tag; final image tag is ${TAG}-${BACKEND}-${PLATFORM}')
+        string(name: 'BACKEND',  defaultValue: 'sglang', description: 'Optional filter: build only this backend (e.g. "sglang"). Empty = all backends found under docker/.')
+        string(name: 'PLATFORM', defaultValue: 'rocm',   description: 'Optional filter: build only this platform (e.g. "rocm", "cuda"). Empty = all platforms.')
     }
 
     environment {
