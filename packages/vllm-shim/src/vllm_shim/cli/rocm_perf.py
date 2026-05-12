@@ -8,13 +8,13 @@ three narrower categories the base image doesn't cover:
 
 1. **Persistence vars** that complement the AITER restore path: route
    MIOpen's kernel-finder DB, Triton's compiled-kernel cache,
-   TorchInductor's compile-artifact cache, and SGLang's torch.compile
-   cache under ``$VLLM_SHIM_HOME`` so JIT artifacts survive pod
-   restarts on the same PV that holds tuned AITER configs. Same
-   survival semantics, same volume. Without this, every pod restart
-   pays the full Triton/Inductor compile cost on first request even
-   though the resulting binaries are byte-for-byte identical to the
-   previous pod's.
+   TorchInductor's compile-artifact cache, SGLang's torch.compile
+   cache, and AITER's own JIT build dir under ``$VLLM_SHIM_HOME`` so
+   compiled kernels survive pod restarts on the same PV that holds
+   tuned AITER configs. Same survival semantics, same volume. Without
+   this, every pod restart pays the full Triton/Inductor/AITER
+   compile cost on first request even though the resulting binaries
+   are byte-for-byte identical to the previous pod's.
 
 2. **PyTorch BLAS dispatch.** ``TORCH_BLAS_PREFER_HIPBLASLT=1`` so
    matmuls land on hipBLASLt by default; PyTorch falls back to
@@ -109,6 +109,14 @@ def rocm_perf_defaults(
         # we anchor it on the PV so SGLang's torch.compile artifacts
         # and any future SGLang-owned cache content lands there too.
         "SGLANG_CACHE_DIR": str(shim_home / "sglang"),
+        # AITER's own JIT build dir. AITER builds HIP kernels on
+        # first call via ``aiter/jit/core.py``; ``bd_dir`` derives as
+        # ``$AITER_JIT_DIR/build``. Default fallback is
+        # ``~/.aiter/jit/build``, which is lost on pod restart.
+        # Anchoring at ``$VLLM_SHIM_HOME/aiter`` puts ``build/``
+        # alongside the existing ``configs/`` and ``shapes/`` subdirs
+        # the shim already manages there.
+        "AITER_JIT_DIR": str(shim_home / "aiter"),
     }
 
     # MI300-class (gfx942) specific. The values here are tied to the

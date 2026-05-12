@@ -18,10 +18,11 @@ Applied whenever `rocm_probe` returns a GPU and `resolve_shim_home` resolves a p
 | `TRITON_CACHE_DIR` | `$VLLM_SHIM_HOME/triton` | Triton's compiled-kernel cache. Triton compiles on first invocation; without this, every pod restart re-pays the compile cost on the first request. AITER's Triton kernels go through this path too. |
 | `TORCHINDUCTOR_CACHE_DIR` | `$VLLM_SHIM_HOME/torchinductor` | TorchInductor's compile-artifact cache. Same persistence story. Applies whenever PyTorch's Inductor path is taken (model-dependent; some SGLang code paths use it without `--enable-torch-compile`). |
 | `SGLANG_CACHE_DIR` | `$VLLM_SHIM_HOME/sglang` | SGLang's own cache root, default `~/.cache/sglang`. With `--enable-torch-compile`, SGLang's compilation manager derives its `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` overrides from this var, so the JIT caches stay on the PV either way. |
+| `AITER_JIT_DIR` | `$VLLM_SHIM_HOME/aiter` | AITER's own JIT root. AITER's `aiter/jit/core.py` derives `bd_dir = $AITER_JIT_DIR/build` for HIP kernels it compiles on first call (CK GEMM/MoE kernels, fused attention paths, etc.). Default fallback is `~/.aiter/jit/build`, lost on pod restart. Anchoring at the shim's existing AITER root puts `build/` next to `configs/` and `shapes/` on the same PV. |
 
 ## A note on JIT cache stickiness
 
-The three JIT-cache vars above are content-addressable inside their respective tools. Cache hits depend on bit-exact matches of:
+The four JIT-cache vars above are content-addressable inside their respective tools. Cache hits depend on bit-exact matches of:
 
 - GPU SKU (gfx target + CU count). Already partitioned via the shim's bucket key elsewhere, but Triton/Inductor hash the architecture themselves.
 - PyTorch + Triton + AITER + ROCm versions. **Image upgrades invalidate the cache.** That's correct behavior, not a bug.

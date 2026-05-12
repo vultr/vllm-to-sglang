@@ -34,13 +34,18 @@ def test_generic_defaults_apply_to_any_rocm_gpu(tmp_path: Path) -> None:
 
 
 def test_jit_cache_paths_anchor_under_shim_home(tmp_path: Path) -> None:
-    # Triton + TorchInductor + SGLang caches all share the PV so JIT
-    # artifacts survive pod restarts. Without this, first request on
-    # every restart re-pays the compile cost.
+    # Triton + TorchInductor + SGLang + AITER caches all share the PV
+    # so JIT artifacts survive pod restarts. Without this, first
+    # request on every restart re-pays the compile cost.
     out = rocm_perf_defaults(_MI300X, tmp_path)
     assert out["TRITON_CACHE_DIR"] == str(tmp_path / "triton")
     assert out["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "torchinductor")
     assert out["SGLANG_CACHE_DIR"] == str(tmp_path / "sglang")
+    # AITER appends ``/build`` to ``AITER_JIT_DIR`` itself
+    # (``aiter/jit/core.py``), so pointing the var at the shim's
+    # AITER root lands the JIT build dir at
+    # ``$VLLM_SHIM_HOME/aiter/build`` next to ``configs/``/``shapes/``.
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter")
 
 
 def test_miopen_paths_route_under_shim_home(tmp_path: Path) -> None:
@@ -77,16 +82,17 @@ def test_keys_are_a_known_set(tmp_path: Path) -> None:
         "TRITON_CACHE_DIR",
         "TORCHINDUCTOR_CACHE_DIR",
         "SGLANG_CACHE_DIR",
+        "AITER_JIT_DIR",
         "GPU_MAX_HW_QUEUES",
         "TORCH_NCCL_HIGH_PRIORITY",
     }
 
 
 def test_pure_function_no_filesystem_writes(tmp_path: Path) -> None:
-    # Cache dirs (miopen/triton/torchinductor/sglang) do not need to
-    # exist at the time we set the env vars; the consumers create
-    # them on first write. Asserting we don't pre-create catches
-    # accidental mkdir creep.
+    # Cache dirs (miopen/triton/torchinductor/sglang/aiter) do not
+    # need to exist at the time we set the env vars; the consumers
+    # create them on first write. Asserting we don't pre-create
+    # catches accidental mkdir creep.
     rocm_perf_defaults(_MI300X, tmp_path)
-    for name in ("miopen", "triton", "torchinductor", "sglang"):
+    for name in ("miopen", "triton", "torchinductor", "sglang", "aiter"):
         assert not (tmp_path / name).exists()
