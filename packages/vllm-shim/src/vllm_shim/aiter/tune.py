@@ -39,16 +39,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vllm_shim.aiter.capture import resolve_shim_home
-from vllm_shim.aiter.log_parser import strip_dtype_quotes
 from vllm_shim.aiter.shape_store import padded_m_gl0
 from vllm_shim.cli.rocm_probe import bucket as bucket_for_gpu
 from vllm_shim.cli.rocm_probe import probe as probe_rocm
-
-# Columns where pre-fix capture data may carry literal Python repr
-# quotes around the value (``dtype='torch.bfloat16'``). When merging
-# shapes for AITER's tuner we canonicalize these so the tuner doesn't
-# choke on the quoted form.
-_QUOTED_DTYPE_COLUMNS: frozenset[str] = frozenset({"dtype", "outdtype"})
 
 # Column containing AITER's M (batch * seq) dimension. Pre-bucketing
 # capture writes raw values that have to be rounded up to AITER's
@@ -177,20 +170,13 @@ def discover_shape_files(shim_home: Path, bucket: str, target: str) -> list[Path
 def canonicalize_shape_files(files: list[Path]) -> int:
     """Rewrite shape CSVs in place to the canonical persisted form.
 
-    Two transformations, both idempotent on already-clean files:
-
-    1. **Strip ``dtype`` / ``outdtype`` repr quotes.** Pre-fix capture
-       stored ``'torch.bfloat16'`` (with literal quotes) because AITER's
-       log line format wraps string values in repr quotes. The tuner
-       can't read that form and dies.
-    2. **Pad raw M values onto AITER's tuning grid.** Pre-bucketing
-       capture stored the raw M from the log line; AITER's runtime
-       lookup pads M into discrete buckets before checking the tuned
-       config, so off-grid raw values are dead weight for the tuner.
-
-    After either transformation, rows that collapse to identical
-    tuples are deduplicated so the file shrinks toward its canonical
-    minimum. Returns the count of files actually rewritten.
+    Pads raw M values onto AITER's tuning grid. Pre-bucketing capture
+    stored the raw M from the log line; AITER's runtime lookup pads M
+    into discrete buckets before checking the tuned config, so off-grid
+    raw values are dead weight for the tuner. After padding, rows that
+    collapse to identical tuples are deduplicated so the file shrinks
+    toward its canonical minimum. Returns the count of files actually
+    rewritten; idempotent on already-clean files.
 
     Writes go through a sibling ``.tmp`` file plus an atomic
     ``Path.replace`` so a crash mid-rewrite never leaves a half-
@@ -206,11 +192,11 @@ def canonicalize_shape_files(files: list[Path]) -> int:
 
 
 def _canonicalize_one(path: Path) -> bool:
-    """Rewrite ``path`` if any row needs unquoting, M padding, or dedup.
+    """Rewrite ``path`` if any row needs M padding or dedup.
 
     Returns True when the file was rewritten, False when every row is
     already canonical (or the file is empty / malformed in a way that
-    doesn't include the offending columns).
+    doesn't include the M column).
     """
     with path.open(newline="") as f:
         reader = csv.reader(f)
@@ -218,14 +204,9 @@ def _canonicalize_one(path: Path) -> bool:
             header = next(reader)
         except StopIteration:
             return False
-        quote_cols = [
-            i for i, name in enumerate(header) if name in _QUOTED_DTYPE_COLUMNS
-        ]
         try:
-            m_col: int | None = header.index(_M_COLUMN)
+            m_col = header.index(_M_COLUMN)
         except ValueError:
-            m_col = None
-        if not quote_cols and m_col is None:
             return False
         rows = list(reader)
     cleaned: list[list[str]] = []
@@ -233,13 +214,7 @@ def _canonicalize_one(path: Path) -> bool:
     changed = False
     for row in rows:
         new_row = list(row)
-        for i in quote_cols:
-            if i < len(new_row):
-                stripped = strip_dtype_quotes(new_row[i])
-                if stripped != new_row[i]:
-                    new_row[i] = stripped
-                    changed = True
-        if m_col is not None and m_col < len(new_row):
+        if m_col < len(new_row):
             try:
                 m_raw = int(new_row[m_col])
             except ValueError:
@@ -279,8 +254,9 @@ def merge_shape_files(files: list[Path], destination: Path) -> int:
     inputs. Returns the row count written (excluding the header).
 
     Callers running this against operator volumes should invoke
-    ``canonicalize_shape_files`` first to scrub pre-fix dtype quoting
-    in place. This function assumes its inputs are already canonical.
+    ``canonicalize_shape_files`` first to pad pre-bucketing M values
+    onto AITER's grid. This function assumes its inputs are already
+    canonical.
     """
     seen: set[tuple[str, ...]] = set()
     header: list[str] | None = None
@@ -391,10 +367,10 @@ def tune_target(
             returncode=None,
             skipped_reason="no captured shapes",
         )
-    # Patch pre-fix dtype quoting in place before feeding the merge
-    # step. After this returns, every source CSV is canonical and
-    # downstream readers (this run plus any future operator-driven
-    # invocations) get clean data. Idempotent on already-clean files.
+    # Pad pre-bucketing M values in place before feeding the merge
+    # step. After this returns, every source CSV is on AITER's grid
+    # and downstream readers (this run plus any future operator-driven
+    # invocations) get canonical data. Idempotent on already-clean files.
     canonicalize_shape_files(files)
     rows = merge_shape_files(files, untuned_file)
     cmd = build_command(

@@ -97,24 +97,6 @@ def test_merge_rejects_header_mismatch(tmp_path: Path) -> None:
 # ---------- canonicalize_shape_files ----------
 
 
-def test_canonicalize_rewrites_quoted_dtype_in_place(tmp_path: Path) -> None:
-    # Pre-fix capture data on operator volumes stored ``dtype`` and
-    # ``outdtype`` with literal repr quotes (``'torch.bfloat16'``).
-    # AITER's tuner reads those values and dies with "Invalid device
-    # string". The canonicalize pass patches source files in place so
-    # subsequent runs see clean data and operators don't have to
-    # scrub the PV by hand.
-    quoted_row = "1024,7168,512,False,'torch.bfloat16','torch.bfloat16',False,False"
-    f = _write(tmp_path / "pre-fix.csv", quoted_row)
-    rewritten = canonicalize_shape_files([f])
-    assert rewritten == 1
-    # On-disk file is now canonical; the quotes are gone.
-    text = f.read_text().splitlines()
-    assert text[0] == _HEADER
-    assert text[1] == _ROW_A
-    assert "'torch" not in f.read_text()
-
-
 def test_canonicalize_skips_already_clean_files(tmp_path: Path) -> None:
     # Idempotent: an already-canonical file is not rewritten. This
     # matters because tune_target runs canonicalize_shape_files on
@@ -128,10 +110,8 @@ def test_canonicalize_skips_already_clean_files(tmp_path: Path) -> None:
 
 
 def test_canonicalize_collapses_duplicate_rows(tmp_path: Path) -> None:
-    # Once padding is applied, the canonical row tuple is the only
-    # thing that matters for tune fidelity; identical rows are pure
-    # waste. Canonicalize collapses them so the on-disk file shrinks
-    # toward its minimal representation.
+    # Identical rows are pure waste; canonicalize collapses them so
+    # the on-disk file shrinks toward its minimal representation.
     f = _write(tmp_path / "dup.csv", _ROW_A, _ROW_A)
     canonicalize_shape_files([f])
     lines = f.read_text().splitlines()
@@ -140,30 +120,27 @@ def test_canonicalize_collapses_duplicate_rows(tmp_path: Path) -> None:
 
 def test_canonicalize_pads_raw_m_and_dedups(tmp_path: Path) -> None:
     # Raw M values from pre-bucketing capture (e.g. m=257) round up
-    # to AITER's tuning-grid bucket (272 in this case). Two raw rows
-    # captured at different real M values may collapse onto the same
-    # bucket; canonicalize dedups so the resulting file has one row
-    # per (padded_m, ...) tuple.
+    # to AITER's tuning-grid bucket. Two raw rows captured at different
+    # real M values may collapse onto the same bucket; canonicalize
+    # dedups so the resulting file has one row per (padded_m, ...) tuple.
     raw_257 = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
     raw_258 = "258,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
     f = _write(tmp_path / "raw.csv", raw_257, raw_258)
     rewritten = canonicalize_shape_files([f])
     assert rewritten == 1
     lines = f.read_text().splitlines()
-    # Both raw values pad to 272 (M<=1024 -> multiple of 32, 257 -> 288, 258 -> 288).
-    # Wait: 257 rounds to nearest 32 mult: (257+31)//32*32 = 288.
-    # Verify the actual bucket and confirm dedup.
+    # Both raw values pad to 288 (M<=1024 -> multiple of 32; 257 and
+    # 258 both round up to 288). Verify dedup + canonical M value.
     assert lines[0] == _HEADER
     assert len(lines) == 2  # header + one canonical row
-    # The M column should now be 288 (raw 257/258 both pad to 288).
     assert lines[1].startswith("288,")
 
 
 def test_canonicalize_uses_atomic_write(tmp_path: Path) -> None:
     # Tmp file is renamed over the original. After a successful
     # canonicalize call, no stray ``.tmp`` should remain in the dir.
-    quoted_row = "1024,7168,512,False,'torch.bfloat16','torch.bfloat16',False,False"
-    f = _write(tmp_path / "pre-fix.csv", quoted_row)
+    raw_row = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+    f = _write(tmp_path / "raw.csv", raw_row)
     canonicalize_shape_files([f])
     leftovers = list(tmp_path.glob("*.tmp"))
     assert leftovers == []
@@ -178,14 +155,14 @@ def test_canonicalize_handles_empty_file(tmp_path: Path) -> None:
 
 
 def test_tune_target_canonicalizes_before_merge(tmp_path: Path) -> None:
-    # End-to-end: a pre-fix shape file under shapes/<bucket>/<model>/
-    # <para>/ gets cleaned in place by tune_target before the merge
-    # produces the untuned input. The source file on disk should be
-    # canonical after tune_target returns, and the merged untuned
-    # file should also be clean.
-    quoted = "1024,7168,512,False,'torch.bfloat16','torch.bfloat16',False,False"
+    # End-to-end: a pre-bucketing shape file under shapes/<bucket>/
+    # <model>/<para>/ gets padded in place by tune_target before the
+    # merge produces the untuned input. The source file on disk should
+    # be canonical after tune_target returns, and the merged untuned
+    # file should also reflect the padded M.
+    raw = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
     source = tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv"
-    _write(source, quoted)
+    _write(source, raw)
 
     runner, _calls = _spy_runner()
     result = tune_target(
@@ -199,10 +176,11 @@ def test_tune_target_canonicalizes_before_merge(tmp_path: Path) -> None:
         run=runner,
     )
     assert result.returncode == 0
-    # Source file got patched.
-    assert "'torch" not in source.read_text()
-    # Untuned file (the tuner input) is also clean.
-    assert "'torch" not in result.untuned_file.read_text()
+    # Source file got padded onto the grid.
+    assert "257," not in source.read_text()
+    assert "288," in source.read_text()
+    # Untuned file (the tuner input) reflects the canonical M.
+    assert "288," in result.untuned_file.read_text()
 
 
 # ---------- build_command ----------
