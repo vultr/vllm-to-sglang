@@ -11,6 +11,7 @@ from vllm_shim.aiter.hip_online_tuning import (
     apply_hip_online_tuning,
     plan_hip_online_tuning,
 )
+from vllm_shim.aiter.lock_cleanup import cleanup_locks, plan_cleanup
 from vllm_shim.aiter.restore import plan_restore, restore_configs
 from vllm_shim.aiter.shape_store import ShapeStore
 from vllm_shim.aiter.stream_tee import StreamTee
@@ -244,6 +245,24 @@ def main() -> int:
     # import time.
     shim_home = resolve_shim_home()
     gpu = probe_rocm()
+
+    # Clear orphaned AITER JIT locks before anything in this pod
+    # touches AITER. AITER's FileBaton (aiter/jit/utils/file_baton.py)
+    # is file-existence-based with no liveness check, so a previous
+    # pod that crashed mid-build leaves a lock file on the PV that
+    # wedges every rank of the next pod in baton wait. The cleanup
+    # window is intentionally narrow: between shim_home/gpu resolution
+    # and the first child (startup tune or backend) that imports
+    # AITER, so anything we delete here is by definition orphaned.
+    # See vllm_shim.aiter.lock_cleanup.
+    cleanup_plan = plan_cleanup(shim_home=shim_home, gpu=gpu, env=os.environ)
+    cleared = cleanup_locks(cleanup_plan)
+    if cleared:
+        sys.stderr.write(
+            f"vllm-shim aiter lock cleanup: cleared {len(cleared)} stale "
+            f"lock file(s) under {cleanup_plan.root}\n"
+        )
+
     restore_plan = plan_restore(shim_home=shim_home, gpu=gpu)
     # Operator-set AITER_CONFIG_* env vars win over our restore. Same
     # principle as translate_env_with_map: if the operator wrote it

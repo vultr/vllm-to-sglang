@@ -76,13 +76,18 @@ from vllm_shim.cli.rocm_probe import GpuAgent
 _AITER_CACHE_KEY_FILE = Path("/etc/vllm-shim/aiter-cache-key")
 
 
-def _aiter_cache_key() -> str:
+def aiter_cache_key() -> str:
     """Return the image-baked AITER cache key, or 'default' if unset.
 
     The file is written by the Dockerfile at image-build time. On dev
     boxes, CUDA images, and any environment without the file the cache
     namespace collapses to ``jit/default``, which is fine because those
     paths share the same unpatched AITER bytes anyway.
+
+    Public because ``vllm_shim.aiter.lock_cleanup`` also needs to
+    resolve the same JIT path this module sets as ``AITER_JIT_DIR``;
+    the two must stay aligned or stale-lock cleanup scans the wrong
+    directory and silently no-ops while wedged pods spin in baton wait.
     """
     try:
         key = _AITER_CACHE_KEY_FILE.read_text().strip()
@@ -142,10 +147,10 @@ def rocm_perf_defaults(
         # Anchoring under ``$VLLM_SHIM_HOME/aiter/jit/<sha>`` puts
         # the .so cache alongside the existing ``configs/`` and
         # ``shapes/`` subdirs the shim already manages, namespaced
-        # by AITER's commit SHA (see ``_aiter_cache_key``). Bumping
+        # by AITER's commit SHA (see ``aiter_cache_key``). Bumping
         # the AITER pin rotates the namespace and AITER recompiles
         # instead of loading a stale .so from the PV.
-        "AITER_JIT_DIR": str(shim_home / "aiter" / "jit" / _aiter_cache_key()),
+        "AITER_JIT_DIR": str(shim_home / "aiter" / "jit" / aiter_cache_key()),
     }
 
     # MI300-class (gfx942) specific. The values here are tied to the

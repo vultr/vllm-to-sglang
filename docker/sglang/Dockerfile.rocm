@@ -19,7 +19,7 @@ RUN apt-get update && \
 # so the shim can namespace AITER's JIT .so cache by AITER version at
 # runtime: bumping the pinned AITER tag rotates the namespace and
 # AITER recompiles from the new source instead of silently loading
-# a stale .so from the PV. See vllm_shim.cli.rocm_perf._aiter_cache_key
+# a stale .so from the PV. See vllm_shim.cli.rocm_perf.aiter_cache_key
 # for the read side, and docs/aiter.md "JIT cache namespacing by
 # AITER commit" for the rationale (incl. the deliberate decision not
 # to also hash the patches dir). SGLang patches touch Python source
