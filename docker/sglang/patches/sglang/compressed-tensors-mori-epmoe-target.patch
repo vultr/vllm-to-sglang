@@ -1,0 +1,42 @@
+vllm-shim local patch: register MoriEPMoE in compressed-tensors'
+target_scheme_map so MoRI-EP MoE layers resolve to the same quant
+scheme as their FusedMoE parent.
+
+`CompressedTensorsConfig._add_fused_moe_to_target_scheme_map` aliases
+the configured "Linear" scheme onto FusedMoE and DeepEPMoE so that
+compressed-tensors checkpoints whose targets list contains only
+"Linear" still match the fused-MoE class names returned by
+`module.__class__.__name__` in `find_matched_target`. It does not add
+MoriEPMoE, which is a sibling subclass of DeepEPMoE under the same
+EPMoE -> FusedMoE chain. The result on the SGLang side: when MoRI EP
+is selected via `--moe-a2a-backend=mori`, every compressed-tensors
+quantized MoE checkpoint (Kimi K2.5/K2.6 INT4, etc.) fails at model
+init with:
+
+    ValueError: Unable to find matching target for
+    model.layers.N.mlp.experts.0.gate_proj in the
+    compressed-tensors config.
+
+The class-name match falls through because "MoriEPMoE" is not a
+substring of "Linear", "FusedMoE", or "DeepEPMoE", and the layer-name
+match falls through because the config's targets are class names not
+regex.
+
+We only add MoriEPMoE here, not NpuFuseEPMoE (NPU-only, not exercised
+on the platforms this image targets) or the bare EPMoE base class
+(never instantiated directly: get_moe_impl_class always picks a leaf
+subclass). Keeping the patch tight reduces the surface area we have
+to re-verify on every SGLang bump.
+
+There is no upstream PR for this; the shim carries it locally.
+
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+@@ -201,6 +201,7 @@ class CompressedTensorsConfig(QuantizationConfig):
+             return
+         self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+         self.target_scheme_map["DeepEPMoE"] = self.target_scheme_map["Linear"]
++        self.target_scheme_map["MoriEPMoE"] = self.target_scheme_map["Linear"]
+
+     @property
+     def weight_block_size(self) -> Optional[List[int]]:

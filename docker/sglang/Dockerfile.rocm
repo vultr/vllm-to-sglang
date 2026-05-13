@@ -8,22 +8,29 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends haproxy patch && \
     rm -rf /var/lib/apt/lists/*
 
-# Apply local patches to AITER before installing. See
-# docs/aiter.md "Upstream patches" for the rationale. Every patch in
-# docker/sglang/patches/ is applied in sorted name order; --dry-run
-# runs first so an AITER bump that breaks any patch fails the image
-# build loudly instead of silently producing a half-patched image.
-# Capture AITER's commit SHA to /etc/vllm-shim/aiter-cache-key so the
-# shim can namespace AITER's JIT .so cache by AITER version at
+# Apply local patches to AITER and SGLang before installing. See
+# docs/aiter.md "Upstream patches" for the rationale. Patches are
+# grouped by target: docker/sglang/patches/aiter/ applies to
+# /sgl-workspace/aiter, docker/sglang/patches/sglang/ applies to
+# /sgl-workspace/sglang. Each subdir is applied in sorted name order;
+# --dry-run runs first so a base-image bump that breaks any patch fails
+# the image build loudly instead of silently producing a half-patched
+# image. Capture AITER's commit SHA to /etc/vllm-shim/aiter-cache-key
+# so the shim can namespace AITER's JIT .so cache by AITER version at
 # runtime: bumping the pinned AITER tag rotates the namespace and
 # AITER recompiles from the new source instead of silently loading
 # a stale .so from the PV. See vllm_shim.cli.rocm_perf._aiter_cache_key
 # for the read side, and docs/aiter.md "JIT cache namespacing by
 # AITER commit" for the rationale (incl. the deliberate decision not
-# to also hash the patches dir).
+# to also hash the patches dir). SGLang patches touch Python source
+# only, so they need no equivalent cache-key rotation.
 COPY docker/sglang/patches/ /tmp/patches/
 RUN cd /sgl-workspace/aiter && \
-    for p in $(find /tmp/patches -type f -name '*.patch' | sort); do \
+    for p in $(find /tmp/patches/aiter -type f -name '*.patch' | sort); do \
+        patch --dry-run -p1 < "$p" && patch -p1 < "$p" || exit 1; \
+    done && \
+    cd /sgl-workspace/sglang && \
+    for p in $(find /tmp/patches/sglang -type f -name '*.patch' | sort); do \
         patch --dry-run -p1 < "$p" && patch -p1 < "$p" || exit 1; \
     done && \
     mkdir -p /etc/vllm-shim && \
