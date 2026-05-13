@@ -189,6 +189,9 @@ def test_tune_invokes_runner_with_bucket_and_budget() -> None:
     # Without VLLM_SHIM_TUNE_AT_STARTUP_HOT set, the subprocess gets
     # no --hot flag and tunes every captured shape (existing behavior).
     assert "--hot" not in cmd
+    # Startup tune always excludes FlyDSL candidates so the two
+    # affected targets fit more shapes inside the wall-clock budget.
+    assert "--no-flydsl" in cmd
 
 
 def test_tune_passes_hot_flag_when_set(

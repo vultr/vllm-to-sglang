@@ -140,6 +140,21 @@ _SPECS: dict[str, TunerSpec] = {
 }
 
 
+# Per-target override for ``extra_args`` when ``--no-flydsl`` is set.
+# Two targets enumerate FlyDSL kernels as tuning candidates: gradlib's
+# bf16 tuner (default libtype=["all"]) and the CK bpreshuffle a8w8
+# script (we pass --libtype all). FlyDSL candidates JIT-compile per
+# kernel during benchmarking, which dominates per-shape tune wall-time;
+# the startup-tune path swaps to a libtype list that excludes flydsl
+# (and the "all" meta value that re-includes it). Other targets have
+# no FlyDSL path at all, so they're absent from this map and the flag
+# is a no-op for them.
+_NO_FLYDSL_EXTRA_ARGS: dict[str, tuple[str, ...]] = {
+    "bf16_tuned_gemm": ("--libtype", "asm,hipblaslt,triton,torch,skinny"),
+    "a8w8_bpreshuffle_tuned_gemm": ("--libtype", "asm,ck,cktile"),
+}
+
+
 def known_targets() -> tuple[str, ...]:
     """Stable ordering for ``--list`` output and default iteration."""
     return tuple(_SPECS.keys())
@@ -361,6 +376,7 @@ def build_command(
     untuned_file: Path,
     tuned_file: Path,
     retune: bool,
+    no_flydsl: bool = False,
 ) -> list[str]:
     """Assemble the argv that invokes AITER's tuner for ``spec``.
 
@@ -368,7 +384,16 @@ def build_command(
     re-tune of every shape in the input even when an existing tuned
     file is present. Without it, AITER diffs input against output and
     only tunes the new rows (incremental tuning is the default).
+
+    ``no_flydsl`` swaps ``spec.extra_args`` for the entry in
+    ``_NO_FLYDSL_EXTRA_ARGS`` when one exists; targets without a
+    FlyDSL path keep their default args.
     """
+    extra_args = (
+        _NO_FLYDSL_EXTRA_ARGS.get(spec.target, spec.extra_args)
+        if no_flydsl
+        else spec.extra_args
+    )
     cmd: list[str] = [
         str(python),
         str(aiter_root / spec.script),
@@ -376,7 +401,7 @@ def build_command(
         str(untuned_file),
         spec.output_flag,
         str(tuned_file),
-        *spec.extra_args,
+        *extra_args,
     ]
     if retune:
         cmd.append("--all")
@@ -413,6 +438,7 @@ def tune_target(
     retune: bool,
     dry_run: bool,
     hot: int | None = None,
+    no_flydsl: bool = False,
     run: Callable[[list[str]], int] | None = None,
 ) -> TuneResult:
     """Tune one target end-to-end: discover, merge, invoke.
@@ -452,6 +478,7 @@ def tune_target(
         untuned_file=untuned_file,
         tuned_file=tuned_file,
         retune=retune,
+        no_flydsl=no_flydsl,
     )
     if dry_run:
         return TuneResult(
@@ -603,6 +630,20 @@ def main(argv: list[str] | None = None) -> int:
             "growing --hot across runs converges on the full set."
         ),
     )
+    parser.add_argument(
+        "--no-flydsl",
+        action="store_true",
+        help=(
+            "Exclude FlyDSL candidates from the tuner's libtype list "
+            "for the two targets that include them (bf16_tuned_gemm, "
+            "a8w8_bpreshuffle_tuned_gemm). FlyDSL candidates JIT-compile "
+            "per kernel and dominate per-shape benchmark time; dropping "
+            "them shrinks the candidate pool so a time-budgeted run "
+            "covers more shapes. The vllm-shim startup-tune path passes "
+            "this automatically; operator-driven runs can opt in to "
+            "compare timings or trim the candidate set."
+        ),
+    )
     args = parser.parse_args(argv)
 
     shim_home = args.shim_home or resolve_shim_home()
@@ -635,6 +676,7 @@ def main(argv: list[str] | None = None) -> int:
             retune=args.retune,
             dry_run=args.dry_run,
             hot=args.hot,
+            no_flydsl=args.no_flydsl,
         )
         _print_result(result)
         if result.returncode not in (None, 0):

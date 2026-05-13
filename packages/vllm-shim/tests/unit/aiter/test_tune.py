@@ -314,6 +314,73 @@ def test_build_command_blockscale_bpreshuffle_includes_preshuffle() -> None:
     assert "--preshuffle" in cmd
 
 
+def test_build_command_no_flydsl_swaps_bf16_gradlib_libtype() -> None:
+    # gradlib defaults to libtype=["all"], which pulls in FlyDSL
+    # candidates. Startup tune passes --no-flydsl so we add an explicit
+    # libtype list that omits flydsl (and the "all" meta value).
+    spec = tune._SPECS["bf16_tuned_gemm"]
+    cmd = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=False,
+        no_flydsl=True,
+    )
+    i = cmd.index("--libtype")
+    assert cmd[i : i + 2] == [
+        "--libtype",
+        "asm,hipblaslt,triton,torch,skinny",
+    ]
+
+
+def test_build_command_no_flydsl_replaces_bpreshuffle_libtype() -> None:
+    # The CK bpreshuffle script accepts ``flydsl`` as a libtype choice
+    # and we currently pass ``--libtype all``. Under --no-flydsl that
+    # swaps to the non-flydsl subset.
+    spec = tune._SPECS["a8w8_bpreshuffle_tuned_gemm"]
+    cmd = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=False,
+        no_flydsl=True,
+    )
+    i = cmd.index("--libtype")
+    assert cmd[i : i + 2] == ["--libtype", "asm,ck,cktile"]
+    # "all" must not survive; otherwise the override is a no-op.
+    assert "all" not in cmd
+
+
+def test_build_command_no_flydsl_is_noop_for_unaffected_target() -> None:
+    # Targets without a FlyDSL candidate path keep their default
+    # ``extra_args`` under --no-flydsl. a8w8_tuned_gemm's CK script
+    # has no --libtype flag for flydsl, so the override map deliberately
+    # omits it; build_command must pass through spec.extra_args unchanged.
+    spec = tune._SPECS["a8w8_tuned_gemm"]
+    plain = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=False,
+    )
+    with_flag = build_command(
+        spec,
+        python=Path("py"),
+        aiter_root=Path("aroot"),
+        untuned_file=Path("u.csv"),
+        tuned_file=Path("t.csv"),
+        retune=False,
+        no_flydsl=True,
+    )
+    assert plain == with_flag
+
+
 def test_build_command_retune_appends_all() -> None:
     spec = tune._SPECS["a8w8_tuned_gemm"]
     cmd = build_command(

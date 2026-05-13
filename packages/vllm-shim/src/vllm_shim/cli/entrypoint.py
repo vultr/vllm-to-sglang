@@ -95,6 +95,14 @@ def _maybe_run_startup_tune(
     so the budget is far less likely to truncate mid-shape, which is
     the common reason a startup tune ships an under-covered config.
 
+    ``--no-flydsl`` is always passed: FlyDSL candidates JIT-compile
+    per kernel during benchmarking and dominate per-shape wall-time
+    on the two targets that include them (bf16_tuned_gemm,
+    a8w8_bpreshuffle_tuned_gemm). Excluding them keeps the candidate
+    pool small enough that more shapes fit inside the startup budget.
+    Operator-driven ``vllm-shim-tune`` runs don't get this flag by
+    default; they keep the full candidate set.
+
     ``env`` is the dict the supervisor will later hand to the backend
     (i.e. ``backend_env`` from main()). Forwarding it to the tune
     subprocess matters: rocm_perf_defaults injects ``AITER_JIT_DIR``
@@ -130,6 +138,7 @@ def _maybe_run_startup_tune(
         str(shim_home),
         "--bucket",
         bucket_for_gpu(gpu),
+        "--no-flydsl",
     ]
     if hot is not None:
         cmd.extend(["--hot", str(hot)])
