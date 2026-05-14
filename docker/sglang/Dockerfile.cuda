@@ -8,6 +8,18 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends haproxy && \
     rm -rf /var/lib/apt/lists/*
 
+# Apply local patches to SGLang before the install/import path has a chance
+# to cache the unpatched source. The base image's /sgl-workspace/sglang is a
+# real git checkout at the pinned tag, and the install is editable, so
+# patching the tree in place updates the installed package too. CUDA has no
+# platform-specific patches today (patches/sglang/cuda/ is intentionally
+# empty); the base/ tier carries the cross-platform fixes. See
+# docs/patches.md for the branch model and scripts/apply-patches.sh.
+COPY patches/ /tmp/patches/
+COPY scripts/ /tmp/scripts/
+RUN bash /tmp/scripts/apply-patches.sh sglang cuda /sgl-workspace/sglang && \
+    rm -rf /tmp/patches /tmp/scripts
+
 # Install transformers from upstream main, past both the base image's pinned
 # version and the latest PyPI release, so newer model architectures (Kimi K2.6
 # etc.) and fixes for them are available without waiting on a release cycle.

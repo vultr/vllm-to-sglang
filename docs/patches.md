@@ -37,6 +37,8 @@ patches/
     │   ├── 0001-fix-compressed-tensors-…patch
     │   ├── 0002-feat-deepseek-…patch
     │   └── 0003-fix-quark-exclude-…patch
+    ├── cuda/                    # only when building Dockerfile.cuda
+    │   └── .gitkeep             # (no platform-specific patches yet)
     └── rocm/                    # only when building Dockerfile.rocm
         ├── 0001-feat-ep_moe-…patch
         └── 0002-feat-quark-mxfp4-triton-…patch
@@ -49,7 +51,12 @@ Rules:
 - **Multi-platform repos** (SGLang runs on both CUDA and ROCm) split
   into `base/` (always applied) and `<platform>/` (rocm, cuda, ...).
   The script applies `base/` first, then the matching platform tier
-  on top.
+  on top. Every supported platform must have a directory under
+  `patches/<repo>/`, even when it carries no platform-specific
+  patches: a `.gitkeep` file keeps the empty dir tracked, and the
+  required-subdir check in `apply-patches.sh` turns a Dockerfile
+  typo (e.g. `cuad` instead of `cuda`) into a build-time error
+  instead of a silent "base only" build.
 - **Filename prefix `NNNN-`** is the apply order. `git format-patch`
   generates it from commit order on the patched branch; the rest of
   the filename comes from the commit subject after sanitization.
@@ -60,7 +67,7 @@ Classification cheat sheet for a new patch:
 |---|---|
 | Pure Python, no `aiter.*` / HIP / CUDA imports | `sglang/base/` |
 | Imports from `aiter.*` or uses MoRI / HIP-specific paths | `sglang/rocm/` |
-| Imports from CUDA-only kernels / flashinfer / NCCL specifics | `sglang/cuda/` (create the dir when first needed) |
+| Imports from CUDA-only kernels / flashinfer / NCCL specifics | `sglang/cuda/` |
 | AITER itself | `aiter/` (mono-platform) |
 
 If a patch's runtime behavior is arch-gated (e.g. `gfx942` only), gate
@@ -271,11 +278,21 @@ image. The AITER cache-key write happens AFTER patching, so the SHA
 captures upstream+patches together (see `docs/aiter.md`,
 "JIT cache namespacing by AITER commit").
 
-The Dockerfile.cuda doesn't currently call `apply-patches.sh` because
-no CUDA-only or cross-platform patches need it. When the first such
-patch lands under `patches/sglang/base/` or `patches/sglang/cuda/`,
-add the matching `RUN bash /tmp/scripts/apply-patches.sh sglang cuda
-/sgl-workspace/sglang` line.
+`docker/sglang/Dockerfile.cuda` does the same for the CUDA platform:
+
+```dockerfile
+COPY patches/ /tmp/patches/
+COPY scripts/ /tmp/scripts/
+RUN bash /tmp/scripts/apply-patches.sh sglang cuda /sgl-workspace/sglang && \
+    rm -rf /tmp/patches /tmp/scripts
+```
+
+`patches/sglang/cuda/` carries no platform-specific patches today, so
+`apply-patches.sh` applies only the `base/` tier and leaves
+`patched/cuda` pointing at `patched/base`. The COPY+RUN pair stays in
+the Dockerfile regardless, so the first CUDA-only patch added to
+`patches/sglang/cuda/` lands in the image automatically. No AITER
+patching on CUDA: AITER is an AMD-only library.
 
 ## Conventions
 
