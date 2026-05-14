@@ -318,9 +318,9 @@ The split into many small modules is deliberate: each piece is pure (or has a si
 
 ## Upstream patches
 
-The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives in `patches/aiter/` and is applied by `scripts/apply-patches.sh`, which replays it via `git am` onto a `patched/rocm` branch rooted at the upstream commit. An AITER version bump that breaks the patch fails the image build loudly via `git am` rather than silently producing an unpatched image. See `docs/patches.md` for the full layout, the dev round-trip workflow (`apply-patches.sh` and `rebuild-patches.sh`), and the conventions around adding or editing a patch.
+The shim's Docker images carry local patches against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patches live in `patches/aiter/` and are applied by `scripts/apply-patches.sh`, which replays each one via `git am` onto a `patched/rocm` branch rooted at the upstream commit. An AITER version bump that breaks any patch fails the image build loudly via `git am` rather than silently producing an unpatched image. See `docs/patches.md` for the full layout, the dev round-trip workflow (`apply-patches.sh` and `rebuild-patches.sh`), and the conventions around adding or editing a patch.
 
-### `aiter-hipblaslt-heuristic.patch`
+### `0001-perf-gradlib-bound-hipBLASLt-candidate-sweep-via-heuristic-API.patch`
 
 **What it changes.** Replaces the `hipblaslt_ext::getAllAlgos` call in `hipblasLtMatmul_findallsols_wrapper` (`gradlib/csrc/hipbsolgemm.cu`) with `hipblasLtMatmulAlgoGetHeuristic`. The heuristic API uses the matmul descriptor (m/n/k, layouts, bias, scaling, dtypes) to filter and rank candidate algorithms by predicted performance and returns the top N. `getAllAlgos` ignores the descriptor and returns every algorithm hipBLASLt knows about for the (GemmType, op_A, op_B, dtype, compute) tuple. The patch also creates the supporting `hipblasLtMatmulPreference_t` and `returnedAlgoCount` objects that the active code had removed.
 
@@ -329,6 +329,21 @@ The shim's Docker images carry one local patch against AITER, applied at image-b
 **Configurable cap.** The candidate count is read from `AITER_MAX_GEMM_CANDIDATES` at run time (default 10, matching the value the commented-out original code used). Setting `AITER_MAX_GEMM_CANDIDATES=2048` effectively recovers the full sweep behavior; intermediate values trade tune time against the risk of the heuristic mis-ranking the truly-optimal algorithm to position N+1 for some shapes.
 
 **Upstream status.** No known upstream PR. The active `getAllAlgos` call replaced what was originally a `hipblasLtMatmulAlgoGetHeuristic` call (still visible commented-out on the line above it); no rationale for the swap is recorded in AITER's git history. When upstream restores the heuristic call or exposes an equivalent knob, drop this patch.
+
+### `0002-feat-triton-enable-AFP4WFP4-GEMM-on-gfx942-via-BF16-decomposition.patch`
+
+**What it changes.** Two coupled edits that together let Quark MXFP4 checkpoints run on MI300X:
+
+1. `aiter/ops/triton/utils/_triton/arch_info.py`: widens `is_fp4_avail()` to include `gfx942` alongside the upstream `gfx950` and `gfx1250`. Every aiter Triton FP4 entrypoint asserts `is_fp4_avail()` unconditionally; without widening, the assert fires before the kernel does anything useful.
+2. `aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json`: ships a hand-rolled default tuning config for the `GEMM-AFP4WFP4` kernel on gfx942. `get_gemm_config` requires the `{arch}-{config_name}.json` file to exist (`fpath_should_exist=True`) and raises `AssertionError` otherwise. Upstream ships only the gfx1250 default, whose `BLOCK_SIZE_K=256 + num_stages=3` would need ~96KB LDS for the B tile alone and won't compile on gfx942's 64KB LDS. The shipped gfx942 config uses `BLOCK_SIZE_K=128 + num_stages=2` to stay within the LDS budget and pins `matrix_instr_nonkdim=16` so the BF16 decomposition lands on m16n16k16 MFMA.
+
+**Why we need it.** gfx942 has no native FP4 MFMA, but the Triton compiler's `tl.dot_scaled` primitive decomposes FP4 inputs to BF16 at the MFMA boundary and runs on the standard BF16 path. The result is correct (slower than native FP4, but functional) on every aiter Triton FP4 kernel; the assert was over-conservative. Without this patch, the first Quark MXFP4 forward (e.g. shared experts on `amd/Kimi-K2.6-MXFP4`) aborts at `assert arch_info.is_fp4_avail(), "MXFP4 is not available on your device"` during CUDA graph capture.
+
+**Why one patch.** The two halves don't make sense apart: the config file is dead without the assert relaxation (the assert fires first), and the assert relaxation crashes on the missing config (the kernel reads the config file on the line after). See `docs/patches.md` ("One logical change per patch") for the convention.
+
+**Performance.** Values in the gfx942 config are not auto-tuned. They are chosen conservatively for correctness over speed. A future sweep of `gemm_afp4wfp4` shapes on MI300X would produce a better default; the shipped file is a placeholder that lets the kernels run.
+
+**Upstream status.** Not upstreamed. AITER would presumably accept a tuned gfx942 default once someone runs the sweep, but the `is_fp4_avail()` widening is a semantic decision (native vs decomposed) the upstream maintainers may or may not want.
 
 ### JIT cache namespacing by AITER commit
 

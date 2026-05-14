@@ -31,16 +31,16 @@ clean.
 ```
 patches/
 ├── aiter/                       # mono-platform repo, flat layout
-│   └── 0001-perf-gradlib-bound-hipBLASLt-…patch
+│   ├── 0001-perf-gradlib-…patch
+│   └── 0002-feat-triton-enable-AFP4WFP4-…patch
 └── sglang/                      # multi-platform repo, tiered layout
     ├── base/                    # applies on every Dockerfile.<platform>
-    │   ├── 0001-fix-compressed-tensors-…patch
-    │   ├── 0002-feat-deepseek-…patch
-    │   └── 0003-fix-quark-exclude-…patch
+    │   ├── 0001-feat-deepseek-…patch
+    │   └── 0002-fix-quark-exclude-…patch
     ├── cuda/                    # only when building Dockerfile.cuda
     │   └── .gitkeep             # (no platform-specific patches yet)
     └── rocm/                    # only when building Dockerfile.rocm
-        ├── 0001-feat-ep_moe-…patch
+        ├── 0001-feat-mori-…patch
         └── 0002-feat-quark-mxfp4-triton-…patch
 ```
 
@@ -65,10 +65,20 @@ Classification cheat sheet for a new patch:
 
 | Touches | Goes in |
 |---|---|
-| Pure Python, no `aiter.*` / HIP / CUDA imports | `sglang/base/` |
+| Pure Python, no `aiter.*` / HIP / CUDA imports, AND has runtime effect on every platform | `sglang/base/` |
 | Imports from `aiter.*` or uses MoRI / HIP-specific paths | `sglang/rocm/` |
 | Imports from CUDA-only kernels / flashinfer / NCCL specifics | `sglang/cuda/` |
 | AITER itself | `aiter/` (mono-platform) |
+
+Two axes have to hold for `base/`: the *code* is cross-platform AND
+the *runtime effect* is cross-platform. A platform-agnostic Python
+edit that only fires under a HIP-only feature flag (e.g. registering
+a class only instantiated by `--moe-a2a-backend=mori`) belongs in the
+platform tier that exercises it, not in `base/`. Put another way:
+`base/` patches should *do* something on every platform they apply
+to. Dead-on-CUDA patches in `base/` bloat the CUDA image build and
+fragment a logical unit of work across tiers; consolidate them with
+their platform-specific siblings instead.
 
 If a patch's runtime behavior is arch-gated (e.g. `gfx942` only), gate
 it in the patched code via `is_gfx95_supported()` or similar; the
@@ -316,6 +326,44 @@ needed.
 
 End with a one-line provenance: `Adapted from <prior work>; not
 upstreamed.` or `Upstream PR: <url>` if applicable.
+
+### One logical change per patch
+
+Each `.patch` file should be the consolidated set of edits for one
+logical change, not an artifact of the debug rhythm that produced it.
+If you discover mid-iteration that the change you're working on
+actually needs an extra fix in a sibling file to land cleanly, fold
+that fix into the same commit (or amend it in) rather than letting it
+ride as a separate `.patch`. Two heuristics for "same logical
+change":
+
+- *Can the patches land independently and still leave the tree in a
+  state that compiles and runs?* If no (one half asserts on the other
+  half's absence), they belong together.
+- *Do the patches share a single motivation paragraph?* If yes, the
+  message wants to be one body, and so should the diff.
+
+The aiter `0002-feat-triton-enable-AFP4WFP4-…` patch is the canonical
+example: shipping the gfx942 GEMM-AFP4WFP4 config is meaningless
+without also widening `is_fp4_avail()` to include gfx942 (the assert
+fires before the config is read), and widening the assert is
+meaningless without the config (the next line will crash on a missing
+file). They're two halves of one feature; one patch.
+
+The cross-tier case is the MoRI EP support patch
+(`rocm/0001-feat-mori-…`), which carries both the `MoriEPMoE`
+registration in compressed-tensors (a pure-Python change that would
+trivially fit `base/`) and the gfx942 Triton dispatch (rocm-only).
+Splitting by tier would put two halves of "make MoRI work with Quark
+MXFP4" in different directories with different numbering; the
+classification rule above (effect AND code both cross-platform)
+keeps them together.
+
+When iterating, the natural flow is "commit each working step on the
+patched branch, then squash before regenerating patches." `git rebase
+-i refs/vllm-shim/upstream` lets you mark related commits for
+`squash`/`fixup`; afterward `scripts/rebuild-patches.sh <repo>`
+re-emits the consolidated `.patch` files.
 
 ### Why patches don't get pushed
 
