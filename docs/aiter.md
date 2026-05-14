@@ -345,6 +345,8 @@ The shim's Docker images carry local patches against AITER, applied at image-bui
 
 **Upstream status.** Not upstreamed. AITER would presumably accept a tuned gfx942 default once someone runs the sweep, but the `is_fp4_avail()` widening is a semantic decision (native vs decomposed) the upstream maintainers may or may not want.
 
+**Not sufficient on its own.** This patch makes the `is_fp4_avail()` asserts pass and supplies the config file the kernel reads, but the kernel still cannot compile unless the bundled Triton knows how to lower `tl.dot_scaled` for gfx942. See "Triton MXFP4 on MI300X" below.
+
 ### JIT cache namespacing by AITER commit
 
 AITER's JIT loader (`aiter/jit/core.py`, `_ensure_loaded`) checks only for `.so` file presence; it does not hash sources. With `AITER_JIT_DIR` anchored on the PV, a pre-existing compiled kernel on disk will be loaded even when the AITER source bytes in the image have changed. The heuristic patch above modifies `module_hipbsolgemm.so` and would be masked by a stale cached binary without this namespacing.
@@ -352,6 +354,25 @@ AITER's JIT loader (`aiter/jit/core.py`, `_ensure_loaded`) checks only for `.so`
 The Dockerfile reads `git rev-parse --short=12 HEAD` from `/sgl-workspace/aiter` *after* patches have been applied. HEAD at that point is the tip of `patched/rocm`, i.e. the upstream commit with patches replayed on top, so the captured SHA reflects *both* the AITER version and the local patches. The result is written to `/etc/vllm-shim/aiter-cache-key`. At launch, `vllm_shim.cli.rocm_perf.aiter_cache_key` reads that file and `rocm_perf_defaults` composes `AITER_JIT_DIR` as `$VLLM_SHIM_HOME/aiter/jit/<patched_aiter_sha>`. Bumping AITER's pinned version (`scripts/sync-repos.sh::AITER_VERSION`) *or* editing any patch under `patches/aiter/` rotates the SHA, the JIT dir moves to a fresh subdirectory under the same PV, and AITER recompiles. Old `jit/<old-sha>/` trees become orphaned but harmless; an operator can prune them on the next PV cleanup.
 
 If the file is missing or empty (CUDA images, dev boxes, image builds that did not run the AITER SHA capture step), the key falls back to the literal string `default` and the JIT dir is `$VLLM_SHIM_HOME/aiter/jit/default`. The same fallback applies to any host that does not run the ROCm Dockerfile, so the read side stays well-defined.
+
+## Triton MXFP4 on MI300X
+
+Every AITER FP4 Triton kernel (`gemm_afp4wfp4`, `moe_op_mxfp4*`, `fused_gemm_afp4wfp4_*`, `batched_gemm_afp4wfp4`) compiles a `tt.dot_scaled` op with `e2m1` operands. The AMD backend of Triton lowers that op per GPU architecture, and gfx942 (CDNA3 / MI300X) was a late addition.
+
+**The problem.** The `lmsysorg/sglang-rocm` base image bundles a source checkout of Triton at `/sgl-workspace/triton-custom`, installed editable into the SGLang venv. As of the `v0.5.11-rocm720-mi30x-20260508` image, that checkout is pinned at upstream Triton commit `4227045199` (2026-01-15), which only lowers `tl.dot_scaled` for gfx950 (CDNA4) and gfx11/gfx12 (RDNA3/4). On gfx942 the compile aborts in `ConvertTritonAMDGPUToLLVM` with `LLVM ERROR: Unsupported DotScaleOp found when converting TritonGPU to LLVM`. Daily base-image rebuilds advance SGLang but not the Triton pin, so a newer image tag does not fix this.
+
+**The fix.** Upstream Triton [PR #9646](https://github.com/triton-lang/triton/pull/9646) ("[AMD] Use common path for gfx942 scaled dot emulation", merged 2026-03-13) routes gfx942 through the `DecomposeAMDScaledBlocked` pattern, which emulates the scaled dot as a BF16 upcast plus a standard BF16 MFMA. `docker/sglang/Dockerfile.rocm` checks the bundled Triton checkout out to a post-#9646 commit (`TRITON_COMMIT`, upstream `main` HEAD at authoring time) and reinstalls it editable before the AITER install. The pinned commit is pristine upstream Triton, so this is "the Triton SGLang already expected, just newer," not a fork.
+
+**Build gotchas absorbed by the Dockerfile step:**
+
+- **The CMake build dir must be wiped.** Triton's CMake cache lives at repo-root `build/`, not `python/build/`. The base image's cache hard-pins `LLVM_SYSPATH` to the old commit's LLVM; without `rm -rf build` the new source compiles against stale MLIR headers and fails with `marked 'final', but is not virtual` errors.
+- **The LLVM pin moves with the commit.** `cmake/llvm-hash.txt` differs between the old and new Triton commits. Wiping the build dir lets Triton download the matching LLVM. The newer LLVM tarball ships `bin/clang++`, which the nvidia backend's GSAN runtime build requires (the older one did not).
+- **The nvidia backend cannot be dropped.** Core `TritonGPUTransforms` sources `#include` the nvidia NVWS dialect's TableGen headers, so a ROCm-only build still has to compile the nvidia backend. It is wasted work on an AMD image but not separable in this Triton version.
+- **`MAX_JOBS` is capped.** Triton's `setup.py` defaults Ninja to `2 * cpu_count()` parallel C++ jobs. MLIR/LLVM translation units peak at 1-2GB+ each, so the default OOM-kills the build daemon on a memory-constrained builder (a 32GB WSL2 VM, for example). The Dockerfile sets `MAX_JOBS=6`, trading wall time for headroom; override the `ARG` on a larger builder.
+
+**Relationship to the aiter `0002` patch.** The patch and the Triton bump are both required and neither is sufficient alone. The patch widens `is_fp4_avail()` so the asserts pass and ships the gfx942 config so `get_gemm_config` finds a file; the Triton bump makes the kernel actually lower to machine code. With an unbumped Triton, the patch just moves the failure from an assert to an LLVM error.
+
+**When to drop the bump.** Once a base image tag ships a Triton pin at or past PR #9646, delete the `TRITON_COMMIT` step from `docker/sglang/Dockerfile.rocm`. Check with `git -C /sgl-workspace/triton-custom log -1 --format=%H` inside the base image and compare against the merge commit of #9646 (`e1c37ca`).
 
 ## What this is not
 
