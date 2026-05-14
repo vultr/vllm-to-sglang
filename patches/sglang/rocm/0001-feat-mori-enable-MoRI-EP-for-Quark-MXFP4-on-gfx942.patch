@@ -1,0 +1,140 @@
+From 2b1d59fd2e411ecc52fe4ee24ffa47c11dee53f3 Mon Sep 17 00:00:00 2001
+From: Matthew Harris <byte@byteflux.net>
+Date: Wed, 13 May 2026 23:58:11 -0400
+Subject: [PATCH 1/2] feat(mori): enable MoRI EP for Quark MXFP4 on gfx942
+
+AITER's fused_moe() dispatcher routes MXFP4 + per_1x32 to CK GEMM
+kernels in csrc/ck_gemm_moe_2stages/ whose dispatch.h ifdefs enable
+them only on gfx950 / gfx12 / gfx9.5. On gfx942 the function falls
+through to the bf16 path or aborts in the FP4 activation quant call
+(dynamic_per_group_scaled_quant_fp4 device not support
+Float4_e2m1fn_x2 dtype).
+
+AITER ships parallel Triton kernels in aiter/ops/triton/moe/moe_op_
+mxfp4*.py that use tl.dot_scaled, which the compiler decomposes to
+BF16 upcast + BF16 MFMA. Those Triton kernels work on gfx942. This
+patch wires them into SGLang's MoRI EP path and adds the
+compressed-tensors registration MoRI EP needs to load Quark MXFP4
+checkpoints.
+
+Two changes that belong together:
+
+1. ep_moe/layer.py + quark/schemes/quark_w4a4_mxfp4_moe.py: add a
+   triton_mxfp4_dispatch path lit when AITER is enabled and
+   is_gfx95_supported() is False. On gfx95+ the flag stays False and
+   the existing CK path runs unchanged. Skips e8m0_shuffle of weight
+   scales under the fallback (Triton kernels take raw checkpoint
+   scales with swizzle_mx_b=False; only CK wants pre-shuffled). The
+   weight-byte preshuffle is already gated on gfx95 via
+   _is_shuffle_moe_mxfp4. Short-circuits
+   QuarkW4A4MXFp4MoE.apply_weights when the fallback is set to skip
+   the MoeRunner -> AITER fused_moe -> CK route.
+
+2. compressed_tensors/compressed_tensors.py: register MoriEPMoE in
+   target_scheme_map alongside FusedMoE and DeepEPMoE.
+   _add_fused_moe_to_target_scheme_map aliases the configured
+   'Linear' scheme onto fused-MoE class names so compressed-tensors
+   checkpoints whose targets list only 'Linear' still match the
+   runtime fused-MoE class. Without MoriEPMoE in the map, every
+   compressed-tensors quantized MoE checkpoint (Kimi K2.5/K2.6 INT4,
+   etc.) fails at model init with
+   'Unable to find matching target for ... in the compressed-tensors
+   config' the moment --moe-a2a-backend=mori is set.
+
+Gated on SGLANG_MORI_MXFP4_TRITON, opt-in so the non-EP path can be
+validated independently. The non-EP Quark MXFP4 Triton fallback is a
+separate companion patch.
+
+The compressed-tensors registration is technically platform-agnostic
+Python, but MoriEPMoE is only instantiated on the MoRI path which is
+ROCm-only in practice, so the change rides with the MoRI EP work it
+exists to support.
+
+Adapted from prior MXFP4 + MI300X work (GLM-5.x); not upstreamed.
+---
+ python/sglang/srt/layers/moe/ep_moe/layer.py  | 52 +++++++++++++++++++
+ .../compressed_tensors/compressed_tensors.py  |  1 +
+ 2 files changed, 53 insertions(+)
+
+diff --git a/python/sglang/srt/layers/moe/ep_moe/layer.py b/python/sglang/srt/layers/moe/ep_moe/layer.py
+index f201d45..fbee246 100644
+--- a/python/sglang/srt/layers/moe/ep_moe/layer.py
++++ b/python/sglang/srt/layers/moe/ep_moe/layer.py
+@@ -53,6 +53,17 @@ _is_npu = is_npu()
+ _is_fp8_fnuz = is_fp8_fnuz()
+ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ 
++# MoRI EP MXFP4 Triton fallback. Opt-in via SGLANG_MORI_MXFP4_TRITON=1;
++# bypasses AITER's fused_moe -> CK on gfx942 inside MoRI dispatch and
++# calls the Triton MXFP4 kernels (companion to the non-EP fallback in
++# quark_w4a4_mxfp4_moe.py). Requires SGLANG_MORI_DISPATCH_DTYPE=bf16:
++# the Triton path takes BF16 activations and cannot consume FP4-dispatch
++# tensors. We gate the import lazily so non-MXFP4 setups never pay the
++# Triton load cost.
++_use_mori_mxfp4_triton = (
++    _use_aiter and get_bool_env_var("SGLANG_MORI_MXFP4_TRITON")
++)
++
+ if _use_aiter:
+     from aiter import ActivationType, QuantType
+     from aiter.fused_moe import fused_moe
+@@ -738,6 +749,47 @@ class MoriEPMoE(DeepEPMoE):
+                 quant_type = QuantType.per_1x32
+ 
+         if is_quark_w4a4:
++            # gfx942 MoRI EP MXFP4 Triton fallback (opt-in via
++            # SGLANG_MORI_MXFP4_TRITON=1). Routes dispatch outputs into
++            # the Triton MXFP4 kernels instead of AITER's CK fused_moe.
++            # Requires BF16 dispatch (SGLANG_MORI_DISPATCH_DTYPE=bf16);
++            # if the dispatcher handed us FP4 tensors we fall through to
++            # the existing fused_moe path and let it surface the failure
++            # rather than silently mishandling the dtype here.
++            if (
++                _use_mori_mxfp4_triton
++                and dispatch_a1.dtype != torch.float4_e2m1fn_x2
++            ):
++                from sglang.srt.layers.quantization.quark.schemes.triton_mxfp4_dispatch import (
++                    triton_mxfp4_moe,
++                )
++
++                triton_out = triton_mxfp4_moe(
++                    hidden_states=dispatch_a1,
++                    w13_weight=self.w13_weight,
++                    w2_weight=self.w2_weight,
++                    w13_weight_scale=self.w13_weight_scale,
++                    w2_weight_scale=self.w2_weight_scale,
++                    topk_weights=dispatch_weights,
++                    topk_ids=dispatch_ids,
++                )
++                from sglang.srt.layers.moe.token_dispatcher import (
++                    DispatchOutputChecker,
++                )
++
++                combine_input_wrapper = (
++                    MoriEPNormalCombineInput
++                    if DispatchOutputChecker.format_is_deepep_normal(
++                        dispatch_output
++                    )
++                    else MoriEPLLCombineInput
++                )
++                return combine_input_wrapper(
++                    hidden_states=triton_out,
++                    topk_ids=dispatch_output.origin_topk_ids,
++                    topk_weights=dispatch_output.origin_topk_weights,
++                )
++
+             if hasattr(torch, "float4_e2m1fn_x2"):
+                 w13_weight = self.w13_weight.view(torch.float4_e2m1fn_x2)
+                 w2_weight = self.w2_weight.view(torch.float4_e2m1fn_x2)
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+index f276fca..af0da5d 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+@@ -202,6 +202,7 @@ class CompressedTensorsConfig(QuantizationConfig):
+             return
+         self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+         self.target_scheme_map["DeepEPMoE"] = self.target_scheme_map["Linear"]
++        self.target_scheme_map["MoriEPMoE"] = self.target_scheme_map["Linear"]
+ 
+     @property
+     def weight_block_size(self) -> Optional[List[int]]:

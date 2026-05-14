@@ -1,4 +1,4 @@
-From edce7122cf3647f4c4f2b8f7da960816bf17fea4 Mon Sep 17 00:00:00 2001
+From ccdeeab9374af3bdee6df43c73fbd8fbe13819f1 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 2/2] feat(quark): route MXFP4 MoE through AITER Triton kernels

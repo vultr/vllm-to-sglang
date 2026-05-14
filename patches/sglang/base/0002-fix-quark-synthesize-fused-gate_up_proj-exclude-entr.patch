@@ -1,7 +1,7 @@
-From 6e0f486a1c43dccd285cabea3282184d7ca158c5 Mon Sep 17 00:00:00 2001
+From c81189d4020a3dc60f72e8a1e1a4955fed359217 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 3/3] fix(quark): synthesize fused gate_up_proj exclude entries
+Subject: [PATCH 2/2] fix(quark): synthesize fused gate_up_proj exclude entries
  from HF names
 
 SGLang fuses gate_proj + up_proj into a single gate_up_proj linear
