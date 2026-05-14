@@ -86,6 +86,7 @@ Three things to note:
 - **`aiter` lands in SGLang's 3.10 `/opt/venv`.** That's where SGLang lives and where it expects to find aiter at import time.
 - **vllm-shim lives in a separate 3.12 venv at `/opt/shim`.** The launcher spawns SGLang via the `sglang` console script (resolved via PATH); the script's shebang routes execution into `/opt/venv/bin/python`, so the two interpreters never need to share a `sys.path`. See `docs/backends.md` for the launcher fallback that makes this work.
 - **PATH ordering is load-bearing.** `/opt/shim/bin` first ensures `vllm` resolves to our entrypoint; `/opt/venv/bin` next ensures `sglang` resolves to upstream's wrapper.
+- **Local patches against AITER and SGLang.** The Dockerfile.rocm also COPYs `patches/` and `scripts/` into the image and runs `scripts/apply-patches.sh aiter rocm /sgl-workspace/aiter` and `scripts/apply-patches.sh sglang rocm /sgl-workspace/sglang` *before* the `uv pip install` step, so the installed packages reflect our local fixes. See `docs/patches.md` for the layout and the dev round-trip via `scripts/rebuild-patches.sh`.
 
 ## Build context
 

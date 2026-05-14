@@ -318,7 +318,7 @@ The split into many small modules is deliberate: each piece is pure (or has a si
 
 ## Upstream patches
 
-The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives in `patches/aiter/` and is applied by `scripts/apply-patches.sh`, which replays it via `git am` onto a `patched/rocm` branch rooted at the upstream commit. An AITER version bump that breaks the patch fails the image build loudly via `git am` rather than silently producing an unpatched image. See `scripts/apply-patches.sh` and `scripts/rebuild-patches.sh` for the full apply/rebuild workflow.
+The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives in `patches/aiter/` and is applied by `scripts/apply-patches.sh`, which replays it via `git am` onto a `patched/rocm` branch rooted at the upstream commit. An AITER version bump that breaks the patch fails the image build loudly via `git am` rather than silently producing an unpatched image. See `docs/patches.md` for the full layout, the dev round-trip workflow (`apply-patches.sh` and `rebuild-patches.sh`), and the conventions around adding or editing a patch.
 
 ### `aiter-hipblaslt-heuristic.patch`
 

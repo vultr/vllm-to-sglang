@@ -124,6 +124,10 @@ Some constants are deliberately code-only (port offsets, shutdown grace, metrics
 
 The directory layout `docker/<backend>/Dockerfile.<platform>` *is* the matrix. Jenkins (`Jenkinsfile`) discovers combinations via `findFiles(glob: 'docker/*/Dockerfile.*')`, builds each in parallel via `docker buildx build` with registry-backed caching, and tags `${REGISTRY_URL}:${TAG}-${BACKEND}-${PLATFORM}`. Adding a backend or platform means dropping a Dockerfile at the right path; no pipeline edits. See `docs/build-and-deploy.md`.
 
+## Upstream patches
+
+Local patches against AITER and SGLang live at the repo root under `patches/<repo>/[<tier>/]` and are applied by `scripts/apply-patches.sh` at image-build time. The script replays each `.patch` as a commit on a `patched/<platform>` branch (built on `patched/base` for multi-platform repos like sglang). `scripts/rebuild-patches.sh` regenerates the patch tree from the same branches after the dev edits them in `repos/<repo>/`. Patches are byte-stable across rebuilds (fixed author/date, no GPG signing). See `docs/patches.md` for the layout, the branch model, end-to-end workflows, and the gotchas (stale `refs/vllm-shim/upstream` after `sync-repos.sh`, etc.).
+
 ## Where to read more
 
-Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `rocm-perf.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.
+Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `patches.md`, `rocm-perf.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.

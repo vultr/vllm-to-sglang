@@ -33,6 +33,9 @@ vllm-shim/
 │       └── tests/
 ├── docker/                      # per-(backend, platform) Dockerfiles
 ├── docs/                        # this directory
+├── patches/                     # local patches against upstream (aiter, sglang)
+├── scripts/                     # apply/rebuild patches, sync upstream repos
+├── repos/                       # gitignored checkouts the patches target
 └── Jenkinsfile                  # CI matrix
 ```
 
@@ -163,6 +166,34 @@ A few conventions worth knowing before writing changes:
 - **No comments explaining what code does.** Names should carry that. Comments are reserved for *why*: the long block in `Supervisor._terminate_all` is the canonical example.
 - **Absolute imports always.** Enforced by ruff's TID rule.
 - **No prose em dashes in source files or docs.** Use commas, semicolons, colons, or periods.
+
+## Editing upstream patches
+
+The shim carries local patches against AITER and SGLang under
+`patches/<repo>/[<tier>/]`. The dev workflow is:
+
+```bash
+# Populate repos/<repo>/ checkouts at the pinned upstream commits.
+scripts/sync-repos.sh
+
+# Replay current patches onto patched/<platform> branches in each
+# checkout. Idempotent on re-runs.
+scripts/apply-patches.sh aiter  rocm repos/aiter
+scripts/apply-patches.sh sglang rocm repos/sglang
+
+# Edit files on the patched/<platform> branch, commit with a
+# conventional-commits-style subject (the subject becomes the patch
+# filename). Use `-c commit.gpgsign=false` so SHAs stay byte-stable.
+cd repos/sglang && git checkout patched/rocm
+# ...hack, hack, commit...
+
+# Regenerate the patches/ tree.
+scripts/rebuild-patches.sh sglang
+```
+
+See `docs/patches.md` for the full workflow, the branch model, the
+classification rules between `base/` and `<platform>/`, and the
+gotchas around `sync-repos.sh` and `commit.gpgsign`.
 
 ## Adding a new package
 

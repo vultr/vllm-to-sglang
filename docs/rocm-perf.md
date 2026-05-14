@@ -38,7 +38,7 @@ The Dockerfile defends against that. After `scripts/apply-patches.sh` has replay
 
 When the file is absent or empty (CUDA images, dev boxes, hand-rolled images that did not run the SHA capture step) the key falls back to the literal `default`, so `AITER_JIT_DIR` becomes `$VLLM_SHIM_HOME/aiter/jit/default`. That branch is fine because those environments share the same unpatched AITER bytes anyway.
 
-Because the SHA is `rev-parse HEAD` of `patched/rocm` (upstream pin + replayed patches), editing any patch under `patches/aiter/` and rebuilding the image also rotates the JIT cache key. The `apply-patches.sh` machinery uses a fixed author identity and date so the replayed-commit SHAs are byte-stable across rebuilds, and the cache key only changes when patch content actually changes.
+Because the SHA is `rev-parse HEAD` of `patched/rocm` (upstream pin + replayed patches), editing any patch under `patches/aiter/` and rebuilding the image also rotates the JIT cache key. The `apply-patches.sh` machinery uses a fixed author identity and date so the replayed-commit SHAs are byte-stable across rebuilds, and the cache key only changes when patch content actually changes. See `docs/patches.md` for the apply/rebuild workflow that makes this byte-stability work.
 
 ## MI300-class additions
 
