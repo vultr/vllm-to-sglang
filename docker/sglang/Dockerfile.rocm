@@ -47,9 +47,9 @@ ARG TRITON_COMMIT=d3156632257bc363a12716facc7f92f55428815f
 # MAX_JOBS caps Ninja parallelism. Triton's setup.py defaults to
 # 2 * cpu_count() concurrent C++ jobs; MLIR/LLVM translation units peak
 # at 1-2GB+ each, so the default OOM-kills the build daemon on a
-# memory-constrained builder (e.g. a 32GB WSL2 VM). 6 keeps peak
-# compile memory well under that ceiling at the cost of wall time.
-ARG MAX_JOBS=6
+# memory-constrained builder (e.g. a 32GB WSL2 VM). 8 keeps peak
+# compile memory under that ceiling at the cost of wall time.
+ARG MAX_JOBS=8
 RUN cd /sgl-workspace/triton-custom && \
     git fetch origin --quiet && \
     git -c advice.detachedHead=false checkout ${TRITON_COMMIT} && \
