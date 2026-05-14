@@ -1,4 +1,4 @@
-From a037644879475a1eaa8148e163495d163a4bc5cc Mon Sep 17 00:00:00 2001
+From e4e468f9337af0418e4b865aaa813714f67da155 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 3/3] fix(communicator): disable MLP allreduce fusion under DP

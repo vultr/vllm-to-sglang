@@ -1,4 +1,4 @@
-From 26906a66b631c35b9cff00758c95225cd280a741 Mon Sep 17 00:00:00 2001
+From c2186052adefebb7a45be9f7beaac70adb7ff7bd Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 2/3] feat(mori): enable MoRI EP for Quark MXFP4 on gfx942
@@ -42,21 +42,23 @@ Three changes that belong together:
    config' the moment --moe-a2a-backend=mori is set.
 
 3. quark/schemes/triton_mxfp4_dispatch.py: under MoRI EP the
-   block-align step routes through aiter.moe_sorting_opus_fwd instead
-   of the SGLang Triton align kernels. MoRI dispatch hands a
+   block-align step routes through aiter.moe_sorting_fwd instead of
+   the SGLang Triton align kernels. MoRI dispatch hands a
    fixed-capacity padded buffer (num_max_dispatch_tokens_per_rank *
    world_size rows); only the first num_recv_tokens rows are live and
    topk_ids still carries global expert ids. The SGLang align kernels
    index a per-expert counter by raw topk_ids values, so the buffer's
    padding rows walk that counter off the end and fault.
-   moe_sorting_opus_fwd is the same primitive AITER's own CK
-   fused_moe uses: it does the global to local expert remap via
-   expert_mask, emits -1 expert ids for padding blocks (the Triton
-   GEMM writes zeros for those), and bounds real work via
-   num_valid_ids. It is picked over the CK moe_sorting_fwd because it
-   takes an external workspace tensor rather than allocating one
-   internally, so it runs inside the CUDA-graph capture region; the
-   workspace and its output buffers are pre-allocated in the dispatch
+   moe_sorting_fwd is the primitive AITER's own fused_moe uses by
+   default: it does the global to local expert remap via expert_mask,
+   emits -1 expert ids for padding blocks (the Triton GEMM writes
+   zeros for those), and bounds real work via num_valid_ids[0], which
+   doubles as the GEMM's num_tokens_post_padded. Its module .so ships
+   prebuilt in the base image, so the first call is a dlopen, not a
+   JIT compile. It allocates its sort scratch internally, but the
+   size is a pure function of the (static) dispatch dims, so that
+   allocation lands in the CUDA-graph pool cleanly during capture;
+   the output buffers it writes are pre-allocated in the dispatch
    module's workspace cache. Non-EP keeps the align-kernel path
    unchanged. ep_moe/layer.py passes expert_mask and the dispatch
    recv-token count into triton_mxfp4_moe to drive this path.
@@ -74,8 +76,8 @@ Adapted from prior MXFP4 + MI300X work (GLM-5.x); not upstreamed.
 ---
  python/sglang/srt/layers/moe/ep_moe/layer.py  |  54 ++++++++
  .../compressed_tensors/compressed_tensors.py  |   1 +
- .../quark/schemes/triton_mxfp4_dispatch.py    | 124 ++++++++++++++++--
- 3 files changed, 170 insertions(+), 9 deletions(-)
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 115 ++++++++++++++++--
+ 3 files changed, 160 insertions(+), 10 deletions(-)
 
 diff --git a/python/sglang/srt/layers/moe/ep_moe/layer.py b/python/sglang/srt/layers/moe/ep_moe/layer.py
 index f201d45..f25cf47 100644
@@ -162,51 +164,49 @@ index f276fca..af0da5d 100644
      @property
      def weight_block_size(self) -> Optional[List[int]]:
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index 3354a03..3243878 100644
+index 3354a03..12eec83 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-@@ -30,11 +30,14 @@ _triton_ops_loaded = False
+@@ -30,11 +30,12 @@ _triton_ops_loaded = False
  _fused_moe_mxfp4 = None
  _fused_moe_mxfp4_silu = None
  _align_kernels = None
-+_moe_sorting_opus_fwd = None
-+_moe_sorting_opus_get_workspace_size = None
++_moe_sorting_fwd = None
  
  
  def _load_triton_ops():
      global _triton_ops_loaded, _fused_moe_mxfp4, _fused_moe_mxfp4_silu
-     global _align_kernels
-+    global _moe_sorting_opus_fwd, _moe_sorting_opus_get_workspace_size
+-    global _align_kernels
++    global _align_kernels, _moe_sorting_fwd
      if _triton_ops_loaded:
          return
      from aiter.ops.triton.moe.moe_op_mxfp4 import fused_moe_mxfp4
-@@ -46,6 +49,16 @@ def _load_triton_ops():
+@@ -46,6 +47,16 @@ def _load_triton_ops():
          _moe_align_block_size_stage4_kernel,
      )
  
-+    # MoRI EP path only. moe_sorting_opus_fwd is the block-align primitive
-+    # AITER's own CK fused_moe uses by default; unlike the CK moe_sorting_fwd
-+    # it takes an external workspace tensor rather than allocating one
-+    # internally, so it can run inside the CUDA-graph capture region. Its
-+    # companion get_workspace_size is a host-side size computation.
-+    from aiter.ops.moe_sorting_opus import (
-+        moe_sorting_opus_fwd,
-+        moe_sorting_opus_get_workspace_size,
-+    )
++    # MoRI EP path only. moe_sorting_fwd is the block-align primitive
++    # AITER's own fused_moe uses by default; it does the global->local
++    # expert remap from expert_mask that the SGLang Triton align kernels
++    # cannot. Its module .so ships prebuilt in the base image, so the
++    # first call is a dlopen rather than a JIT compile. It allocates its
++    # sort scratch internally, but the size is a pure function of the
++    # (static) dispatch dims, so that allocation lands in the CUDA-graph
++    # pool cleanly during capture.
++    from aiter.ops.moe_sorting import moe_sorting_fwd
 +
      _fused_moe_mxfp4 = fused_moe_mxfp4
      _fused_moe_mxfp4_silu = fused_moe_mxfp4_silu
      _align_kernels = (
-@@ -54,6 +67,8 @@ def _load_triton_ops():
+@@ -54,6 +65,7 @@ def _load_triton_ops():
          _moe_align_block_size_stage3_kernel,
          _moe_align_block_size_stage4_kernel,
      )
-+    _moe_sorting_opus_fwd = moe_sorting_opus_fwd
-+    _moe_sorting_opus_get_workspace_size = moe_sorting_opus_get_workspace_size
++    _moe_sorting_fwd = moe_sorting_fwd
      _triton_ops_loaded = True
      logger.info("Loaded Triton MXFP4 MoE kernels for gfx942 fallback")
  
-@@ -80,13 +95,39 @@ def _ceil_div(a, b):
+@@ -80,13 +92,39 @@ def _ceil_div(a, b):
  _workspace_cache: dict = {}
  
  
@@ -240,37 +240,30 @@ index 3354a03..3243878 100644
 -    max_padded = num_valid + num_experts * _BLOCK_M - top_k
 +    # align_experts bounds the per-expert block padding the sort step emits.
 +    # Under MoRI EP it is the GLOBAL expert count: only the local experts
-+    # carry weights, but topk_ids holds global expert ids and
-+    # moe_sorting_opus_fwd sizes its output by that global count. Non-EP it
-+    # equals num_experts. num_experts itself stays local: it sizes the
-+    # per-expert GEMM scale vectors, which the Triton kernel indexes with
-+    # the local expert id the sort emits.
++    # carry weights, but topk_ids holds global expert ids and moe_sorting_fwd
++    # sizes its output by that global count. Non-EP it equals num_experts.
++    # num_experts itself stays local: it sizes the per-expert GEMM scale
++    # vectors, which the Triton kernel indexes with the local expert id the
++    # sort emits.
 +    max_padded = num_valid + align_experts * _BLOCK_M - top_k
      max_blocks = _ceil_div(max_padded, _BLOCK_M)
  
      ws = SimpleNamespace(
-@@ -109,13 +150,32 @@ def _get_workspace(M, top_k, num_experts, hidden_dim, inter_dim, device, dtype):
+@@ -109,13 +147,25 @@ def _get_workspace(M, top_k, num_experts, hidden_dim, inter_dim, device, dtype):
              max_padded, 1, dtype=torch.float32, device=device
          ),
          output=torch.empty(M, hidden_dim, dtype=dtype, device=device),
-+        # MoRI EP path only: moe_sorting_opus_fwd output/scratch buffers.
-+        # sorted_weights is a required output slot the Triton GEMM does not
-+        # consume; num_valid_ids[0] is the post-padding token count that
-+        # feeds the GEMM as num_tokens_post_padded; moe_sort_workspace is the
-+        # kernel's scratch, pre-allocated so the capture region stays
-+        # allocation-free.
++        # MoRI EP path only: moe_sorting_fwd output buffers. sorted_weights
++        # is a required output slot the Triton GEMM does not consume;
++        # num_valid_ids[0] is the post-padding token count that feeds the
++        # GEMM as num_tokens_post_padded. moe_sorting_fwd allocates its own
++        # internal sort scratch.
 +        sorted_weights=None,
 +        num_valid_ids=None,
-+        moe_sort_workspace=None,
      )
 +    if ep_mode:
 +        ws.sorted_weights = torch.empty(max_padded, dtype=torch.float32, device=device)
 +        ws.num_valid_ids = torch.empty(2, dtype=torch.int32, device=device)
-+        ws_size = _moe_sorting_opus_get_workspace_size(M, align_experts, top_k, 0)
-+        if ws_size > 0:
-+            ws.moe_sort_workspace = torch.empty(
-+                ws_size, dtype=torch.uint8, device=device
-+            )
      _workspace_cache[key] = ws
      logger.info(
 -        "Allocated MXFP4 MoE workspace: M=%d top_k=%d max_padded=%d device=%s",
@@ -283,7 +276,7 @@ index 3354a03..3243878 100644
          device,
      )
      return ws
-@@ -161,6 +221,7 @@ def triton_mxfp4_moe(
+@@ -161,6 +211,7 @@ def triton_mxfp4_moe(
      topk_weights: torch.Tensor,
      topk_ids: torch.Tensor,
      expert_mask: Optional[torch.Tensor] = None,
@@ -291,7 +284,7 @@ index 3354a03..3243878 100644
  ) -> torch.Tensor:
      _load_triton_ops()
  
-@@ -172,10 +233,55 @@ def triton_mxfp4_moe(
+@@ -172,10 +223,54 @@ def triton_mxfp4_moe(
      dtype = hidden_states.dtype
      num_valid_tokens = M * top_k
  
@@ -299,8 +292,8 @@ index 3354a03..3243878 100644
 +    # MoRI EP hands a fixed-capacity dispatch buffer: only the experts local
 +    # to this rank carry weights, but topk_ids still holds global expert ids
 +    # and expert_mask (global length, local experts = 1) marks them. In that
-+    # mode the block-align step must run through moe_sorting_opus_fwd, which
-+    # does the global->local expert remap and emits -1 expert ids for the
++    # mode the block-align step must run through moe_sorting_fwd, which does
++    # the global->local expert remap and emits -1 expert ids for the
 +    # dispatch buffer's padding rows (the Triton GEMM writes zeros for those).
 +    # The SGLang Triton align kernels cannot: they index a per-expert counter
 +    # by raw topk_ids values and walk off the end on the padding rows. Non-EP
@@ -327,7 +320,7 @@ index 3354a03..3243878 100644
 +        # moe_buf; no sentinel fill_ needed. moe_buf reuses ws.output (same
 +        # [M, hidden_dim] shape) since ws.output is fully overwritten by the
 +        # final reduce below.
-+        _moe_sorting_opus_fwd(
++        _moe_sorting_fwd(
 +            topk_ids,
 +            topk_weights,
 +            ws.sorted_token_ids,
@@ -339,7 +332,6 @@ index 3354a03..3243878 100644
 +            _BLOCK_M,
 +            expert_mask,
 +            num_local_tokens,
-+            ws.moe_sort_workspace,
 +            0,
 +        )
 +        num_tokens_post_padded = ws.num_valid_ids[:1]
@@ -350,7 +342,7 @@ index 3354a03..3243878 100644
  
      ws.stage1_out.zero_()
      _fused_moe_mxfp4_silu(
-@@ -190,7 +296,7 @@ def triton_mxfp4_moe(
+@@ -190,7 +285,7 @@ def triton_mxfp4_moe(
          topk_ids=topk_ids,
          sorted_token_ids=ws.sorted_token_ids,
          expert_ids=ws.expert_ids,
@@ -359,7 +351,7 @@ index 3354a03..3243878 100644
          mul_routed_weight=False,
          top_k=top_k,
          swizzle_mx_a=False,
-@@ -215,7 +321,7 @@ def triton_mxfp4_moe(
+@@ -215,7 +310,7 @@ def triton_mxfp4_moe(
          topk_ids=topk_ids,
          sorted_token_ids=ws.sorted_token_ids,
          expert_ids=ws.expert_ids,
