@@ -1,3 +1,8 @@
+From 05d111224471f67b299f10e2789daf67167a746b Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 3/3] quark-exclude-fused-names
+
 vllm-shim local patch: synthesize fused exclude entries in Quark
 config so layers HF-named gate_proj / up_proj that should be skipped
 also match SGLang's fused gate_up_proj.
@@ -19,13 +24,18 @@ unchanged. Deduped via dict.fromkeys so callers that already provide
 fused names in the original config see no duplicates.
 
 Adapted from prior MXFP4 + MI300X work; no upstream PR.
+---
+ .../sglang/srt/layers/quantization/quark/quark.py   | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
 
+diff --git a/python/sglang/srt/layers/quantization/quark/quark.py b/python/sglang/srt/layers/quantization/quark/quark.py
+index ad3546a..954c17b 100644
 --- a/python/sglang/srt/layers/quantization/quark/quark.py
 +++ b/python/sglang/srt/layers/quantization/quark/quark.py
-@@ -164,6 +164,19 @@
+@@ -163,6 +163,19 @@ class QuarkConfig(QuantizationConfig):
+             q_proj_q_config = cast(dict[str, Any], layer_quant_config.get("*q_proj"))
              if q_proj_q_config is not None:
                  q_proj_q_config["output_tensors"] = None
--
 +        # Synthesize fused exclude entries: SGLang fuses gate_proj+up_proj
 +        # into gate_up_proj at model build, but Quark exclude lists use HF
 +        # unfused names. Without this synthesis the fused linear escapes
@@ -39,7 +49,6 @@ Adapted from prior MXFP4 + MI300X work; no upstream PR.
 +            if ".up_proj" in e:
 +                additions.append(e.replace(".up_proj", ".gate_up_proj"))
 +        config["exclude"] = list(dict.fromkeys(excludes + additions))
-+
+ 
          return cls(
              quant_config=config,
-             kv_cache_group=kv_cache_group,

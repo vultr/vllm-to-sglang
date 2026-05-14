@@ -1,3 +1,8 @@
+From f806b4082398e3db2b0af32c5b2170d45683fce4 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 2/2] quark-mxfp4-triton-gfx942
+
 vllm-shim local patch: route Quark MXFP4 MoE through AITER's Triton
 kernels on gfx942 (MI300X) instead of the CK kernels that are
 compile-time excluded for that arch.
@@ -50,7 +55,14 @@ gated separately on `SGLANG_MORI_MXFP4_TRITON` in
 first.
 
 Adapted from prior MXFP4 + MI300X work (GLM-5.x); no upstream PR.
+---
+ .../quark/schemes/quark_w4a4_mxfp4_moe.py     |  65 ++++-
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 230 ++++++++++++++++++
+ 2 files changed, 284 insertions(+), 11 deletions(-)
+ create mode 100644 python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
+index 2640d23..df02088 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
 @@ -35,6 +35,28 @@ if _use_aiter:
@@ -140,6 +152,9 @@ Adapted from prior MXFP4 + MI300X work (GLM-5.x); no upstream PR.
          if hasattr(torch, "float4_e2m1fn_x2"):
              w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
              w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+new file mode 100644
+index 0000000..3354a03
 --- /dev/null
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -0,0 +1,230 @@

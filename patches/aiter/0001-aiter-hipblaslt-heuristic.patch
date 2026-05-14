@@ -1,3 +1,8 @@
+From bdb68da0ab73243c73b433395c36695fbe2afe91 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH] aiter-hipblaslt-heuristic
+
 vllm-shim local patch: use hipBLASLt's matmul heuristic API to bound
 AITER's per-shape kernel candidate set, instead of enumerating every
 algorithm hipBLASLt knows about.
@@ -34,10 +39,15 @@ up the change automatically: the SHA of the patches directory
 moves, so `AITER_JIT_DIR` namespaces under a fresh `jit-<key>`
 subdir and AITER recompiles the patched .so on first call instead
 of loading a stale cached binary from the PV.
+---
+ gradlib/csrc/hipbsolgemm.cu | 42 ++++++++++++++++++++++++-------------
+ 1 file changed, 27 insertions(+), 15 deletions(-)
 
+diff --git a/gradlib/csrc/hipbsolgemm.cu b/gradlib/csrc/hipbsolgemm.cu
+index 455bbc4..97c8f58 100644
 --- a/gradlib/csrc/hipbsolgemm.cu
 +++ b/gradlib/csrc/hipbsolgemm.cu
-@@ -230,21 +230,33 @@
+@@ -230,21 +230,33 @@ std::vector<int> hipblasLtMatmul_findallsols_wrapper(hipblasLtHandle_t handle,
              matmul, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &scaleC, sizeof(scaleC)));
      }
  

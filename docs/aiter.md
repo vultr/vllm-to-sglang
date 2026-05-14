@@ -318,7 +318,7 @@ The split into many small modules is deliberate: each piece is pure (or has a si
 
 ## Upstream patches
 
-The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives in `docker/sglang/patches/` and is applied with `patch -p1`. The Dockerfile runs `patch --dry-run` first, so an AITER version bump that breaks the patch fails the image build loudly rather than silently producing an unpatched image.
+The shim's Docker images carry one local patch against AITER, applied at image-build time by `docker/sglang/Dockerfile.rocm` against `/sgl-workspace/aiter` *before* `uv pip install` runs. The patch lives in `patches/aiter/` and is applied by `scripts/apply-patches.sh`, which replays it via `git am` onto a `patched/rocm` branch rooted at the upstream commit. An AITER version bump that breaks the patch fails the image build loudly via `git am` rather than silently producing an unpatched image. See `scripts/apply-patches.sh` and `scripts/rebuild-patches.sh` for the full apply/rebuild workflow.
 
 ### `aiter-hipblaslt-heuristic.patch`
 
@@ -334,11 +334,9 @@ The shim's Docker images carry one local patch against AITER, applied at image-b
 
 AITER's JIT loader (`aiter/jit/core.py`, `_ensure_loaded`) checks only for `.so` file presence; it does not hash sources. With `AITER_JIT_DIR` anchored on the PV, a pre-existing compiled kernel on disk will be loaded even when the AITER source bytes in the image have changed. The heuristic patch above modifies `module_hipbsolgemm.so` and would be masked by a stale cached binary without this namespacing.
 
-The Dockerfile reads `git rev-parse --short=12 HEAD` from `/sgl-workspace/aiter` at image-build time and writes the result to `/etc/vllm-shim/aiter-cache-key`. At launch, `vllm_shim.cli.rocm_perf._aiter_cache_key` reads that file and `rocm_perf_defaults` composes `AITER_JIT_DIR` as `$VLLM_SHIM_HOME/aiter/jit/<aiter_commit_sha>`. Bumping AITER's pinned version (`scripts/sync-repos.sh::AITER_VERSION`) and rebuilding the image rotates the namespace, and AITER recompiles from the new source on first call. Old `jit/<old-sha>/` trees become orphaned but harmless; an operator can prune them on the next PV cleanup.
+The Dockerfile reads `git rev-parse --short=12 HEAD` from `/sgl-workspace/aiter` *after* patches have been applied. HEAD at that point is the tip of `patched/rocm`, i.e. the upstream commit with patches replayed on top, so the captured SHA reflects *both* the AITER version and the local patches. The result is written to `/etc/vllm-shim/aiter-cache-key`. At launch, `vllm_shim.cli.rocm_perf.aiter_cache_key` reads that file and `rocm_perf_defaults` composes `AITER_JIT_DIR` as `$VLLM_SHIM_HOME/aiter/jit/<patched_aiter_sha>`. Bumping AITER's pinned version (`scripts/sync-repos.sh::AITER_VERSION`) *or* editing any patch under `patches/aiter/` rotates the SHA, the JIT dir moves to a fresh subdirectory under the same PV, and AITER recompiles. Old `jit/<old-sha>/` trees become orphaned but harmless; an operator can prune them on the next PV cleanup.
 
 If the file is missing or empty (CUDA images, dev boxes, image builds that did not run the AITER SHA capture step), the key falls back to the literal string `default` and the JIT dir is `$VLLM_SHIM_HOME/aiter/jit/default`. The same fallback applies to any host that does not run the ROCm Dockerfile, so the read side stays well-defined.
-
-**Note on local-patch invalidation.** Because the key is the AITER commit SHA and *not* a hash of `docker/sglang/patches/`, editing or replacing a patch file without also bumping the AITER pin will *not* rotate the JIT cache. The .so on the PV from the prior build silently wins. If you change the heuristic patch, manually clear `$VLLM_SHIM_HOME/aiter/jit/<sha>/` on the PV so AITER recompiles. The tradeoff: patches change rarely (and intentionally), AITER version bumps are the common cache-busting event, and this keeps the key shape clean.
 
 ## What this is not
 

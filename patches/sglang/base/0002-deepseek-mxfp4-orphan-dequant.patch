@@ -1,3 +1,8 @@
+From 91438c45a15744c23381ed661156fa67f0489908 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 2/3] deepseek-mxfp4-orphan-dequant
+
 vllm-shim local patch: dequantize orphan MXFP4 packed weights inline
 during DeepSeek-family weight loading.
 
@@ -40,7 +45,12 @@ ratio) so non-MXFP4 weight loading is untouched. On a BF16 checkpoint
 the condition never triggers.
 
 Adapted from prior MXFP4 + MI300X work; no upstream PR.
+---
+ .../deepseek_common/deepseek_weight_loader.py | 84 +++++++++++++++++++
+ 1 file changed, 84 insertions(+)
 
+diff --git a/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py b/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
+index 754dc1b..c4bc66f 100644
 --- a/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
 +++ b/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
 @@ -92,6 +92,36 @@ class NextNDisabledConfig:

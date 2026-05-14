@@ -65,14 +65,17 @@ from pathlib import Path
 from vllm_shim.cli.rocm_probe import GpuAgent
 
 # Image-baked key that namespaces the AITER JIT .so cache by AITER
-# version. The Dockerfile writes ``git rev-parse --short=12 HEAD`` from
-# /sgl-workspace/aiter here, so bumping AITER's pinned tag rotates the
-# cache namespace and AITER recompiles from the new source on first
-# call instead of silently loading a stale .so from the PV.
-# Note: local-patch edits to docker/sglang/patches/ do NOT rotate the
-# key; if you change a patch without bumping AITER, clear
-# $VLLM_SHIM_HOME/aiter/jit/<sha>/ on the PV manually. See
-# docs/aiter.md "JIT cache namespacing by AITER commit" for rationale.
+# version + local patches. The Dockerfile writes ``git rev-parse
+# --short=12 HEAD`` from /sgl-workspace/aiter here AFTER
+# scripts/apply-patches.sh has replayed patches/aiter/ onto a
+# patched/rocm branch. HEAD therefore reflects both the upstream pin
+# and the local patches; bumping AITER's pinned tag OR editing any
+# patch rotates the cache namespace and AITER recompiles instead of
+# silently loading a stale .so from the PV. apply-patches.sh uses a
+# fixed author identity/date so the replayed-commit SHAs are
+# byte-stable across rebuilds and the key only changes when content
+# actually changes. See docs/aiter.md "JIT cache namespacing by AITER
+# commit" for rationale.
 _AITER_CACHE_KEY_FILE = Path("/etc/vllm-shim/aiter-cache-key")
 
 

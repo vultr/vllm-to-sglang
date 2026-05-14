@@ -5,38 +5,32 @@ FROM ${BASE_IMAGE}
 COPY --from=ghcr.io/astral-sh/uv:0.11.11 /uv /uvx /bin/
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends haproxy patch && \
+    apt-get install -y --no-install-recommends haproxy && \
     rm -rf /var/lib/apt/lists/*
 
 # Apply local patches to AITER and SGLang before installing. See
-# docs/aiter.md "Upstream patches" for the rationale. Patches are
-# grouped by target: docker/sglang/patches/aiter/ applies to
-# /sgl-workspace/aiter, docker/sglang/patches/sglang/ applies to
-# /sgl-workspace/sglang. Each subdir is applied in sorted name order;
-# --dry-run runs first so a base-image bump that breaks any patch fails
-# the image build loudly instead of silently producing a half-patched
-# image. Capture AITER's commit SHA to /etc/vllm-shim/aiter-cache-key
-# so the shim can namespace AITER's JIT .so cache by AITER version at
-# runtime: bumping the pinned AITER tag rotates the namespace and
-# AITER recompiles from the new source instead of silently loading
-# a stale .so from the PV. See vllm_shim.cli.rocm_perf.aiter_cache_key
-# for the read side, and docs/aiter.md "JIT cache namespacing by
-# AITER commit" for the rationale (incl. the deliberate decision not
-# to also hash the patches dir). SGLang patches touch Python source
-# only, so they need no equivalent cache-key rotation.
-COPY docker/sglang/patches/ /tmp/patches/
-RUN cd /sgl-workspace/aiter && \
-    for p in $(find /tmp/patches/aiter -type f -name '*.patch' | sort); do \
-        patch --dry-run -p1 < "$p" && patch -p1 < "$p" || exit 1; \
-    done && \
-    cd /sgl-workspace/sglang && \
-    for p in $(find /tmp/patches/sglang -type f -name '*.patch' | sort); do \
-        patch --dry-run -p1 < "$p" && patch -p1 < "$p" || exit 1; \
-    done && \
+# docs/aiter.md "Upstream patches" for the rationale, and
+# scripts/apply-patches.sh for the branch model. Patches live at
+# patches/<repo>/[<tier>/] at the repo root; scripts/apply-patches.sh
+# replays them onto the upstream checkout as a stack of commits on
+# patched/<platform>. A base-image bump that breaks any patch fails
+# the image build loudly (via git am) instead of silently producing a
+# half-patched image. Capture AITER's post-patch HEAD to
+# /etc/vllm-shim/aiter-cache-key so the shim can namespace AITER's
+# JIT .so cache by AITER+patches version at runtime: bumping AITER
+# OR editing a patch rotates the cache namespace and AITER recompiles
+# from the new source instead of silently loading a stale .so from
+# the PV. See vllm_shim.cli.rocm_perf.aiter_cache_key for the read
+# side, and docs/aiter.md "JIT cache namespacing by AITER commit"
+# for the rationale.
+COPY patches/ /tmp/patches/
+COPY scripts/ /tmp/scripts/
+RUN bash /tmp/scripts/apply-patches.sh aiter  rocm /sgl-workspace/aiter  && \
+    bash /tmp/scripts/apply-patches.sh sglang rocm /sgl-workspace/sglang && \
     mkdir -p /etc/vllm-shim && \
     git -C /sgl-workspace/aiter rev-parse --short=12 HEAD \
         > /etc/vllm-shim/aiter-cache-key && \
-    rm -rf /tmp/patches
+    rm -rf /tmp/patches /tmp/scripts
 
 # AMD's aiter kernels belong with SGLang in its existing 3.10 venv.
 RUN uv pip install --no-cache --python /opt/venv/bin/python /sgl-workspace/aiter
