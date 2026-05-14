@@ -40,8 +40,8 @@ patches/
     ├── cuda/                    # only when building Dockerfile.cuda
     │   └── .gitkeep             # (no platform-specific patches yet)
     └── rocm/                    # only when building Dockerfile.rocm
-        ├── 0001-feat-mori-…patch
-        ├── 0002-feat-quark-mxfp4-triton-…patch
+        ├── 0001-feat-quark-mxfp4-triton-…patch
+        ├── 0002-feat-mori-…patch
         └── 0003-fix-communicator-…patch
 ```
 
@@ -352,7 +352,7 @@ meaningless without the config (the next line will crash on a missing
 file). They're two halves of one feature; one patch.
 
 The cross-tier case is the MoRI EP support patch
-(`rocm/0001-feat-mori-…`), which carries both the `MoriEPMoE`
+(`rocm/0002-feat-mori-…`), which carries both the `MoriEPMoE`
 registration in compressed-tensors (a pure-Python change that would
 trivially fit `base/`) and the gfx942 Triton dispatch (rocm-only).
 Splitting by tier would put two halves of "make MoRI work with Quark
