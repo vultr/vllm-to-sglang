@@ -1,0 +1,45 @@
+vllm-shim local patch: synthesize fused exclude entries in Quark
+config so layers HF-named gate_proj / up_proj that should be skipped
+also match SGLang's fused gate_up_proj.
+
+SGLang fuses gate_proj + up_proj into a single gate_up_proj linear
+during model build. Quark checkpoints (Kimi K2.6 MXFP4 etc.) ship
+their "exclude" list using the original HF unfused names. Without
+synthesizing the fused names here, layers the checkpoint marks as
+quantization-skipped (the MoE expert gate/up, the NextN eh_proj, etc.)
+fall back to the quantized path because `should_ignore_layer(prefix,
+ignore=self.exclude_layers, ...)` does not see a matching name and
+returns False. The result on the user side is either silent garbage
+output or a load-time shape error depending on the layer.
+
+We patch QuarkConfig.from_config (the only construction site that
+resolves the exclude list) rather than the per-layer match, so the
+synthesis is one-shot at model init and downstream call sites stay
+unchanged. Deduped via dict.fromkeys so callers that already provide
+fused names in the original config see no duplicates.
+
+Adapted from prior MXFP4 + MI300X work; no upstream PR.
+
+--- a/python/sglang/srt/layers/quantization/quark/quark.py
++++ b/python/sglang/srt/layers/quantization/quark/quark.py
+@@ -164,6 +164,19 @@
+             if q_proj_q_config is not None:
+                 q_proj_q_config["output_tensors"] = None
+-
++        # Synthesize fused exclude entries: SGLang fuses gate_proj+up_proj
++        # into gate_up_proj at model build, but Quark exclude lists use HF
++        # unfused names. Without this synthesis the fused linear escapes
++        # the exclude list and gets quantized despite the checkpoint asking
++        # for it to stay in BF16.
++        excludes = cast(list[str], config.get("exclude", []))
++        additions: list[str] = []
++        for e in excludes:
++            if ".gate_proj" in e:
++                additions.append(e.replace(".gate_proj", ".gate_up_proj"))
++            if ".up_proj" in e:
++                additions.append(e.replace(".up_proj", ".gate_up_proj"))
++        config["exclude"] = list(dict.fromkeys(excludes + additions))
++
+         return cls(
+             quant_config=config,
+             kv_cache_group=kv_cache_group,

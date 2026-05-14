@@ -1,0 +1,163 @@
+vllm-shim local patch: dequantize orphan MXFP4 packed weights inline
+during DeepSeek-family weight loading.
+
+For Quark MXFP4 checkpoints whose MoE expert weights are picked up by
+`QuarkW4A4MXFp4MoE` (see quark-mxfp4-triton-gfx942.patch), the bulk of
+the FP4 bytes lands in the quantized MoE path. But the checkpoint
+sometimes also ships MXFP4-packed bytes for parameters that the model
+declares as plain BF16 (NextN's eh_proj is the canonical example: it
+has no Quark scheme attached but the checkpoint stores it packed).
+Without explicit handling, the default weight loader copies the uint8
+bytes into a BF16 parameter, leaving the model with garbage weights
+that produce noise at inference.
+
+This patch teaches the DeepSeek V2/V3 weight loader to recognize the
+pattern `uint8 checkpoint tensor + BF16 parameter target + size ratio
+2x` and dequantize on the fly:
+
+1. A module-level `_dequant_mxfp4_weight` helper unpacks two FP4
+   nibbles per byte through a 16-entry LUT and applies the E8M0 scale
+   (2^(s - 127)) broadcast over groups of 32. Matches the OCP MX FP4
+   spec.
+
+2. In the load loop, when a weight is uint8 and its target param is
+   BF16 with double the trailing dim, we dequant before invoking the
+   parameter's weight_loader. Two checkpoint emission orders show up
+   in practice:
+    a) weight arrives BEFORE its `*.weight_scale`: defer the weight,
+       then complete the dequant when the scale lands.
+    b) scale arrives BEFORE its weight (orphan scale, the param name
+       isn't in `params_dict` because there's no `.weight_scale`
+       parameter on the target module): cache the scale and consume
+       it when the weight arrives.
+
+3. A safety log at end-of-load flags any weight that was deferred
+   and never reconciled (would indicate a real load order bug or a
+   missing scale tensor).
+
+The detection condition is exact (uint8 + BF16/FP16 target + 2x trail
+ratio) so non-MXFP4 weight loading is untouched. On a BF16 checkpoint
+the condition never triggers.
+
+Adapted from prior MXFP4 + MI300X work; no upstream PR.
+
+--- a/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
++++ b/python/sglang/srt/models/deepseek_common/deepseek_weight_loader.py
+@@ -92,6 +92,36 @@ class NextNDisabledConfig:
+ """Union type for NextN configuration, including enabled and disabled configurations."""
+ NextNConfig = NextNEnabledConfig | NextNDisabledConfig
+ 
++_MXFP4_LUT = [
++    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
++    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
++]
++
++
++def _dequant_mxfp4_weight(packed_weight, weight_scale):
++    """Dequantize an MXFP4-packed uint8 weight + E8M0 scale back to BF16.
++
++    Args:
++        packed_weight: uint8 tensor [out_dim, in_dim/2], two FP4 values per byte
++        weight_scale:  uint8 tensor [out_dim, in_dim/32], E8M0 block scales
++    Returns:
++        BF16 tensor [out_dim, in_dim]
++    """
++    dev = packed_weight.device
++    lut = torch.tensor(_MXFP4_LUT, dtype=torch.float32, device=dev)
++    unpacked = packed_weight.repeat_interleave(2, dim=-1)
++    unpacked[:, ::2] = unpacked[:, ::2] & 0xF
++    unpacked[:, 1::2] = unpacked[:, 1::2] >> 4
++    fp32_vals = lut[unpacked.long()]
++    scales = 2.0 ** (weight_scale.to(torch.float32) - 127.0)
++    scales = scales.repeat_interleave(32, dim=-1)
++    if scales.shape[-1] > fp32_vals.shape[-1]:
++        scales = scales[..., : fp32_vals.shape[-1]]
++    elif scales.shape[-1] < fp32_vals.shape[-1]:
++        fp32_vals = fp32_vals[..., : scales.shape[-1]]
++    return (fp32_vals * scales).to(torch.bfloat16)
++
++
+ 
+ class DeepseekV2WeightLoaderMixin:
+     """Mixin for loading weights in DeepSeek V2/V3 models."""
+@@ -153,6 +183,8 @@ class DeepseekV2WeightLoaderMixin:
+ 
+         with concurrent.futures.ThreadPoolExecutor() as executor:
+             futures = []
++            _orphan_weight_scales: dict[str, torch.Tensor] = {}
++            _deferred_mxfp4_weights: dict[str, torch.Tensor] = {}
+             params_dict = dict(self.named_parameters())
+             weight_names = []
+             for name, loaded_weight in weights:
+@@ -351,12 +383,55 @@ class DeepseekV2WeightLoaderMixin:
+                                         )
+                                         break
+                             if name not in params_dict:
++                                # Orphan MXFP4 scale: the *.weight_scale name
++                                # is in the checkpoint but the model has no
++                                # such parameter (target weight is plain BF16).
++                                # Cache it for the matching weight; if the
++                                # weight already deferred, complete the dequant.
++                                if name.endswith(".weight_scale"):
++                                    base_name = name[: -len("_scale")]
++                                    if base_name in params_dict:
++                                        _orphan_weight_scales[base_name] = loaded_weight
++                                        if base_name in _deferred_mxfp4_weights:
++                                            deferred_w = _deferred_mxfp4_weights.pop(base_name)
++                                            deferred_w = _dequant_mxfp4_weight(
++                                                deferred_w, _orphan_weight_scales.pop(base_name)
++                                            )
++                                            target_param = params_dict[base_name]
++                                            deferred_loader = getattr(
++                                                target_param, "weight_loader", default_weight_loader
++                                            )
++                                            maybe_executor_submit(
++                                                executor=executor,
++                                                futures=futures,
++                                                use_async=use_async_loading,
++                                                func=deferred_loader,
++                                                func_args=(target_param, deferred_w),
++                                            )
++                                        continue
+                                 # modelopt ckpt contains not needed weights for MTP module:
+                                 # model.decoder.self_attn.attn_mqa.v_scale and
+                                 # model.decoder.self_attn.attn_mqa.k_scale
+                                 logger.warning(f"{name} not found in params_dict.")
+                                 continue
+                             param = params_dict[name]
++                            # Orphan MXFP4 weight: uint8 packed bytes hitting
++                            # a BF16/FP16 target with 2x trail dim is the
++                            # MXFP4 signature. Two emission orders to handle:
++                            # scale already cached -> dequant now; scale not
++                            # yet seen -> defer the weight.
++                            if (
++                                loaded_weight.dtype == torch.uint8
++                                and param.dtype in (torch.bfloat16, torch.float16)
++                                and loaded_weight.shape[-1] * 2 == param.shape[-1]
++                            ):
++                                if name in _orphan_weight_scales:
++                                    loaded_weight = _dequant_mxfp4_weight(
++                                        loaded_weight, _orphan_weight_scales.pop(name)
++                                    )
++                                else:
++                                    _deferred_mxfp4_weights[name] = loaded_weight
++                                    continue
+                             weight_loader = getattr(
+                                 param, "weight_loader", default_weight_loader
+                             )
+@@ -368,6 +443,15 @@ class DeepseekV2WeightLoaderMixin:
+                                 func_args=(param, loaded_weight),
+                             )
+ 
++            # Any deferred MXFP4 weight that never got its scale is either
++            # a load-order bug upstream or a missing scale tensor; surface
++            # it loudly rather than letting silent garbage weights through.
++            for wname in _deferred_mxfp4_weights:
++                logger.error(
++                    "MXFP4 weight %s was deferred but its weight_scale "
++                    "never arrived during load", wname,
++                )
++
+             # Wait for all tasks to complete and raise any exceptions.
+             for future in concurrent.futures.as_completed(futures):
+                 future.result()
