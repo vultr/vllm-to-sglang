@@ -136,11 +136,30 @@ apply_into_branch() {
     shopt -u nullglob
 }
 
+# git am refuses to apply onto a dirty index, but some base images ship
+# upstream checkouts with uncommitted working-tree edits as build-time
+# fixups (lmsysorg/sglang-rocm carries an uncommitted bounds-check fix to
+# csrc/kernels/mhc_kernels.cu in /sgl-workspace/aiter, for example).
+# Stash those before applying, restore them on top of patched/<platform>
+# afterward so the kernels still compile against the base image's fixed
+# source. Stash pop can conflict if a future patch touches the same
+# file; treat that as a real build failure and resolve by hand.
+stashed=false
+if ! git diff-index --quiet HEAD --; then
+    git stash push --quiet --include-untracked \
+        -m "vllm-shim apply-patches: preserve working-tree fixups"
+    stashed=true
+fi
+
 if $multi; then
     apply_into_branch "patched/base" "refs/vllm-shim/upstream" "$patches_root/base"
     apply_into_branch "patched/$platform" "patched/base" "$patches_root/$platform"
 else
     apply_into_branch "patched/$platform" "refs/vllm-shim/upstream" "$patches_root"
+fi
+
+if $stashed; then
+    git stash pop --quiet
 fi
 
 echo "apply-patches: $repo done (HEAD now on patched/$platform)"
