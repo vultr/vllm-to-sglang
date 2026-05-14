@@ -1,0 +1,138 @@
+From f671d5d19db5c3d6c999b885485c019ecbf06ec7 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 2/2] feat(triton): enable AFP4WFP4 GEMM on gfx942 via BF16
+ decomposition
+
+Two changes that together let Quark MXFP4 checkpoints run on MI300X:
+
+1. arch_info.is_fp4_avail() includes gfx942. Every aiter Triton FP4
+   entrypoint asserts is_fp4_avail() unconditionally; upstream gates
+   on native-FP4 archs only (gfx950, gfx1250) and the assert fires
+   at the first MXFP4 forward on gfx942. gfx942 has no native FP4
+   MFMA, but tl.dot_scaled decomposes the FP4 inputs to BF16 at the
+   MFMA boundary and runs on the standard BF16 m16n16k16 path. Every
+   call site is a pure assert (no result-based dispatch), so widening
+   here covers ~10 entrypoints in one place instead of patching each
+   one. is_gluon_avail() and is_mx_scale_preshuffling_avail() are
+   left gfx95+ on purpose: those features have no BF16 fallback.
+
+2. Ship configs/gemm/gfx942-GEMM-AFP4WFP4.json. Once the assert is
+   relaxed, gemm_afp4wfp4 reads its tuned config via get_gemm_config,
+   which requires the default {arch}-{config_name}.json to exist and
+   raises AssertionError otherwise. Upstream ships only gfx1250 for
+   GEMM-AFP4WFP4 and its BLOCK_SIZE_K=256 + num_stages=3 would need
+   ~96KB LDS for the B tile alone -- doesn't fit gfx942's 64KB. The
+   hand-rolled gfx942 default uses BLOCK_SIZE_K=128 + num_stages=2 to
+   stay within LDS, covers the standard M_LEQ bucket ladder plus an
+   'any' fallback, and pins matrix_instr_nonkdim=16 so the BF16 MFMA
+   decomposition lands on m16n16k16. Values aren't auto-tuned;
+   performance is sub-optimal until someone runs a real sweep.
+
+Decomposed FP4 is correct but slower than native FP4 hardware. Not
+upstreamed; the shim carries this locally.
+---
+ .../configs/gemm/gfx942-GEMM-AFP4WFP4.json    | 74 +++++++++++++++++++
+ aiter/ops/triton/utils/_triton/arch_info.py   |  8 +-
+ 2 files changed, 81 insertions(+), 1 deletion(-)
+ create mode 100644 aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json
+
+diff --git a/aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json b/aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json
+new file mode 100644
+index 0000000..e4ba2da
+--- /dev/null
++++ b/aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json
+@@ -0,0 +1,74 @@
++{
++    "M_LEQ_16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": null,
++        "NUM_KSPLIT": 8
++    },
++    "M_LEQ_32": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": ".cg",
++        "NUM_KSPLIT": 1
++    },
++    "M_LEQ_64": {
++        "BLOCK_SIZE_M": 64,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": ".cg",
++        "NUM_KSPLIT": 1
++    },
++    "M_LEQ_128": {
++        "BLOCK_SIZE_M": 128,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 8,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": ".cg",
++        "NUM_KSPLIT": 1
++    },
++    "M_LEQ_512": {
++        "BLOCK_SIZE_M": 128,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 8,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": null,
++        "NUM_KSPLIT": 1
++    },
++    "any": {
++        "BLOCK_SIZE_M": 128,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 8,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": null,
++        "NUM_KSPLIT": 1
++    }
++}
+diff --git a/aiter/ops/triton/utils/_triton/arch_info.py b/aiter/ops/triton/utils/_triton/arch_info.py
+index 0c49a1f..6e5ecd6 100644
+--- a/aiter/ops/triton/utils/_triton/arch_info.py
++++ b/aiter/ops/triton/utils/_triton/arch_info.py
+@@ -17,7 +17,13 @@ def is_gluon_avail():
+ 
+ 
+ def is_fp4_avail():
+-    return get_arch() in ("gfx950", "gfx1250")
++    # gfx942 (MI300X) has no native FP4 MFMA but tl.dot_scaled decomposes
++    # to BF16 MFMA at the Triton compiler layer, so the FP4 Triton kernels
++    # run correctly. Every is_fp4_avail() call site in aiter is a pure
++    # assert ("MXFP4 is not available on your device"); none switch on the
++    # result, so widening here is safe and avoids patching ~10 entrypoints
++    # individually. See docs/aiter.md for the gfx942 MXFP4 story.
++    return get_arch() in ("gfx942", "gfx950", "gfx1250")
+ 
+ 
+ def is_fp8_avail():
