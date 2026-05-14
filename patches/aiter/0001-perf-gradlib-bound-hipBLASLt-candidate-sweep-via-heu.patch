@@ -1,8 +1,8 @@
 From f3b5176c5f427423b3b69e92cf04bae9b4a1cd1d Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH] perf(gradlib): bound hipBLASLt candidate sweep via heuristic
- API
+Subject: [PATCH 1/2] perf(gradlib): bound hipBLASLt candidate sweep via
+ heuristic API
 
 The aiter tuner currently sweeps every hipBLASLt algorithm for each
 shape via `hipblaslt_ext::getAllAlgos`. On MI300X that's ~1365

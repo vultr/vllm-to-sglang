@@ -1,0 +1,111 @@
+From de981da98cf929b4e91c1387f6858b3aae03789c Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 2/2] feat(triton): ship gfx942 default config for
+ GEMM-AFP4WFP4
+
+aiter/ops/triton/utils/gemm_config_utils.py::get_gemm_config requires
+the default {arch}-{config_name}.json to exist (fpath_should_exist=True)
+and raises AssertionError otherwise. The upstream configs/gemm tree
+ships GEMM-AFP4WFP4 only for gfx1250, so any caller of gemm_afp4wfp4
+on gfx942 crashes at model init -- e.g. Quark MXFP4 checkpoints
+(amd/Kimi-K2.6-MXFP4) whose shared experts route through
+quark_w4a4_mxfp4.apply_weights -> gemm_afp4wfp4.
+
+Adds a hand-rolled gfx942 default. Values aren't auto-tuned: they are
+chosen conservatively to fit MI300X's 64KB LDS budget (BLOCK_SIZE_K=128,
+num_stages=2), keep matrix_instr_nonkdim=16 so tl.dot_scaled decomposes
+to BF16 m16n16k16 MFMA, and cover the standard M_LEQ bucket ladder plus
+an 'any' fallback. Performance is sub-optimal until someone tunes for
+gfx942, but the model launches and produces correct output.
+
+The gfx1250 default ships BLOCK_SIZE_K=256 with num_stages=3, which
+needs ~96KB LDS for the B tile alone and won't compile on gfx942, so it
+can't be reused as-is.
+
+Not upstreamed.
+---
+ .../configs/gemm/gfx942-GEMM-AFP4WFP4.json    | 74 +++++++++++++++++++
+ 1 file changed, 74 insertions(+)
+ create mode 100644 aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json
+
+diff --git a/aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json b/aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json
+new file mode 100644
+index 0000000..e4ba2da
+--- /dev/null
++++ b/aiter/ops/triton/configs/gemm/gfx942-GEMM-AFP4WFP4.json
+@@ -0,0 +1,74 @@
++{
++    "M_LEQ_16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": null,
++        "NUM_KSPLIT": 8
++    },
++    "M_LEQ_32": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": ".cg",
++        "NUM_KSPLIT": 1
++    },
++    "M_LEQ_64": {
++        "BLOCK_SIZE_M": 64,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": ".cg",
++        "NUM_KSPLIT": 1
++    },
++    "M_LEQ_128": {
++        "BLOCK_SIZE_M": 128,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 8,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": ".cg",
++        "NUM_KSPLIT": 1
++    },
++    "M_LEQ_512": {
++        "BLOCK_SIZE_M": 128,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 8,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": null,
++        "NUM_KSPLIT": 1
++    },
++    "any": {
++        "BLOCK_SIZE_M": 128,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 8,
++        "num_stages": 2,
++        "waves_per_eu": 2,
++        "matrix_instr_nonkdim": 16,
++        "cache_modifier": null,
++        "NUM_KSPLIT": 1
++    }
++}
