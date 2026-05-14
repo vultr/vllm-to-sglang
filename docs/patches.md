@@ -41,7 +41,8 @@ patches/
     │   └── .gitkeep             # (no platform-specific patches yet)
     └── rocm/                    # only when building Dockerfile.rocm
         ├── 0001-feat-mori-…patch
-        └── 0002-feat-quark-mxfp4-triton-…patch
+        ├── 0002-feat-quark-mxfp4-triton-…patch
+        └── 0003-fix-communicator-…patch
 ```
 
 Rules:
