@@ -8,6 +8,36 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends haproxy && \
     rm -rf /var/lib/apt/lists/*
 
+# Bump bundled Triton past PR #9646 ("[AMD] Use common path for gfx942
+# scaled dot emulation", merged 2026-03-13) so tl.dot_scaled lowers to
+# BF16 MFMA on gfx942. The base image pins Triton at a Jan 15 2026
+# commit that predates CDNA3 scaled-dot support; without this bump
+# every AITER FP4 Triton kernel (gemm_afp4wfp4, moe_op_mxfp4*,
+# fused_gemm_afp4wfp4_*, batched_gemm_afp4wfp4) hits "Unsupported
+# DotScaleOp found when converting TritonGPU to LLVM" during the
+# first MXFP4 forward. TRITON_COMMIT is upstream Triton main HEAD at
+# the time the bump was authored (2026-05-13); pristine upstream
+# Triton, just newer than what the base image happened to pin. See
+# docs/aiter.md "Triton MXFP4 on MI300X" for the broader story.
+#
+# This build sits ahead of the patch-apply step on purpose: it depends
+# only on the base image and the two ARGs below, never on patches/, so
+# editing a patch no longer invalidates this (expensive, multi-minute)
+# layer. The rebuild then only triggers on a base-image or ARG change.
+ARG TRITON_COMMIT=d3156632257bc363a12716facc7f92f55428815f
+# MAX_JOBS caps Ninja parallelism. Triton's setup.py defaults to
+# 2 * cpu_count() concurrent C++ jobs; MLIR/LLVM translation units peak
+# at 1-2GB+ each, so the default OOM-kills the build daemon on a
+# memory-constrained builder (e.g. a 32GB WSL2 VM). 8 keeps peak
+# compile memory under that ceiling at the cost of wall time.
+ARG MAX_JOBS=8
+RUN cd /sgl-workspace/triton-custom && \
+    git fetch origin --quiet && \
+    git -c advice.detachedHead=false checkout ${TRITON_COMMIT} && \
+    rm -rf build python/build && \
+    MAX_JOBS=${MAX_JOBS} \
+    uv pip install --no-cache --python /opt/venv/bin/python --no-build-isolation -e .
+
 # Apply local patches to AITER and SGLang before installing. See
 # docs/aiter.md "Upstream patches" for the rationale, and
 # scripts/apply-patches.sh for the branch model. Patches live at
@@ -31,31 +61,6 @@ RUN bash /tmp/scripts/apply-patches.sh aiter  rocm /sgl-workspace/aiter  && \
     git -C /sgl-workspace/aiter rev-parse --short=12 HEAD \
         > /etc/vllm-shim/aiter-cache-key && \
     rm -rf /tmp/patches /tmp/scripts
-
-# Bump bundled Triton past PR #9646 ("[AMD] Use common path for gfx942
-# scaled dot emulation", merged 2026-03-13) so tl.dot_scaled lowers to
-# BF16 MFMA on gfx942. The base image pins Triton at a Jan 15 2026
-# commit that predates CDNA3 scaled-dot support; without this bump
-# every AITER FP4 Triton kernel (gemm_afp4wfp4, moe_op_mxfp4*,
-# fused_gemm_afp4wfp4_*, batched_gemm_afp4wfp4) hits "Unsupported
-# DotScaleOp found when converting TritonGPU to LLVM" during the
-# first MXFP4 forward. TRITON_COMMIT is upstream Triton main HEAD at
-# the time the bump was authored (2026-05-13); pristine upstream
-# Triton, just newer than what the base image happened to pin. See
-# docs/aiter.md "Triton MXFP4 on MI300X" for the broader story.
-ARG TRITON_COMMIT=d3156632257bc363a12716facc7f92f55428815f
-# MAX_JOBS caps Ninja parallelism. Triton's setup.py defaults to
-# 2 * cpu_count() concurrent C++ jobs; MLIR/LLVM translation units peak
-# at 1-2GB+ each, so the default OOM-kills the build daemon on a
-# memory-constrained builder (e.g. a 32GB WSL2 VM). 8 keeps peak
-# compile memory under that ceiling at the cost of wall time.
-ARG MAX_JOBS=8
-RUN cd /sgl-workspace/triton-custom && \
-    git fetch origin --quiet && \
-    git -c advice.detachedHead=false checkout ${TRITON_COMMIT} && \
-    rm -rf build python/build && \
-    MAX_JOBS=${MAX_JOBS} \
-    uv pip install --no-cache --python /opt/venv/bin/python --no-build-isolation -e .
 
 # AMD's aiter kernels belong with SGLang in its existing 3.10 venv.
 RUN uv pip install --no-cache --python /opt/venv/bin/python /sgl-workspace/aiter
