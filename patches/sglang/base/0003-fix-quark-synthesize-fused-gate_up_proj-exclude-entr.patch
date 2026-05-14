@@ -1,29 +1,26 @@
-From 05d111224471f67b299f10e2789daf67167a746b Mon Sep 17 00:00:00 2001
+From 6e0f486a1c43dccd285cabea3282184d7ca158c5 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 3/3] quark-exclude-fused-names
-
-vllm-shim local patch: synthesize fused exclude entries in Quark
-config so layers HF-named gate_proj / up_proj that should be skipped
-also match SGLang's fused gate_up_proj.
+Subject: [PATCH 3/3] fix(quark): synthesize fused gate_up_proj exclude entries
+ from HF names
 
 SGLang fuses gate_proj + up_proj into a single gate_up_proj linear
-during model build. Quark checkpoints (Kimi K2.6 MXFP4 etc.) ship
+at model build, but Quark checkpoints (Kimi K2.6 MXFP4 etc.) ship
 their "exclude" list using the original HF unfused names. Without
 synthesizing the fused names here, layers the checkpoint marks as
-quantization-skipped (the MoE expert gate/up, the NextN eh_proj, etc.)
-fall back to the quantized path because `should_ignore_layer(prefix,
-ignore=self.exclude_layers, ...)` does not see a matching name and
-returns False. The result on the user side is either silent garbage
-output or a load-time shape error depending on the layer.
+quantization-skipped (MoE expert gate/up, NextN eh_proj, etc.) fall
+back to the quantized path because `should_ignore_layer(prefix,
+ignore=self.exclude_layers, ...)` sees no matching name and returns
+False. Result on the user side is either silent garbage output or a
+load-time shape error depending on the layer.
 
-We patch QuarkConfig.from_config (the only construction site that
-resolves the exclude list) rather than the per-layer match, so the
-synthesis is one-shot at model init and downstream call sites stay
-unchanged. Deduped via dict.fromkeys so callers that already provide
-fused names in the original config see no duplicates.
+Patched in QuarkConfig.from_config -- the only construction site
+that resolves the exclude list -- so the synthesis runs once at
+model init and downstream call sites stay unchanged. Deduped via
+dict.fromkeys so configs that already include the fused names see
+no duplicates.
 
-Adapted from prior MXFP4 + MI300X work; no upstream PR.
+Adapted from prior MXFP4 + MI300X work; not upstreamed.
 ---
  .../sglang/srt/layers/quantization/quark/quark.py   | 13 +++++++++++++
  1 file changed, 13 insertions(+)

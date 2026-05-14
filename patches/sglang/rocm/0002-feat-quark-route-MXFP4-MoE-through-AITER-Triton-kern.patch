@@ -1,60 +1,55 @@
-From f806b4082398e3db2b0af32c5b2170d45683fce4 Mon Sep 17 00:00:00 2001
+From edce7122cf3647f4c4f2b8f7da960816bf17fea4 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 2/2] quark-mxfp4-triton-gfx942
+Subject: [PATCH 2/2] feat(quark): route MXFP4 MoE through AITER Triton kernels
+ on gfx942
 
-vllm-shim local patch: route Quark MXFP4 MoE through AITER's Triton
-kernels on gfx942 (MI300X) instead of the CK kernels that are
-compile-time excluded for that arch.
-
-AITER's `fused_moe.fused_moe()` dispatcher routes MXFP4 + per_1x32 to
-CK GEMM kernels (`csrc/ck_gemm_moe_2stages/`) whose `dispatch.h`
+AITER's `fused_moe.fused_moe()` dispatcher routes MXFP4 + per_1x32
+to CK GEMM kernels in `csrc/ck_gemm_moe_2stages/` whose `dispatch.h`
 ifdefs enable them only on gfx950 / gfx12 / gfx9.5. On gfx942 the
 function falls through to the bf16 path or aborts in the FP4
-activation quant call (`dynamic_per_group_scaled_quant_fp4 device not
-support Float4_e2m1fn_x2 dtype`). AITER ships parallel Triton kernels
-in `aiter/ops/triton/moe/moe_op_mxfp4*.py` that use `tl.dot_scaled`,
+activation quant call (`dynamic_per_group_scaled_quant_fp4 device
+not support Float4_e2m1fn_x2 dtype`).
+
+AITER ships parallel Triton kernels in
+`aiter/ops/triton/moe/moe_op_mxfp4*.py` that use `tl.dot_scaled`,
 a Triton-level primitive the compiler decomposes into BF16 upcast +
-BF16 MFMA. Those Triton kernels DO work on gfx942.
+BF16 MFMA. Those Triton kernels do work on gfx942, and this patch
+wires them in for the non-EP Quark MXFP4 MoE path:
 
-This patch:
-
-1. Adds a `_use_triton_mxfp4_fallback` flag in
-   `quark_w4a4_mxfp4_moe.py`, lit when AITER is enabled but
-   `is_gfx95_supported()` returns False. On gfx95+ the flag is False
-   and the existing CK path is used unchanged.
+1. Adds `_use_triton_mxfp4_fallback` in `quark_w4a4_mxfp4_moe.py`,
+   lit when AITER is enabled but `is_gfx95_supported()` returns
+   False. On gfx95+ the flag is False and the existing CK path is
+   used unchanged.
 
 2. Skips the `e8m0_shuffle` of weight scales when the fallback is
    active. The Triton kernels are invoked with `swizzle_mx_b=False`
-   and so want the raw checkpoint scales; only the CK path on gfx95
+   and want the raw checkpoint scales; only the CK path on gfx95
    wants pre-shuffled scales. The pre-shuffle of the weight bytes
    themselves is already gated on gfx95 via `_is_shuffle_moe_mxfp4`,
-   so we don't have to touch it.
+   so weights need no further gating.
 
-3. Adds a short-circuit branch at the top of
-   `QuarkW4A4MXFp4MoE.apply_weights` that calls `triton_mxfp4_moe`
-   and returns a `StandardCombineInput` directly. The branch is
-   taken only when the fallback flag is set, so gfx95 hosts and
-   non-HIP hosts continue through the existing `MoeRunner.run(...)`
-   path.
+3. Short-circuits `QuarkW4A4MXFp4MoE.apply_weights` when the
+   fallback is set: calls `triton_mxfp4_moe` and returns a
+   `StandardCombineInput` directly, bypassing the MoeRunner -> AITER
+   `fused_moe` -> CK route.
 
-4. Adds a new module
-   `python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py`
-   that pre-allocates a CUDA-graph-safe workspace cache, drives
-   `moe_align_block_size` (the AITER stage1-4 kernels) for token
-   sorting, then calls `fused_moe_mxfp4_silu` (stage 1: gate_up +
-   fused SiLU) and `fused_moe_mxfp4` (stage 2: down_proj), and
-   reduces over top_k into the output buffer. All AITER kernel
-   imports are verified to exist in the pinned AITER commit
-   (`a6bb499`); both Triton kernels use `tl.dot_scaled` so they
-   decompose to BF16 MFMA on gfx942.
+4. Adds
+   `python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py`:
+   a CUDA-graph-safe dispatch shim that pre-allocates a workspace
+   cache, drives `moe_align_block_size` (AITER stage1-4 kernels) for
+   token sorting, then calls `fused_moe_mxfp4_silu` (stage 1:
+   gate_up + fused SiLU) and `fused_moe_mxfp4` (stage 2: down_proj),
+   then reduces over top_k into the output buffer. All AITER kernel
+   imports are verified to exist in the pinned AITER commit; both
+   Triton kernels use `tl.dot_scaled` and decompose to BF16 MFMA on
+   gfx942.
 
 This patch does NOT touch the MoRI EP path. The EP integration is
-gated separately on `SGLANG_MORI_MXFP4_TRITON` in
-`mori-ep-mxfp4-triton.patch` so non-EP can be validated in isolation
-first.
+in a companion patch gated separately on SGLANG_MORI_MXFP4_TRITON
+so non-EP can be validated in isolation first.
 
-Adapted from prior MXFP4 + MI300X work (GLM-5.x); no upstream PR.
+Adapted from prior MXFP4 + MI300X work (GLM-5.x); not upstreamed.
 ---
  .../quark/schemes/quark_w4a4_mxfp4_moe.py     |  65 ++++-
  .../quark/schemes/triton_mxfp4_dispatch.py    | 230 ++++++++++++++++++

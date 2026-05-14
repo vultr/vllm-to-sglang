@@ -1,65 +1,61 @@
-From 1d3d0a7c56aa6564e9f2d6696338e777a4292c23 Mon Sep 17 00:00:00 2001
+From d1aad41acf5dbad5983df654808fa92e60a2bf04 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 1/2] mori-ep-mxfp4-triton
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH 1/2] feat(ep_moe): MoRI Quark MXFP4 Triton fallback on gfx942
+ (opt-in)
 
-vllm-shim local patch: route MoRI EP Quark MXFP4 MoE through AITER's
-Triton kernels on gfx942 (MI300X). Companion to
-`quark-mxfp4-triton-gfx942.patch`, which covers the non-EP path; this
-one is opt-in via `SGLANG_MORI_MXFP4_TRITON=1` so the EP integration
-can be staged in after non-EP is validated.
+Companion to the non-EP Quark MXFP4 Triton fallback in
+`quark_w4a4_mxfp4_moe.py`. The non-EP path is auto-gated on
+"AITER + not gfx95"; this EP path is opt-in via
+SGLANG_MORI_MXFP4_TRITON=1 so it can be staged in only after the
+non-EP path has been validated.
 
-`MoriEPMoE.run_moe_core` currently calls `aiter.fused_moe.fused_moe(...)`
-unconditionally for the `is_quark_w4a4` path. On gfx942 that dispatcher
-either routes to a CK kernel that doesn't exist for this arch or aborts
-in the FP4 activation quant; both are the same blocker the non-EP fix
-addresses. Here we intercept that branch when:
+`MoriEPMoE.run_moe_core` currently calls
+`aiter.fused_moe.fused_moe(...)` unconditionally for the
+is_quark_w4a4 path. On gfx942 that dispatcher either routes to a CK
+kernel that doesn't exist for this arch or aborts in the FP4
+activation quant; same blocker the non-EP fix addresses. Here we
+intercept that branch when:
 
     SGLANG_MORI_MXFP4_TRITON=1 AND dispatch_a1 is not FP4
 
 and call `triton_mxfp4_moe(...)` instead, wrapping the result in
 `MoriEPNormalCombineInput` / `MoriEPLLCombineInput` to match the
-dispatcher's expectations. The branch returns directly, bypassing the
-subsequent `fused_moe(...)` call.
+dispatcher's expectations. The branch returns directly, bypassing
+the subsequent fused_moe call.
 
-Two prerequisites the operator must satisfy:
+Two operator prerequisites:
 
-1. `SGLANG_MORI_DISPATCH_DTYPE=bf16` — the Triton kernels take BF16
-   activations. The default FP4 dispatch dtype is what triggered the
-   original `dynamic_per_group_scaled_quant_fp4` abort; even if that
-   were fixed, the Triton kernels' `swizzle_mx_a=False` path expects
-   plain BF16 input. We detect the wrong dtype (FP4 still in
-   `dispatch_a1`) and fall through to the existing fused_moe path
-   rather than silently mishandle it.
+1. SGLANG_MORI_DISPATCH_DTYPE=bf16 -- the Triton kernels take BF16
+   activations. The default FP4 dispatch is what triggered the
+   original dynamic_per_group_scaled_quant_fp4 abort; even with that
+   fixed, the Triton path's swizzle_mx_a=False mode wants plain
+   BF16. We detect the wrong dtype (FP4 still in dispatch_a1) and
+   fall through to fused_moe rather than mishandle it silently.
 
-2. `SGLANG_MORI_MXFP4_TRITON=1` — explicit opt-in. With the env var
-   unset, this patch is a no-op and MoriEPMoE behavior is identical
-   to upstream.
+2. SGLANG_MORI_MXFP4_TRITON=1 -- explicit opt-in. Unset, the patch
+   is a no-op and MoriEPMoE behaviour is identical to upstream.
 
 Known gaps the operator should be aware of:
 
 - The Triton dispatch shim's CUDA-graph workspace cache keys on the
-  input `M` dimension. In EP mode `dispatch_a1.shape[0]` varies per
-  batch as `dispatch_recv_token_num` changes, so the cache won't hit
-  on subsequent calls and a new workspace allocation happens per
-  unique batch size. This is a perf opportunity, not a correctness
-  issue, and only matters if you're capturing many distinct M values.
+  input M dimension. In EP mode `dispatch_a1.shape[0]` varies per
+  batch as dispatch_recv_token_num changes, so the cache won't hit
+  on subsequent calls -- a new workspace allocation happens per
+  unique M. Perf opportunity, not a correctness issue.
 
-- The Triton kernels process all rows of `dispatch_a1` including the
-  padding rows after `dispatch_recv_token_num`. MoRI combine then
-  truncates back to `dispatch_recv_token_num` so output is correct;
-  the wasted compute is bounded by `mori_moe_max_input_tokens`.
+- The Triton kernels process all rows of dispatch_a1 including the
+  padding rows after dispatch_recv_token_num. MoRI combine truncates
+  back so output is correct; wasted compute is bounded by
+  `mori_moe_max_input_tokens`.
 
 - `dispatch_ids.shape` and `dispatch_weights.shape` are assumed to
   match what the Triton kernels expect (`(M, top_k)`). If MoRI's
-  dispatcher flattens these to 1D you'll see a shape error at the
-  `top_k = topk_ids.shape[1]` line in triton_mxfp4_moe; that surfaces
+  dispatcher flattens these to 1D you'll see a shape error at
+  `top_k = topk_ids.shape[1]` inside triton_mxfp4_moe; that surfaces
   as a Python exception, not silent corruption.
 
-Adapted from prior MXFP4 + MI300X work (non-EP path); no upstream PR.
+Adapted from prior MXFP4 + MI300X work (non-EP path); not upstreamed.
 ---
  python/sglang/srt/layers/moe/ep_moe/layer.py | 52 ++++++++++++++++++++
  1 file changed, 52 insertions(+)

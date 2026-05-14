@@ -1,50 +1,48 @@
-From 91438c45a15744c23381ed661156fa67f0489908 Mon Sep 17 00:00:00 2001
+From 3d32e6e0cd39d5bb81c402da63bade00cebc4cbc Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 2/3] deepseek-mxfp4-orphan-dequant
+Subject: [PATCH 2/3] feat(deepseek): dequant orphan MXFP4 packed weights
+ inline during load
 
-vllm-shim local patch: dequantize orphan MXFP4 packed weights inline
-during DeepSeek-family weight loading.
-
-For Quark MXFP4 checkpoints whose MoE expert weights are picked up by
-`QuarkW4A4MXFp4MoE` (see quark-mxfp4-triton-gfx942.patch), the bulk of
-the FP4 bytes lands in the quantized MoE path. But the checkpoint
-sometimes also ships MXFP4-packed bytes for parameters that the model
-declares as plain BF16 (NextN's eh_proj is the canonical example: it
-has no Quark scheme attached but the checkpoint stores it packed).
-Without explicit handling, the default weight loader copies the uint8
-bytes into a BF16 parameter, leaving the model with garbage weights
-that produce noise at inference.
+For Quark MXFP4 checkpoints whose MoE expert weights are picked up
+by QuarkW4A4MXFp4MoE (see the gfx942 Triton fallback patch), the
+bulk of the FP4 bytes lands in the quantized MoE path. But the
+checkpoint sometimes also ships MXFP4-packed bytes for parameters
+that the model declares as plain BF16: NextN's eh_proj is the
+canonical example -- it has no Quark scheme attached but the
+checkpoint stores it packed. Without explicit handling, the default
+weight loader copies the uint8 bytes into a BF16 parameter, leaving
+the model with garbage weights that produce noise at inference.
 
 This patch teaches the DeepSeek V2/V3 weight loader to recognize the
-pattern `uint8 checkpoint tensor + BF16 parameter target + size ratio
-2x` and dequantize on the fly:
+pattern `uint8 checkpoint tensor + BF16 parameter target + size
+ratio 2x` and dequantize on the fly:
 
 1. A module-level `_dequant_mxfp4_weight` helper unpacks two FP4
-   nibbles per byte through a 16-entry LUT and applies the E8M0 scale
-   (2^(s - 127)) broadcast over groups of 32. Matches the OCP MX FP4
-   spec.
+   nibbles per byte through a 16-entry LUT and applies the E8M0
+   scale (2^(s - 127)) broadcast over groups of 32. Matches the OCP
+   MX FP4 spec.
 
 2. In the load loop, when a weight is uint8 and its target param is
-   BF16 with double the trailing dim, we dequant before invoking the
-   parameter's weight_loader. Two checkpoint emission orders show up
-   in practice:
-    a) weight arrives BEFORE its `*.weight_scale`: defer the weight,
-       then complete the dequant when the scale lands.
-    b) scale arrives BEFORE its weight (orphan scale, the param name
-       isn't in `params_dict` because there's no `.weight_scale`
-       parameter on the target module): cache the scale and consume
-       it when the weight arrives.
+   BF16/FP16 with double the trailing dim, we dequant before invoking
+   the parameter's weight_loader. Two checkpoint emission orders
+   show up in practice:
+     a) weight arrives BEFORE its `*.weight_scale`: defer the weight,
+        complete the dequant when the scale lands.
+     b) scale arrives BEFORE its weight (orphan scale -- the param
+        name isn't in params_dict because there's no
+        `.weight_scale` parameter on the target module): cache the
+        scale and consume it when the weight arrives.
 
 3. A safety log at end-of-load flags any weight that was deferred
-   and never reconciled (would indicate a real load order bug or a
-   missing scale tensor).
+   but never reconciled (real load-order bug upstream, or a missing
+   scale tensor in the checkpoint).
 
-The detection condition is exact (uint8 + BF16/FP16 target + 2x trail
-ratio) so non-MXFP4 weight loading is untouched. On a BF16 checkpoint
-the condition never triggers.
+Detection is exact (uint8 + BF16/FP16 target + 2x trail ratio) so
+non-MXFP4 weight loading is untouched. On a BF16 checkpoint the
+condition never triggers.
 
-Adapted from prior MXFP4 + MI300X work; no upstream PR.
+Adapted from prior MXFP4 + MI300X work; not upstreamed.
 ---
  .../deepseek_common/deepseek_weight_loader.py | 84 +++++++++++++++++++
  1 file changed, 84 insertions(+)

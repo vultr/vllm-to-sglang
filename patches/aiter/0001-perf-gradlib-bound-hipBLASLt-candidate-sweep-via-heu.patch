@@ -1,44 +1,30 @@
-From bdb68da0ab73243c73b433395c36695fbe2afe91 Mon Sep 17 00:00:00 2001
+From f3b5176c5f427423b3b69e92cf04bae9b4a1cd1d Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH] aiter-hipblaslt-heuristic
+Subject: [PATCH] perf(gradlib): bound hipBLASLt candidate sweep via heuristic
+ API
 
-vllm-shim local patch: use hipBLASLt's matmul heuristic API to bound
-AITER's per-shape kernel candidate set, instead of enumerating every
-algorithm hipBLASLt knows about.
+The aiter tuner currently sweeps every hipBLASLt algorithm for each
+shape via `hipblaslt_ext::getAllAlgos`. On MI300X that's ~1365
+candidates per shape, all unranked: the surviving
+`matmulIsAlgoSupported` filter only checks workspace fit, not
+predicted perf. The tuner then benchmarks every candidate, which is
+slow and includes algorithms that GPU-fault on specific shape
+geometries (the same root cause the mp_tuner patch papers over).
 
-`hipblasLtMatmul_findallsols_wrapper` in gradlib/csrc/hipbsolgemm.cu
-currently calls `hipblaslt_ext::getAllAlgos` to enumerate all kernels
-for the given GemmType + dtype tuple, ignoring the actual matmul
-descriptor (m, n, k, layouts, bias, scaling). For a typical fp8/bf16
-matmul on MI300X this returns ~1365 candidates, and the cheap
-`matmulIsAlgoSupported` filter that follows only checks workspace
-fit; it does not rank. The tuner then benchmarks every surviving
-candidate, which is both slow and includes algorithms that fault
-the GPU on specific shape geometries (the root cause of the
-mp_tuner KeyError storms that the adjacent mp_tuner patch
-papers over).
+This patch swaps the call for `hipblasLtMatmulAlgoGetHeuristic`, the
+API that uses the full matmul descriptor (m/n/k, layouts, bias,
+scaling) to filter and rank candidates by predicted performance. It
+also restores the supporting `preference` and `returnedAlgoCount`
+locals that the original code had removed alongside the heuristic
+call (still visible commented-out one line above).
 
-`hipblasLtMatmulAlgoGetHeuristic` was the original code path here
-(now commented out on the line immediately above the getAllAlgos
-call) and is the right shape: it uses the full matmul descriptor to
-filter and rank candidates by predicted performance, then returns
-the top N. The commented-out version is not drop-in functional
-because the `preference` object and `returnedAlgoCount` int it
-references were removed alongside it; this patch creates both.
+The candidate cap is exposed via `AITER_MAX_GEMM_CANDIDATES`. Default
+10 matches the value the commented-out original code used; set 2048
+to recover the full-sweep behaviour for comparison runs.
 
-The candidate cap is read from the environment so operators can
-dial it without rebuilding the image. Default 10 matches the
-original code's hardcoded N. Set `AITER_MAX_GEMM_CANDIDATES=2048`
-to effectively recover the full sweep behavior.
-
-There is no known upstream PR for this change. The shim's Docker
-images carry it locally until upstream lands an equivalent knob.
-The image-baked cache-key in /etc/vllm-shim/aiter-cache-key picks
-up the change automatically: the SHA of the patches directory
-moves, so `AITER_JIT_DIR` namespaces under a fresh `jit-<key>`
-subdir and AITER recompiles the patched .so on first call instead
-of loading a stale cached binary from the PV.
+No known upstream PR; the shim's images carry this locally until
+upstream restores the heuristic call or exposes an equivalent knob.
 ---
  gradlib/csrc/hipbsolgemm.cu | 42 ++++++++++++++++++++++++-------------
  1 file changed, 27 insertions(+), 15 deletions(-)

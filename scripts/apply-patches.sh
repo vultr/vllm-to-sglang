@@ -99,11 +99,20 @@ export GIT_COMMITTER_DATE="2026-01-01T00:00:00+00:00"
 
 cd "$target"
 
-# Step 1: pin upstream. If refs/vllm-shim/upstream already points at HEAD
-# we keep it; if it points elsewhere we reset it. The latter is the
-# "the dev ran sync-repos.sh to bump the upstream version" case.
-upstream_sha="$(git rev-parse HEAD)"
-git update-ref refs/vllm-shim/upstream "$upstream_sha"
+# Step 1: pin upstream. If refs/vllm-shim/upstream already exists we
+# trust it: that's the upstream commit the existing patched/* branches
+# were built on top of, and we want to rebuild against the same anchor.
+# Only on the first run (no existing ref) do we set it from HEAD.
+#
+# After sync-repos.sh bumps the upstream version, refs/vllm-shim/upstream
+# is stale; the dev must `git update-ref -d refs/vllm-shim/upstream`
+# before re-running apply-patches.sh so we pick up the new HEAD. This
+# is intentional: an automatic reset would silently rebase the patches
+# onto whichever commit HEAD happens to be at, masking real "upstream
+# drift broke the patches" failures.
+if ! git rev-parse --verify --quiet refs/vllm-shim/upstream >/dev/null; then
+    git update-ref refs/vllm-shim/upstream "$(git rev-parse HEAD)"
+fi
 
 apply_into_branch() {
     local branch="$1" start="$2" dir="$3"
