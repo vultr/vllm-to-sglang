@@ -1,7 +1,7 @@
 From 8e29266cc1d4225afd2b2201b1bb1f0f6a4e465c Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 6/6] fix(quark): zero MXFP4 stage2 weight at the sort sentinel
+Subject: [PATCH 6/7] fix(quark): zero MXFP4 stage2 weight at the sort sentinel
  position
 
 AITER's moe_sorting_fwd writes ``sentinel = num_local_tokens[0]`` into
