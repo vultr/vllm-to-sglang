@@ -1,7 +1,7 @@
 From 607a505fd4c99272234a9274c46ff81900f6b9af Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 5/5] fix(quark): stop caching MXFP4 MoE output buffer across
+Subject: [PATCH 5/6] fix(quark): stop caching MXFP4 MoE output buffer across
  layers
 
 The triton_mxfp4_moe workspace cache stored `output` (the [M, hidden]
