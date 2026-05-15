@@ -10,7 +10,7 @@ Applied whenever `rocm_probe` returns a GPU and `resolve_shim_home` resolves a p
 
 | Var | Value | Why |
 |---|---|---|
-| `HF_HUB_ENABLE_HF_TRANSFER` | `1` | Routes `huggingface_hub.snapshot_download` through the Rust transfer client. The shim's `resolve_model` is the consumer; faster cold-start. |
+| `HF_XET_HIGH_PERFORMANCE` | `1` | Asks hf-xet to saturate network bandwidth and CPU cores during `huggingface_hub.snapshot_download`. The shim's `resolve_model` is the consumer; faster cold-start. Replaces the deprecated `HF_HUB_ENABLE_HF_TRANSFER` (ignored on current `huggingface_hub`, since transfers route through hf-xet). |
 | `SAFETENSORS_FAST_GPU` | `1` | Direct-to-GPU weight loads via safetensors' fast path. |
 | `MIOPEN_USER_DB_PATH` | `$VLLM_SHIM_HOME/miopen` | MIOpen kernel-finder DB. Without persistence, MIOpen re-runs its find phase on every pod restart and the first batch eats the latency cost. SGLang's own CI scripts set the same two vars. |
 | `MIOPEN_CUSTOM_CACHE_DIR` | `$VLLM_SHIM_HOME/miopen` | Companion to the above. Same path. |
@@ -67,7 +67,7 @@ Operators can set these by hand if their workload benefits; the shim doesn't shi
 The stderr summary prints one line when defaults were applied:
 
 ```
-  rocm perf: 5 defaults (HF_HUB_ENABLE_HF_TRANSFER, MIOPEN_CUSTOM_CACHE_DIR, MIOPEN_USER_DB_PATH, SAFETENSORS_FAST_GPU, TORCH_BLAS_PREFER_HIPBLASLT)
+  rocm perf: 5 defaults (HF_XET_HIGH_PERFORMANCE, MIOPEN_CUSTOM_CACHE_DIR, MIOPEN_USER_DB_PATH, SAFETENSORS_FAST_GPU, TORCH_BLAS_PREFER_HIPBLASLT)
 ```
 
 The full env-var-to-value mapping is in the JSON dump under the `rocm_perf` key. Disabled (no GPU, no shim home, or operator set every var explicitly) means no line in the summary.

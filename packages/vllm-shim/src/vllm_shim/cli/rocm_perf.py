@@ -114,9 +114,12 @@ def rocm_perf_defaults(
     miopen_cache = str(shim_home / "miopen")
     defaults: dict[str, str] = {
         # Faster HF snapshot_download (the shim's resolve_model path
-        # uses huggingface_hub; this flips it onto the Rust transfer
-        # client when the wheel is installed).
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        # uses huggingface_hub; this asks hf-xet to saturate the
+        # network and CPU during the cold-start transfer). The legacy
+        # HF_HUB_ENABLE_HF_TRANSFER flag is ignored on current
+        # huggingface_hub: transfers go through hf-xet now, and
+        # HF_XET_HIGH_PERFORMANCE is its equivalent knob.
+        "HF_XET_HIGH_PERFORMANCE": "1",
         # Direct-to-GPU weight loads via safetensors' fast path.
         "SAFETENSORS_FAST_GPU": "1",
         # Persist MIOpen kernel-finder DB on the PV. Without this,

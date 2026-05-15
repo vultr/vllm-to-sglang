@@ -43,7 +43,7 @@ def test_no_shim_home_returns_empty() -> None:
 def test_generic_defaults_apply_to_any_rocm_gpu(tmp_path: Path) -> None:
     # MI250X (gfx90a): generic ROCm defaults yes, MI300-specific no.
     out = rocm_perf_defaults(_MI250X, tmp_path)
-    assert out["HF_HUB_ENABLE_HF_TRANSFER"] == "1"
+    assert out["HF_XET_HIGH_PERFORMANCE"] == "1"
     assert out["SAFETENSORS_FAST_GPU"] == "1"
     assert out["TORCH_BLAS_PREFER_HIPBLASLT"] == "1"
     assert "GPU_MAX_HW_QUEUES" not in out
@@ -93,7 +93,7 @@ def test_keys_are_a_known_set(tmp_path: Path) -> None:
     # deliberate edit here too so reviewers see the change.
     out = rocm_perf_defaults(_MI300X, tmp_path)
     assert set(out.keys()) == {
-        "HF_HUB_ENABLE_HF_TRANSFER",
+        "HF_XET_HIGH_PERFORMANCE",
         "SAFETENSORS_FAST_GPU",
         "MIOPEN_USER_DB_PATH",
         "MIOPEN_CUSTOM_CACHE_DIR",
