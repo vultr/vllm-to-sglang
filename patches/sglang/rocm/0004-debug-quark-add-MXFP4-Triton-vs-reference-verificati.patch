@@ -1,0 +1,384 @@
+From 106e863d8eefd80f9f8ebe205d70fdb02a27d6ed Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 4/4] debug(quark): add MXFP4 Triton-vs-reference verification
+ harness
+
+The MoRI EP MXFP4 Triton 2-stage chain (introduced by the preceding
+quark/mori patches) has no end-to-end correctness test in AITER:
+fused_moe_mxfp4_silu and fused_moe_mxfp4 each have per-kernel tests,
+but their chained use (silu output feeding the W2 GEMM as A) is novel
+to this patch stack. A live deployment reported coherent-shaped but
+semantically random output (multilingual token salad, no natural stop),
+which is the signature of a systematic but localized math bug in the
+chain.
+
+Static analysis ruled out the call-arg semantics: expert_mask polarity,
+align_experts = expert_mask.numel(), num_local_tokens scalar handling,
+weight/scale strides, swizzle_mx_b=False matching skipped e8m0_shuffle,
+and the sentinel-position contamination bound (writes to one position
+per call, multiplied by sorted_weights[sentinel]=0 in stage2, then
+zero-summed). None of those explains the observed magnitude of error.
+
+Without GPU access on the dev box, the next debug step is to compare
+the Triton output against a pure-torch reference of the same math and
+have the deployment dump the first divergent rows. The reference and
+the verify scaffold are wired in here. Off by default; opt in with
+VLLM_SHIM_MXFP4_VERIFY=1.
+
+triton_mxfp4_reference.py: fp32 dequant via OCP MXFP4 LUT + E8M0
+scale broadcast, then the same x @ W13.T -> chunk -> silu*up -> @ W2.T
+-> weighted-sum chain in Python. Slow on purpose; cached per-expert
+dequant keeps it tractable for the first ~32 rows of one warmup batch.
+
+triton_mxfp4_dispatch.py: gates on VLLM_SHIM_MXFP4_VERIFY, skips when
+torch.cuda.is_current_stream_capturing() is true (SGLang's warmup runs
+eager before capture, so verification fires there and not inside a
+graph), and runs once per unique shape key. On mismatch, logs the
+first three divergent rows with their topk_ids and topk_weights so
+the distribution of failures across (token, expert) pairs is visible
+in stderr.
+
+Knobs:
+  VLLM_SHIM_MXFP4_VERIFY=1            enable
+  VLLM_SHIM_MXFP4_VERIFY_ATOL=0.5     fail threshold (bf16 MoE noise)
+  VLLM_SHIM_MXFP4_VERIFY_MAX_ROWS=32  per-key row cap for the slow loop
+---
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 131 +++++++++++++
+ .../quark/schemes/triton_mxfp4_reference.py   | 173 ++++++++++++++++++
+ 2 files changed, 304 insertions(+)
+ create mode 100644 python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_reference.py
+
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+index 12eec83..2790674 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+@@ -18,6 +18,7 @@ validated in isolation first.
+ """
+ 
+ import logging
++import os
+ from types import SimpleNamespace
+ from typing import Optional
+ 
+@@ -32,6 +33,18 @@ _fused_moe_mxfp4_silu = None
+ _align_kernels = None
+ _moe_sorting_fwd = None
+ 
++# Verification scaffolding. When VLLM_SHIM_MXFP4_VERIFY=1, the first call for
++# each unique shape key runs a pure-torch reference (in eager mode only, never
++# during CUDA graph capture) and diffs the Triton output against it. The intent
++# is to localize correctness bugs in the Triton 2-stage MXFP4 chain, which has
++# no end-to-end reference in AITER's source (per-kernel tests exist; the
++# chained call pattern is novel to this patch). Reports go to ERROR-level
++# logging so they land in stderr alongside the existing [aiter] / SGLang lines.
++_VERIFY = os.environ.get("VLLM_SHIM_MXFP4_VERIFY", "0") == "1"
++_VERIFY_ATOL = float(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_ATOL", "0.5"))
++_VERIFY_MAX_ROWS = int(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_MAX_ROWS", "32"))
++_verified_keys: set = set()
++
+ 
+ def _load_triton_ops():
+     global _triton_ops_loaded, _fused_moe_mxfp4, _fused_moe_mxfp4_silu
+@@ -322,4 +335,122 @@ def triton_mxfp4_moe(
+     stage2_flat = ws.stage2_out.squeeze(0)
+     valid_out = stage2_flat[:num_valid_tokens].view(M, top_k, hidden_dim)
+     torch.sum(valid_out, dim=1, out=ws.output)
++
++    if _VERIFY:
++        _maybe_verify(
++            ws.output,
++            hidden_states,
++            w13_weight,
++            w2_weight,
++            w13_weight_scale,
++            w2_weight_scale,
++            topk_weights,
++            topk_ids,
++            expert_mask,
++            num_local_tokens,
++            (M, top_k, num_experts, align_experts, ep_mode),
++        )
++
+     return ws.output
++
++
++def _is_capturing() -> bool:
++    # is_current_stream_capturing exists on PyTorch 2.0+; guard for older.
++    fn = getattr(torch.cuda, "is_current_stream_capturing", None)
++    if fn is None:
++        return False
++    try:
++        return fn()
++    except RuntimeError:
++        return False
++
++
++def _maybe_verify(
++    triton_out: torch.Tensor,
++    hidden_states: torch.Tensor,
++    w13_weight: torch.Tensor,
++    w2_weight: torch.Tensor,
++    w13_weight_scale: torch.Tensor,
++    w2_weight_scale: torch.Tensor,
++    topk_weights: torch.Tensor,
++    topk_ids: torch.Tensor,
++    expert_mask: Optional[torch.Tensor],
++    num_local_tokens: Optional[torch.Tensor],
++    key: tuple,
++) -> None:
++    # Reference runs Python loops + .item() reads; would deadlock graph capture.
++    # SGLang's warmup pass runs eager before capture, so verify still fires.
++    if _is_capturing():
++        return
++    if key in _verified_keys:
++        return
++    _verified_keys.add(key)
++
++    from sglang.srt.layers.quantization.quark.schemes.triton_mxfp4_reference import (
++        reference_mxfp4_moe,
++    )
++
++    try:
++        ref_out, n_check = reference_mxfp4_moe(
++            hidden_states,
++            w13_weight,
++            w2_weight,
++            w13_weight_scale,
++            w2_weight_scale,
++            topk_weights,
++            topk_ids,
++            expert_mask=expert_mask,
++            num_local_tokens=num_local_tokens,
++            max_rows=_VERIFY_MAX_ROWS,
++        )
++    except Exception as e:  # noqa: BLE001
++        logger.error("[VERIFY key=%s] reference run failed: %r", key, e)
++        return
++
++    if n_check == 0:
++        logger.error("[VERIFY key=%s] no valid rows (n_local_tokens=0); skipped", key)
++        return
++
++    triton_valid = triton_out[:n_check].to(torch.float32)
++    ref_valid = ref_out[:n_check].to(torch.float32)
++    diff = (triton_valid - ref_valid).abs()
++    max_diff = diff.max().item()
++
++    if max_diff <= _VERIFY_ATOL:
++        logger.error(
++            "[VERIFY key=%s] OK  n_check=%d  max_diff=%.4f", key, n_check, max_diff
++        )
++        return
++
++    row_max = diff.max(dim=1).values
++    bad_rows = (row_max > _VERIFY_ATOL).nonzero(as_tuple=True)[0]
++    logger.error(
++        "[VERIFY key=%s] FAIL n_check=%d bad_rows=%d max_diff=%.4f atol=%.4f",
++        key,
++        n_check,
++        bad_rows.numel(),
++        max_diff,
++        _VERIFY_ATOL,
++    )
++
++    # Dump the first few divergent rows. The pattern of which (token, k)
++    # diverge tells us whether stage1 or stage2 is wrong: if the divergence
++    # is concentrated on a specific local expert, look at the W weight/scale
++    # layout for that expert; if every row diverges by a similar magnitude,
++    # the bug is in the chain (sort sentinel handling, stage2 input layout,
++    # reduce indexing).
++    for t_idx in bad_rows[:3].tolist():
++        tri_head = triton_valid[t_idx, :8].tolist()
++        ref_head = ref_valid[t_idx, :8].tolist()
++        ids = topk_ids[t_idx].tolist()
++        wts = topk_weights[t_idx].tolist()
++        logger.error(
++            "  row %d: row_max=%.4f\n    triton:    %s\n    reference: %s\n"
++            "    topk_ids:     %s\n    topk_weights: %s",
++            t_idx,
++            row_max[t_idx].item(),
++            [f"{v:+.3f}" for v in tri_head],
++            [f"{v:+.3f}" for v in ref_head],
++            ids,
++            [f"{v:+.4f}" for v in wts],
++        )
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_reference.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_reference.py
+new file mode 100644
+index 0000000..6d6486a
+--- /dev/null
++++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_reference.py
+@@ -0,0 +1,173 @@
++"""Pure-torch reference for triton_mxfp4_moe; used only for verification.
++
++Not on the inference path. Slow (Python loops, fp32 dequant of weights). The
++goal is to produce a reference output that is independent of the AITER Triton
++kernels, against which the Triton path can be diff'd to localize correctness
++bugs. Gated by VLLM_SHIM_MXFP4_VERIFY=1 in triton_mxfp4_dispatch.py.
++
++The math mirrors what AITER's MoRI EP MXFP4 forward should compute:
++
++  for t in valid_tokens:
++      for k in top_k:
++          eid_local = local_hash[topk_ids[t, k]]
++          if eid_local < 0: continue              # expert lives on another EP rank
++          w13 = dequant_mxfp4(W13[eid_local])     # (2*inter, hidden)
++          w2  = dequant_mxfp4(W2[eid_local])      # (hidden, inter)
++          stage1 = x_t @ w13.T                    # (2*inter,)
++          gate, up = stage1.chunk(2, dim=-1)
++          intermediate = silu(gate) * up
++          y = intermediate @ w2.T                 # (hidden,)
++          out[t] += topk_weights[t, k] * y
++"""
++
++import logging
++from typing import Optional
++
++import torch
++import torch.nn.functional as F
++
++logger = logging.getLogger(__name__)
++
++# OCP E2M1 (MXFP4) decode table. Index = packed nibble; value = decoded float.
++_MXFP4_VALUES = [
++    0.0,
++    0.5,
++    1.0,
++    1.5,
++    2.0,
++    3.0,
++    4.0,
++    6.0,
++    -0.0,
++    -0.5,
++    -1.0,
++    -1.5,
++    -2.0,
++    -3.0,
++    -4.0,
++    -6.0,
++]
++
++_mxfp4_lut_cache: dict = {}
++
++
++def _get_mxfp4_lut(device: torch.device) -> torch.Tensor:
++    key = str(device)
++    if key not in _mxfp4_lut_cache:
++        _mxfp4_lut_cache[key] = torch.tensor(
++            _MXFP4_VALUES, dtype=torch.float32, device=device
++        )
++    return _mxfp4_lut_cache[key]
++
++
++def _mxfp4_to_f32(x_packed: torch.Tensor) -> torch.Tensor:
++    """Unpack uint8-packed E2M1 (FP4) values to fp32 via a 16-entry LUT.
++
++    Each input byte holds two FP4 values: low nibble first, high nibble second.
++    """
++    lut = _get_mxfp4_lut(x_packed.device)
++    x = x_packed.repeat_interleave(2, dim=-1).clone()
++    x[..., ::2] = x[..., ::2] & 0xF
++    x[..., 1::2] = x[..., 1::2] >> 4
++    return lut[x.long()]
++
++
++def _e8m0_to_f32(x_e8m0: torch.Tensor) -> torch.Tensor:
++    """Convert uint8 E8M0 scale bytes to fp32 (2 ** (e - 127); 0xFF is NaN)."""
++    x_f32 = 2.0 ** (x_e8m0.to(torch.float32) - 127.0)
++    # 0xFF -> 2**128 in float; AITER maps it to NaN.
++    x_f32 = torch.where(x_e8m0 == 0xFF, torch.full_like(x_f32, float("nan")), x_f32)
++    return x_f32
++
++
++def _dequant_mxfp4(packed: torch.Tensor, scale_e8m0: torch.Tensor) -> torch.Tensor:
++    """Dequantize MXFP4 packed weights + per-32 E8M0 scales to fp32.
++
++    packed shape:     (..., K // 2) uint8   (two FP4 values per byte on last axis)
++    scale_e8m0 shape: (..., K // 32) uint8
++    Returns:          (..., K) fp32
++    """
++    values = _mxfp4_to_f32(packed)
++    scales = _e8m0_to_f32(scale_e8m0.repeat_interleave(32, dim=-1))
++    return values * scales
++
++
++def reference_mxfp4_moe(
++    hidden_states: torch.Tensor,
++    w13_weight: torch.Tensor,
++    w2_weight: torch.Tensor,
++    w13_weight_scale: torch.Tensor,
++    w2_weight_scale: torch.Tensor,
++    topk_weights: torch.Tensor,
++    topk_ids: torch.Tensor,
++    expert_mask: Optional[torch.Tensor] = None,
++    num_local_tokens: Optional[torch.Tensor] = None,
++    max_rows: int = 32,
++) -> tuple[torch.Tensor, int]:
++    """Pure-torch MXFP4 MoE forward; returns (output, n_check).
++
++    Only the first ``n_check`` rows of ``output`` are filled. The rest are zero,
++    matching how the Triton path leaves padding rows beyond ``num_local_tokens``.
++
++    max_rows bounds the per-token Python loop. Verification only needs enough
++    rows to surface a systematic bug; for warmup batches in the thousands the
++    full loop would stall startup.
++    """
++    M, hidden_dim = hidden_states.shape
++    top_k = topk_ids.shape[1]
++    inter_dim = w13_weight.shape[1] // 2
++
++    if expert_mask is not None:
++        local_hash = expert_mask.cumsum(0, dtype=torch.int32) - 1
++        local_hash = torch.where(
++            expert_mask == 0, torch.full_like(local_hash, -1), local_hash
++        )
++    else:
++        # No EP: topk_ids already index into the local weight table.
++        num_local = w13_weight.shape[0]
++        local_hash = torch.arange(num_local, dtype=torch.int32, device=topk_ids.device)
++
++    if num_local_tokens is not None:
++        n_valid = int(num_local_tokens.flatten()[0].item())
++    else:
++        n_valid = M
++    n_check = max(0, min(n_valid, max_rows))
++
++    output = torch.zeros(
++        (M, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
++    )
++    if n_check == 0:
++        return output, 0
++
++    # Dequant only the local experts we will actually touch over the n_check
++    # rows. For a small max_rows this is a handful of experts at worst, so the
++    # fp32 weight tensors stay small.
++    seen_locals = set()
++    for t in range(n_check):
++        for k in range(top_k):
++            eid_g = int(topk_ids[t, k].item())
++            eid_l = int(local_hash[eid_g].item())
++            if eid_l >= 0:
++                seen_locals.add(eid_l)
++
++    w13_cache: dict[int, torch.Tensor] = {}
++    w2_cache: dict[int, torch.Tensor] = {}
++    for eid_l in seen_locals:
++        w13_cache[eid_l] = _dequant_mxfp4(w13_weight[eid_l], w13_weight_scale[eid_l])
++        w2_cache[eid_l] = _dequant_mxfp4(w2_weight[eid_l], w2_weight_scale[eid_l])
++
++    for t in range(n_check):
++        x = hidden_states[t].to(torch.float32)
++        for k in range(top_k):
++            eid_g = int(topk_ids[t, k].item())
++            eid_l = int(local_hash[eid_g].item())
++            if eid_l < 0:
++                continue
++            w = float(topk_weights[t, k].item())
++            stage1 = x @ w13_cache[eid_l].T
++            gate, up = stage1.chunk(2, dim=-1)
++            intermediate = F.silu(gate) * up
++            y = intermediate @ w2_cache[eid_l].T
++            output[t] += (w * y).to(output.dtype)
++
++    return output, n_check
