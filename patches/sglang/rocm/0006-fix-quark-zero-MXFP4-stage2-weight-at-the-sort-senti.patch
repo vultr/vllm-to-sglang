@@ -1,4 +1,4 @@
-From b2555a209a8451b89b852e53182ed5d9a7b4369f Mon Sep 17 00:00:00 2001
+From 8e29266cc1d4225afd2b2201b1bb1f0f6a4e465c Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 6/6] fix(quark): zero MXFP4 stage2 weight at the sort sentinel
@@ -34,15 +34,15 @@ layer). Correctness over a few percent of lost signal.
 reference_mxfp4_moe mirrors the skip so verify (patch 0004) still
 compares like-for-like.
 ---
- .../quark/schemes/triton_mxfp4_dispatch.py    | 27 +++++++++++++++++++
- .../quark/schemes/triton_mxfp4_reference.py   | 14 ++++++++++
- 2 files changed, 41 insertions(+)
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 32 +++++++++++++++++++
+ .../quark/schemes/triton_mxfp4_reference.py   | 14 ++++++++
+ 2 files changed, 46 insertions(+)
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index b510ce5..3531121 100644
+index b510ce5..eacbb6a 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-@@ -326,6 +326,33 @@ def triton_mxfp4_moe(
+@@ -326,6 +326,38 @@ def triton_mxfp4_moe(
      flat_weights = topk_weights.reshape(-1)
      ws.stage2_topk_weights.zero_()
      ws.stage2_topk_weights[:num_valid_tokens, 0] = flat_weights
@@ -71,8 +71,13 @@ index b510ce5..3531121 100644
 +    # ``1 / (top_k * n_valid)`` of the residual. Tolerable; correctness
 +    # beats the lost ~1% in this trade.
 +    if ep_mode and num_local_tokens is not None:
++        # Use scatter_ rather than ``[sentinel_idx] = 0.0`` advanced
++        # indexing: the latter raises "operation not permitted when stream
++        # is capturing" on HIP during CUDA graph capture, while scatter_
++        # with a scalar src is a regular kernel launch that captures
++        # cleanly.
 +        sentinel_idx = num_local_tokens.flatten()[:1].long()
-+        ws.stage2_topk_weights[sentinel_idx] = 0.0
++        ws.stage2_topk_weights.view(-1).scatter_(0, sentinel_idx, 0.0)
      _fused_moe_mxfp4(
          A=ws.stage1_out,
          B=w2_weight,
