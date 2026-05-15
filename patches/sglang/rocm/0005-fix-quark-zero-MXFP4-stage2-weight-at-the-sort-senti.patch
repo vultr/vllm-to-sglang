@@ -1,7 +1,7 @@
-From 8e29266cc1d4225afd2b2201b1bb1f0f6a4e465c Mon Sep 17 00:00:00 2001
+From c08a9f69ab691a526b83329b41234fda8aa5b6e2 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 6/7] fix(quark): zero MXFP4 stage2 weight at the sort sentinel
+Subject: [PATCH 5/6] fix(quark): zero MXFP4 stage2 weight at the sort sentinel
  position
 
 AITER's moe_sorting_fwd writes ``sentinel = num_local_tokens[0]`` into
@@ -39,10 +39,10 @@ compares like-for-like.
  2 files changed, 46 insertions(+)
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index b510ce5..eacbb6a 100644
+index 2790674..5badfff 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-@@ -326,6 +326,38 @@ def triton_mxfp4_moe(
+@@ -311,6 +311,38 @@ def triton_mxfp4_moe(
      flat_weights = topk_weights.reshape(-1)
      ws.stage2_topk_weights.zero_()
      ws.stage2_topk_weights[:num_valid_tokens, 0] = flat_weights

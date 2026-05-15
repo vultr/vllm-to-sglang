@@ -1,7 +1,7 @@
-From 86f3cb7b773d5c4a1ee5d00326b604bfbc584a10 Mon Sep 17 00:00:00 2001
+From c372912439f72edbbaf397d3919aa7b916713e2a Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 7/7] debug(quark): tighten MXFP4 verify atol and report
+Subject: [PATCH 6/6] debug(quark): tighten MXFP4 verify atol and report
  magnitudes
 
 The original atol=0.5 was set when per-row diffs of ~0.1 looked like
@@ -24,7 +24,7 @@ fix wiped a legitimate slot.
  1 file changed, 34 insertions(+), 4 deletions(-)
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index eacbb6a..e8fc778 100644
+index 5badfff..9a13f37 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -41,8 +41,14 @@ _moe_sorting_fwd = None
@@ -44,7 +44,7 @@ index eacbb6a..e8fc778 100644
  _verified_keys: set = set()
  
  
-@@ -462,22 +468,46 @@ def _maybe_verify(
+@@ -447,22 +453,46 @@ def _maybe_verify(
      ref_valid = ref_out[:n_check].to(torch.float32)
      diff = (triton_valid - ref_valid).abs()
      max_diff = diff.max().item()

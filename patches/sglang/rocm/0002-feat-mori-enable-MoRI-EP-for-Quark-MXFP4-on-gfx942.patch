@@ -1,7 +1,7 @@
 From c2186052adefebb7a45be9f7beaac70adb7ff7bd Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 2/7] feat(mori): enable MoRI EP for Quark MXFP4 on gfx942
+Subject: [PATCH 2/6] feat(mori): enable MoRI EP for Quark MXFP4 on gfx942
 
 AITER's fused_moe() dispatcher routes MXFP4 + per_1x32 to CK GEMM
 kernels in csrc/ck_gemm_moe_2stages/ whose dispatch.h ifdefs enable
