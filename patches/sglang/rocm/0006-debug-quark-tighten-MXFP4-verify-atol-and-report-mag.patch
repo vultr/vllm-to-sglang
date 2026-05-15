@@ -1,7 +1,7 @@
 From c372912439f72edbbaf397d3919aa7b916713e2a Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 6/7] debug(quark): tighten MXFP4 verify atol and report
+Subject: [PATCH 6/8] debug(quark): tighten MXFP4 verify atol and report
  magnitudes
 
 The original atol=0.5 was set when per-row diffs of ~0.1 looked like

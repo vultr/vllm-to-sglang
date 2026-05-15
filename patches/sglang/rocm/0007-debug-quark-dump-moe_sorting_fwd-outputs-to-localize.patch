@@ -1,7 +1,7 @@
 From d002d63536265f825774d14459b4f9bc24fc75c2 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 7/7] debug(quark): dump moe_sorting_fwd outputs to localize EP
+Subject: [PATCH 7/8] debug(quark): dump moe_sorting_fwd outputs to localize EP
  zero-output
 
 The verify pattern shows triton output is identically zero across most
