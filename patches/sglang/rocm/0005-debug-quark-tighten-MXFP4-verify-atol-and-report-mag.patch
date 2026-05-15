@@ -1,7 +1,7 @@
-From c372912439f72edbbaf397d3919aa7b916713e2a Mon Sep 17 00:00:00 2001
+From f83f3dbadfa8c8e87424f0374409335ee3c57322 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 6/8] debug(quark): tighten MXFP4 verify atol and report
+Subject: [PATCH 5/6] debug(quark): tighten MXFP4 verify atol and report
  magnitudes
 
 The original atol=0.5 was set when per-row diffs of ~0.1 looked like
@@ -16,15 +16,13 @@ double max_rows to 64 so we sample more of the dispatch buffer.
 Also widen the diagnostic surface: report mean_diff and ref_abs_mean
 on both OK and FAIL so the operator can judge relative magnitude
 (0.01 on values averaging 0.005 is catastrophic; on values averaging
-5.0 it's noise). The FAIL line also resolves the sentinel flat index
-to (token, slot) so we can see at a glance whether the sentinel-zero
-fix wiped a legitimate slot.
+5.0 it's noise).
 ---
- .../quark/schemes/triton_mxfp4_dispatch.py    | 38 +++++++++++++++++--
- 1 file changed, 34 insertions(+), 4 deletions(-)
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 28 ++++++++++++++++---
+ 1 file changed, 24 insertions(+), 4 deletions(-)
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index 5badfff..9a13f37 100644
+index 2790674..217f2ea 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -41,8 +41,14 @@ _moe_sorting_fwd = None
@@ -44,7 +42,7 @@ index 5badfff..9a13f37 100644
  _verified_keys: set = set()
  
  
-@@ -447,22 +453,46 @@ def _maybe_verify(
+@@ -415,21 +421,35 @@ def _maybe_verify(
      ref_valid = ref_out[:n_check].to(torch.float32)
      diff = (triton_valid - ref_valid).abs()
      max_diff = diff.max().item()
@@ -69,19 +67,10 @@ index 5badfff..9a13f37 100644
  
      row_max = diff.max(dim=1).values
      bad_rows = (row_max > _VERIFY_ATOL).nonzero(as_tuple=True)[0]
-+    # Locate the flat (token, slot) index where the kernel chain's sentinel
-+    # collision concentrates. If sentinel-zeroing produced the bug, the worst
-+    # diff lands on the exact (token, slot) we wiped.
-+    sentinel_flat_str = "n/a"
-+    if num_local_tokens is not None:
-+        s = int(num_local_tokens.flatten()[0].item())
-+        tk = topk_ids.shape[1]
-+        if s < n_check * tk:
-+            sentinel_flat_str = f"flat={s} (token={s // tk} slot={s % tk})"
      logger.error(
 -        "[VERIFY key=%s] FAIL n_check=%d bad_rows=%d max_diff=%.4f atol=%.4f",
 +        "[VERIFY key=%s] FAIL n_check=%d bad_rows=%d max_diff=%.5f "
-+        "mean_diff=%.5f ref_abs_mean=%.5f atol=%.4f sentinel=%s",
++        "mean_diff=%.5f ref_abs_mean=%.5f atol=%.4f",
          key,
          n_check,
          bad_rows.numel(),
@@ -89,7 +78,5 @@ index 5badfff..9a13f37 100644
 +        mean_diff,
 +        ref_abs_mean,
          _VERIFY_ATOL,
-+        sentinel_flat_str,
      )
  
-     # Dump the first few divergent rows. The pattern of which (token, k)
