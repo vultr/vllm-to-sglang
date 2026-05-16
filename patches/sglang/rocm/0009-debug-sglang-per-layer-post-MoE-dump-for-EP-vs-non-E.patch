@@ -1,4 +1,4 @@
-From 6bf9b137061f27599c74388be26c7ee9dba4ae50 Mon Sep 17 00:00:00 2001
+From fa2c6453ae5dad8ef6d020333b98ff55afa12a76 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 9/9] debug(sglang): per-layer post-MoE dump for EP vs non-EP
@@ -37,16 +37,34 @@ MoE layers" to "in or before layer N".
 
 Disabled by default; no overhead when VLLM_SHIM_MOE_POST_DUMP=0.
 ---
- python/sglang/srt/layers/moe/ep_moe/layer.py  | 11 ++++-
+ python/sglang/srt/layers/moe/ep_moe/layer.py  | 22 ++++++++-
  .../quark/schemes/quark_w4a4_mxfp4_moe.py     |  7 +++
  .../quark/schemes/triton_mxfp4_dispatch.py    | 48 +++++++++++++++++++
- 3 files changed, 65 insertions(+), 1 deletion(-)
+ 3 files changed, 76 insertions(+), 1 deletion(-)
 
 diff --git a/python/sglang/srt/layers/moe/ep_moe/layer.py b/python/sglang/srt/layers/moe/ep_moe/layer.py
-index f25cf47..1db0cdf 100644
+index f25cf47..249a8ff 100644
 --- a/python/sglang/srt/layers/moe/ep_moe/layer.py
 +++ b/python/sglang/srt/layers/moe/ep_moe/layer.py
-@@ -664,7 +664,16 @@ class MoriEPMoE(DeepEPMoE):
+@@ -654,6 +654,17 @@ class MoriEPMoE(DeepEPMoE):
+         self,
+         hidden_states: torch.Tensor,
+         topk_output: TopKOutput,
++    ):
++        # Delegate to forward_impl so the post-combine path (and our hook
++        # inside it) fires regardless of whether the caller is the eager
++        # Python entry or moe_forward_piecewise_cuda_graph_impl (which calls
++        # forward_impl directly, bypassing forward).
++        return self.forward_impl(hidden_states, topk_output)
++
++    def forward_impl(
++        self,
++        hidden_states: torch.Tensor,
++        topk_output: TopKOutput,
+     ):
+         num_token = hidden_states.shape[0]
+         dispatch_output = self.dispatcher.dispatch(
+@@ -664,7 +675,16 @@ class MoriEPMoE(DeepEPMoE):
              combine_input=combine_input,
          )
  
