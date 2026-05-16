@@ -1,7 +1,7 @@
 From 3cfad6afb6b4c71f511530e04060d3fe548aa8c0 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 7/8] debug(quark): re-sample MXFP4 verify on real-data calls,
+Subject: [PATCH 7/9] debug(quark): re-sample MXFP4 verify on real-data calls,
  not just warmup
 
 The dedup-by-shape-key meant verify only ever fired on the synthetic

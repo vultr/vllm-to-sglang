@@ -1,0 +1,157 @@
+From 6bf9b137061f27599c74388be26c7ee9dba4ae50 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 9/9] debug(sglang): per-layer post-MoE dump for EP vs non-EP
+ head-to-head
+
+Static analysis of the K2.6 MoRI EP gibberish has gone as far as it can.
+Mask, remap, weight slots, dispatch routing, and combine all align under
+_remap_topk_for_deepep (topk.py:1017-1058): the byte-identical DP4/5/6
+row 0 outputs we saw in the EP-DUMP are the home-rank shared-expert path
+behaving correctly, not a bug. But the gibberish symptom is real (Test 2
+confirmed non-EP is coherent at 21 tok/s with this same image), so the
+divergence must live somewhere our static read missed.
+
+Add a head-to-head probe. VLLM_SHIM_MOE_POST_DUMP=N logs the first N
+post-MoE hidden states per (layer_id, mode) pair where mode is "ep" or
+"nonep". Two call sites land at the semantic same point:
+
+  MoriEPMoE.forward (post-combine, pre-return)
+    -> maybe_dump_post_moe(layer_id, "ep", hidden_states[:num_token])
+
+  QuarkW4A4MXFp4MoE.apply_weights (post-triton_mxfp4_moe, non-EP path)
+    -> maybe_dump_post_moe(layer.layer_id, "nonep", output)
+
+Both paths certifiedly call the same triton_mxfp4_moe function (the
+non-EP fallback at quark_w4a4_mxfp4_moe.py:241 with no expert_mask /
+num_local_tokens, so ep_mode=False inside). So "non-EP works" certifies
+the kernel under dense input; the dump tells us whether the EP-mode
+output of the same kernel + combine drifts from the dense reference.
+
+Each line carries abs_mean, abs_max, l2, and a first-row signature.
+Operator runs the same prompt once in each mode and joins on
+(layer_id, call). Layer 0 should match within bf16 noise; the first
+layer that doesn't is where the EP path starts diverging from the
+math non-EP performs. That localizes the bug from "somewhere in 60
+MoE layers" to "in or before layer N".
+
+Disabled by default; no overhead when VLLM_SHIM_MOE_POST_DUMP=0.
+---
+ python/sglang/srt/layers/moe/ep_moe/layer.py  | 11 ++++-
+ .../quark/schemes/quark_w4a4_mxfp4_moe.py     |  7 +++
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 48 +++++++++++++++++++
+ 3 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/moe/ep_moe/layer.py b/python/sglang/srt/layers/moe/ep_moe/layer.py
+index f25cf47..1db0cdf 100644
+--- a/python/sglang/srt/layers/moe/ep_moe/layer.py
++++ b/python/sglang/srt/layers/moe/ep_moe/layer.py
+@@ -664,7 +664,16 @@ class MoriEPMoE(DeepEPMoE):
+             combine_input=combine_input,
+         )
+ 
+-        return hidden_states[:num_token]
++        out = hidden_states[:num_token]
++        # Post-MoE dump for EP-vs-non-EP head-to-head. Lazy import keeps the
++        # diagnostic out of the hot path for non-Triton-MXFP4 backends and
++        # avoids a circular import via the quark schemes module.
++        if _use_mori_mxfp4_triton:
++            from sglang.srt.layers.quantization.quark.schemes.triton_mxfp4_dispatch import (
++                maybe_dump_post_moe,
++            )
++            maybe_dump_post_moe(self.layer_id, "ep", out)
++        return out
+ 
+     def run_moe_core(
+         self,
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
+index df02088..18baac5 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
+@@ -236,6 +236,9 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+         # gating rationale.
+         if _use_triton_mxfp4_fallback:
+             from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
++            from sglang.srt.layers.quantization.quark.schemes.triton_mxfp4_dispatch import (
++                maybe_dump_post_moe,
++            )
+ 
+             topk_output = dispatch_output.topk_output
+             output = triton_mxfp4_moe(
+@@ -247,6 +250,10 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+                 topk_weights=topk_output.topk_weights,
+                 topk_ids=topk_output.topk_ids,
+             )
++            # Post-MoE dump for EP-vs-non-EP head-to-head; mirrors the call in
++            # MoriEPMoE.forward post-combine. Same layer_id source so the two
++            # logs can be joined per-layer.
++            maybe_dump_post_moe(getattr(layer, "layer_id", -1), "nonep", output)
+             return StandardCombineInput(hidden_states=output)
+ 
+         if hasattr(torch, "float4_e2m1fn_x2"):
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+index cf6dbdb..38f6774 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+@@ -81,6 +81,18 @@ _DUMP_EP_AFTER = int(os.environ.get("VLLM_SHIM_MXFP4_DUMP_EP_AFTER", "0"))
+ _DUMP_EP_RUNS = int(os.environ.get("VLLM_SHIM_MXFP4_DUMP_EP_RUNS", "1"))
+ _ep_dump_counts: dict = {}
+ 
++# Per-layer post-MoE hidden-state dump for head-to-head EP vs non-EP diffing.
++# Gated by VLLM_SHIM_MOE_POST_DUMP=N (default 0 = disabled). Fires on the
++# first N eager forwards per (layer_id, mode) pair where mode is "ep" or
++# "nonep". Operator runs the same prompt once in EP and once in non-EP;
++# each run produces one line per (layer, call) with an abs_mean/abs_max/
++# l2/first-row signature. Diffing the two logs by (layer_id, call_n) shows
++# where (if anywhere) the EP and non-EP post-MoE outputs diverge. Layer 0
++# should match within bf16 noise; the first layer where they don't is
++# where the bug lives.
++_POST_DUMP = int(os.environ.get("VLLM_SHIM_MOE_POST_DUMP", "0"))
++_post_dump_counts: dict = {}
++
+ 
+ def _load_triton_ops():
+     global _triton_ops_loaded, _fused_moe_mxfp4, _fused_moe_mxfp4_silu
+@@ -432,6 +444,42 @@ def triton_mxfp4_moe(
+     return ws.output
+ 
+ 
++def maybe_dump_post_moe(layer_id, mode: str, hidden_states: torch.Tensor) -> None:
++    """Per-layer post-MoE hidden-state summary for EP vs non-EP head-to-head.
++
++    Called by MoriEPMoE.forward (post-combine) and QuarkW4A4MXFp4MoE.apply_weights
++    (post-triton_mxfp4_moe in the non-EP fallback). Both call sites land at the
++    same semantic point: the MoE layer's contribution to the residual stream for
++    this rank's tokens. With the same prompt and the same DP layout, the two
++    runs should agree to bf16 noise on every layer. The first layer where they
++    don't is where the EP integration drifts from the math non-EP performs.
++    """
++    if _POST_DUMP <= 0 or _is_capturing():
++        return
++    key = (int(layer_id), mode)
++    n = _post_dump_counts.get(key, 0)
++    if n >= _POST_DUMP:
++        return
++    _post_dump_counts[key] = n + 1
++    try:
++        h = hidden_states.detach()
++        n_tokens = int(h.shape[0])
++        h_fp32 = h.float()
++        first_row = h[0, :8].to("cpu").tolist() if n_tokens > 0 else []
++        logger.error(
++            "[POST-MOE call=%d] layer=%d mode=%s n_tokens=%d "
++            "abs_mean=%.5f abs_max=%.5f l2=%.5f first_row[:8]=%s",
++            n, int(layer_id), mode, n_tokens,
++            h_fp32.abs().mean().item(),
++            h_fp32.abs().max().item(),
++            h_fp32.norm().item(),
++            [f"{v:+.5f}" for v in first_row],
++        )
++    except Exception as e:  # noqa: BLE001
++        logger.error("[POST-MOE call=%d] layer=%d mode=%s failed: %r",
++                     n, int(layer_id), mode, e)
++
++
+ def _is_capturing() -> bool:
+     # is_current_stream_capturing exists on PyTorch 2.0+; guard for older.
+     fn = getattr(torch.cuda, "is_current_stream_capturing", None)

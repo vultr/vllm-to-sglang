@@ -1,7 +1,7 @@
 From aa50c99d3f0b55831a465d8947c4731eb31aa0fd Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 8/8] debug(quark): sample MoRI EP dispatch/combine I/O dump on
+Subject: [PATCH 8/9] debug(quark): sample MoRI EP dispatch/combine I/O dump on
  real-data calls
 
 The first iteration of this dump fired on the first eager EP call per

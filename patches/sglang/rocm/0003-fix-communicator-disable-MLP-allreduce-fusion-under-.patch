@@ -1,7 +1,7 @@
 From e4e468f9337af0418e4b865aaa813714f67da155 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 3/8] fix(communicator): disable MLP allreduce fusion under DP
+Subject: [PATCH 3/9] fix(communicator): disable MLP allreduce fusion under DP
  attention
 
 should_fuse_mlp_allreduce_with_next_layer carries its own inline copy
