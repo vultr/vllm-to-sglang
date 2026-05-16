@@ -1,7 +1,7 @@
 From 686a069989f33c8ca21133c3e72726577d382ce9 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 1/9] feat(quark): route MXFP4 MoE through AITER Triton kernels
+Subject: [PATCH 1/2] feat(quark): route MXFP4 MoE through AITER Triton kernels
  on gfx942
 
 AITER's `fused_moe.fused_moe()` dispatcher routes MXFP4 + per_1x32
