@@ -1,0 +1,125 @@
+From 3cfad6afb6b4c71f511530e04060d3fe548aa8c0 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 7/7] debug(quark): re-sample MXFP4 verify on real-data calls,
+ not just warmup
+
+The dedup-by-shape-key meant verify only ever fired on the synthetic
+warmup batch (output ref_abs_mean ~1e-3, two orders below what a real
+MoE residual contribution looks like). With output magnitudes that
+small the atol gate passes even when a multiplicative or routing bug
+is in flight. Real serving inputs hit the same shape key, find it
+cached, and skip verify -- so we get no correctness signal under
+load.
+
+Add VLLM_SHIM_MXFP4_VERIFY_SAMPLE (default 64). Verify still fires
+on call 0 (the warmup pass), then every Nth call after that for the
+same shape. The cache key tacks on the call number so _maybe_verify
+itself stays one-shot per (shape, call) pair. Set N=1 to verify every
+eager call (slow but exhaustive), N=0 to restore the old "once per
+shape" behaviour.
+
+Moves the cache-key dedup out of _maybe_verify into the call site
+(the only caller). _maybe_verify now just runs the comparison.
+---
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 64 +++++++++++--------
+ 1 file changed, 39 insertions(+), 25 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+index 74550e5..93441fc 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+@@ -32,13 +32,22 @@ _fused_moe_mxfp4 = None
+ _fused_moe_mxfp4_silu = None
+ _align_kernels = None
+ 
+-# Verification scaffolding. When VLLM_SHIM_MXFP4_VERIFY=1, the first call for
+-# each unique shape key runs a pure-torch reference (in eager mode only, never
+-# during CUDA graph capture) and diffs the Triton output against it. The intent
+-# is to localize correctness bugs in the Triton 2-stage MXFP4 chain, which has
+-# no end-to-end reference in AITER's source (per-kernel tests exist; the
+-# chained call pattern is novel to this patch). Reports go to ERROR-level
+-# logging so they land in stderr alongside the existing [aiter] / SGLang lines.
++# Verification scaffolding. When VLLM_SHIM_MXFP4_VERIFY=1, the call runs a
++# pure-torch reference (in eager mode only, never during CUDA graph capture)
++# and diffs the Triton output against it. The intent is to localize
++# correctness bugs in the Triton 2-stage MXFP4 chain, which has no end-to-end
++# reference in AITER's source (per-kernel tests exist; the chained call
++# pattern is novel to this patch). Reports go to ERROR-level logging so they
++# land in stderr alongside the existing [aiter] / SGLang lines.
++#
++# VLLM_SHIM_MXFP4_VERIFY_SAMPLE=N (default 64) bounds how often verify fires
++# per shape key: the first call runs verify, then every Nth call after that
++# (counting calls of the same shape). Warmup hits the first slot; real
++# serving inputs hit the rest. Earlier versions dedup'd by shape alone, so
++# verify only ever fired on the synthetic warmup batch (output magnitudes
++# ~1e-3, which let scaling/routing bugs slip past atol). Set N=1 to verify
++# every eager call (slow but exhaustive); set N=0 to disable resampling
++# entirely (fire once per shape, the old behaviour).
+ _VERIFY = os.environ.get("VLLM_SHIM_MXFP4_VERIFY", "0") == "1"
+ # Tightened from 0.5 -> 0.02. The original 0.5 was set after observing per-row
+ # errors at ~0.1 and assuming bf16 intermediate rounding accounted for the
+@@ -48,7 +57,8 @@ _VERIFY = os.environ.get("VLLM_SHIM_MXFP4_VERIFY", "0") == "1"
+ # few units -- the band where a clean MoE computation should land.
+ _VERIFY_ATOL = float(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_ATOL", "0.02"))
+ _VERIFY_MAX_ROWS = int(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_MAX_ROWS", "64"))
+-_verified_keys: set = set()
++_VERIFY_SAMPLE = int(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_SAMPLE", "64"))
++_verify_call_counts: dict = {}
+ 
+ 
+ def _load_triton_ops():
+@@ -360,19 +370,25 @@ def triton_mxfp4_moe(
+     torch.sum(valid_out, dim=1, out=ws.output)
+ 
+     if _VERIFY:
+-        _maybe_verify(
+-            ws.output,
+-            hidden_states,
+-            w13_weight,
+-            w2_weight,
+-            w13_weight_scale,
+-            w2_weight_scale,
+-            topk_weights,
+-            topk_ids,
+-            expert_mask,
+-            num_local_tokens,
+-            (M, top_k, num_experts, align_experts, ep_mode),
+-        )
++        key = (M, top_k, num_experts, align_experts, ep_mode)
++        n = _verify_call_counts.get(key, 0)
++        _verify_call_counts[key] = n + 1
++        # Fire on call 0 (warmup), then every _VERIFY_SAMPLE calls. N=0
++        # falls back to "once per shape" behaviour.
++        if n == 0 or (_VERIFY_SAMPLE > 0 and n % _VERIFY_SAMPLE == 0):
++            _maybe_verify(
++                ws.output,
++                hidden_states,
++                w13_weight,
++                w2_weight,
++                w13_weight_scale,
++                w2_weight_scale,
++                topk_weights,
++                topk_ids,
++                expert_mask,
++                num_local_tokens,
++                (*key, n),
++            )
+ 
+     return ws.output
+ 
+@@ -402,12 +418,10 @@ def _maybe_verify(
+     key: tuple,
+ ) -> None:
+     # Reference runs Python loops + .item() reads; would deadlock graph capture.
+-    # SGLang's warmup pass runs eager before capture, so verify still fires.
++    # Call-site (triton_mxfp4_moe) owns the sampling cadence via
++    # _VERIFY_SAMPLE; this function just runs the comparison.
+     if _is_capturing():
+         return
+-    if key in _verified_keys:
+-        return
+-    _verified_keys.add(key)
+ 
+     from sglang.srt.layers.quantization.quark.schemes.triton_mxfp4_reference import (
+         reference_mxfp4_moe,
