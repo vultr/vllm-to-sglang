@@ -1,7 +1,7 @@
 From 3aadb1cd527a88dc13661ec9df4d4a1f00570945 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 6/7] fix(quark): bypass moe_sorting for MoRI EP MXFP4,
+Subject: [PATCH 6/8] fix(quark): bypass moe_sorting for MoRI EP MXFP4,
  pre-mask topk_ids in Python
 
 Under MoRI EP the dispatcher hands a fixed-capacity buffer with GLOBAL

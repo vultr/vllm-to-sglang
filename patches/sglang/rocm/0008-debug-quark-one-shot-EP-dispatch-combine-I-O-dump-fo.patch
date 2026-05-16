@@ -1,0 +1,187 @@
+From 6a90d48296abb4b7ff49db595311a4dd0c996cd0 Mon Sep 17 00:00:00 2001
+From: vllm-shim <vllm-shim@local>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH 8/8] debug(quark): one-shot EP dispatch/combine I/O dump for
+ MoRI gibberish triage
+
+We've confirmed empirically that K2.6 MXFP4 + MoRI EP produces gibberish
+while the same model in non-EP mode produces coherent thinking output
+at 21 tok/s. Verify says triton_mxfp4_moe is mathematically right on
+real-data calls (max_diff ~0.03-0.125 on values of 1-2, bf16 accumulator
+noise). Race ruled out (TBO disabled = no separate comm stream). The
+EP-wrapping code path is structurally identical to AITER's fused_moe
+fallback. So the bug is in the contract between MoRI dispatch outputs
+and our function's input assumptions, or in what mori_op.combine
+expects from our returned hidden_states.
+
+Static code reading has gone as far as it can. Adding a one-shot eager
+dump gated by VLLM_SHIM_MXFP4_DUMP_EP=1 to surface, for the first EP
+call per shape:
+
+  - dispatch_a1 shape/dtype/magnitude/NaN/Inf check
+  - num_local_tokens actual shape and values (we assume scalar (1,),
+    confirm against MoRI's runtime output)
+  - expert_mask local count and contiguous range
+  - topk_ids dtype + value range (must be in [0, align_experts))
+  - topk_weights per-row sum (should sum to ~1 if softmaxed)
+  - Per-row detail for first valid rows: which experts, which weights,
+    which were local, what we output for that row
+  - Padding sanity: first padding row's output (should be zero; nonzero
+    would mean our padding-row sentinel mask leaked through align)
+
+Compared against the known-good non-EP path (which doesn't go through
+MoRI dispatch at all), structural mismatches in any of these should
+jump out and point to the contract violation. Diagnostic only;
+disabled by default.
+---
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 123 ++++++++++++++++++
+ 1 file changed, 123 insertions(+)
+
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+index 93441fc..581773c 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+@@ -60,6 +60,16 @@ _VERIFY_MAX_ROWS = int(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_MAX_ROWS", "64"))
+ _VERIFY_SAMPLE = int(os.environ.get("VLLM_SHIM_MXFP4_VERIFY_SAMPLE", "64"))
+ _verify_call_counts: dict = {}
+ 
++# One-shot input/output dump for the MoRI EP path. Gated by
++# VLLM_SHIM_MXFP4_DUMP_EP=1 (independent of VERIFY). Fires on the first
++# eager EP call per rank and prints shapes, dtypes, and a small sample of
++# every input the dispatcher hands us plus the output we hand back to
++# combine. Diagnostic for the K2.6 MoRI EP gibberish where non-EP works
++# but EP produces drift: we want ground truth on the dispatch/combine
++# contract that static code reading can't give us.
++_DUMP_EP = os.environ.get("VLLM_SHIM_MXFP4_DUMP_EP", "0") == "1"
++_ep_dumped: set = set()
++
+ 
+ def _load_triton_ops():
+     global _triton_ops_loaded, _fused_moe_mxfp4, _fused_moe_mxfp4_silu
+@@ -390,6 +400,21 @@ def triton_mxfp4_moe(
+                 (*key, n),
+             )
+ 
++    if _DUMP_EP and ep_mode and not _is_capturing():
++        dump_key = (M, top_k, num_experts, align_experts)
++        if dump_key not in _ep_dumped:
++            _ep_dumped.add(dump_key)
++            _log_ep_dump(
++                hidden_states,
++                topk_ids,
++                topk_weights,
++                expert_mask,
++                num_local_tokens,
++                ws.output,
++                num_experts,
++                align_experts,
++            )
++
+     return ws.output
+ 
+ 
+@@ -404,6 +429,104 @@ def _is_capturing() -> bool:
+         return False
+ 
+ 
++def _log_ep_dump(
++    hidden_states: torch.Tensor,
++    topk_ids: torch.Tensor,
++    topk_weights: torch.Tensor,
++    expert_mask: torch.Tensor,
++    num_local_tokens: torch.Tensor,
++    output: torch.Tensor,
++    num_local_experts: int,
++    align_experts: int,
++) -> None:
++    """One-shot dump of MoRI EP inputs and our returned output.
++
++    Two questions we want answered without speculation: (1) what exactly does
++    MoRI hand us in dispatch_a1/dispatch_ids/dispatch_weights/num_recv_tokens,
++    and (2) what does our ws.output look like at the moment we hand it off to
++    combine. Compared against a known-good reference run (non-EP coherent),
++    structural mismatches in shape/dtype/value range should jump out.
++    """
++    try:
++        nlt_t = num_local_tokens.detach().to("cpu")
++        em_t = expert_mask.detach().to("cpu")
++        local_expert_count = int((em_t != 0).sum().item())
++        em_first_local = int((em_t != 0).nonzero(as_tuple=True)[0][:1].item()) if local_expert_count > 0 else -1
++        em_last_local = int((em_t != 0).nonzero(as_tuple=True)[0][-1:].item()) if local_expert_count > 0 else -1
++
++        n_valid = int(nlt_t.flatten()[0].item()) if nlt_t.numel() > 0 else 0
++        rows_to_show = min(n_valid, 2)
++
++        logger.error(
++            "[EP-DUMP] dispatch_a1: shape=%s dtype=%s "
++            "abs_mean=%.5f abs_max=%.5f has_nan=%s has_inf=%s",
++            tuple(hidden_states.shape),
++            hidden_states.dtype,
++            hidden_states[:max(n_valid, 1)].abs().mean().item(),
++            hidden_states[:max(n_valid, 1)].abs().max().item(),
++            bool(torch.isnan(hidden_states[:max(n_valid, 1)]).any().item()),
++            bool(torch.isinf(hidden_states[:max(n_valid, 1)]).any().item()),
++        )
++        logger.error(
++            "[EP-DUMP] num_local_tokens: shape=%s dtype=%s values=%s",
++            tuple(nlt_t.shape),
++            nlt_t.dtype,
++            nlt_t.flatten()[:8].tolist(),
++        )
++        logger.error(
++            "[EP-DUMP] expert_mask: shape=%s dtype=%s local_count=%d local_range=[%d, %d]",
++            tuple(em_t.shape),
++            em_t.dtype,
++            local_expert_count,
++            em_first_local,
++            em_last_local,
++        )
++        logger.error(
++            "[EP-DUMP] topk_ids: shape=%s dtype=%s min=%d max=%d",
++            tuple(topk_ids.shape),
++            topk_ids.dtype,
++            int(topk_ids.min().item()),
++            int(topk_ids.max().item()),
++        )
++        logger.error(
++            "[EP-DUMP] topk_weights: shape=%s dtype=%s sum_per_row_first3=%s",
++            tuple(topk_weights.shape),
++            topk_weights.dtype,
++            topk_weights[:3].sum(dim=-1).tolist() if topk_weights.shape[0] >= 3 else "n/a",
++        )
++
++        # Per-row detail for the first few valid rows: what experts did this
++        # token route to, what weights, and what did we output?
++        for r in range(rows_to_show):
++            row_ids = topk_ids[r].detach().to("cpu").tolist()
++            row_wts = topk_weights[r].detach().to("cpu").tolist()
++            local_mask = [1 if em_t[gid].item() != 0 else 0 for gid in row_ids]
++            out_head = output[r, :8].detach().to("cpu").tolist()
++            logger.error(
++                "[EP-DUMP] row %d: topk_ids=%s topk_weights=%s local_mask=%s "
++                "out[:8]=%s out_abs_mean=%.5f",
++                r,
++                row_ids,
++                [f"{w:+.4f}" for w in row_wts],
++                local_mask,
++                [f"{v:+.4f}" for v in out_head],
++                output[r].abs().mean().item(),
++            )
++
++        # Padding sanity: row at num_local_tokens (first sentinel) should be zero.
++        if n_valid < output.shape[0]:
++            pad_row = output[n_valid].detach().to("cpu")
++            logger.error(
++                "[EP-DUMP] padding row %d: abs_mean=%.5f abs_max=%.5f "
++                "(expected 0; nonzero means our padding-row mask leaked)",
++                n_valid,
++                pad_row.abs().mean().item(),
++                pad_row.abs().max().item(),
++            )
++    except Exception as e:  # noqa: BLE001
++        logger.error("[EP-DUMP] failed: %r", e)
++
++
+ def _maybe_verify(
+     triton_out: torch.Tensor,
+     hidden_states: torch.Tensor,
