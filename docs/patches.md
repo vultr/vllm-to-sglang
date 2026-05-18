@@ -378,6 +378,18 @@ human history.
 The patches themselves are what we maintain; the branches are how the
 scripts manipulate them.
 
+**Scope of `-c commit.gpgsign=false`.** The byte-stability override
+applies ONLY to commits on the `patched/*` branches inside
+`repos/<repo>/`. It must never appear on a commit to the vllm-shim
+repo itself. Commits to vllm-shim are normal human history that gets
+pushed and reviewed; bypassing signing on them silently strips a
+signature the dev intentionally configured. The two contexts share a
+filesystem (`repos/sglang/` is a subdirectory of the vllm-shim
+working tree) and identical commit syntax, which makes the
+cross-context mistake easy. The rule is mechanical: if your shell is
+inside `repos/<repo>/` AND your branch is `patched/*`, the flag is
+required; everywhere else, it is forbidden.
+
 ## Gotchas
 
 ### Stale `refs/vllm-shim/upstream` after sync
@@ -411,6 +423,31 @@ calls to suppress this. If you create commits *manually* on a
 
 ```bash
 git -c commit.gpgsign=false commit -m "..."
+```
+
+### `-c commit.gpgsign=false` leaking onto vllm-shim commits
+
+The dual mistake of the gotcha above: the byte-stability flag is
+only valid inside `repos/<repo>/` on a `patched/*` branch. Carrying
+it onto a commit to the vllm-shim repo (the outer working tree)
+silently bypasses whatever signing config the dev set up for their
+own human history. Symptom: a vllm-shim commit lands with
+`%G? = N` (unsigned) on a box where every other commit by that dev
+is signed.
+
+The cross-context mistake is easy because the patch workflow
+finishes with `cd ../..` back to vllm-shim, and the next commit
+there shares the syntax. A `git commit` on vllm-shim should look
+exactly like any other commit on vllm-shim, with no `-c` overrides
+specific to the patch tooling. If you find yourself typing
+`-c commit.gpgsign=false` outside `cd repos/<repo>/`, stop.
+
+Recovery, if you notice after the fact:
+
+```bash
+git -C /path/to/vllm-shim reset --soft HEAD~1
+# re-stage if needed, then commit normally:
+git commit -m "..."
 ```
 
 ### `git am` fails midway

@@ -128,6 +128,8 @@ The directory layout `docker/<backend>/Dockerfile.<platform>` *is* the matrix. J
 
 Local patches against AITER and SGLang live at the repo root under `patches/<repo>/[<tier>/]` and are applied by `scripts/apply-patches.sh` at image-build time. The script replays each `.patch` as a commit on a `patched/<platform>` branch (built on `patched/base` for multi-platform repos like sglang). `scripts/rebuild-patches.sh` regenerates the patch tree from the same branches after the dev edits them in `repos/<repo>/`. Patches are byte-stable across rebuilds (fixed author/date, no GPG signing). See `docs/patches.md` for the layout, the branch model, end-to-end workflows, and the gotchas (stale `refs/vllm-shim/upstream` after `sync-repos.sh`, etc.).
 
+**`-c commit.gpgsign=false` is scoped to the patch tooling.** The flag is required for commits on `patched/*` branches inside `repos/<repo>/` (byte-stability so `rebuild-patches.sh` is deterministic) and forbidden everywhere else. Commits to the vllm-shim repo itself are normal human history that must respect the dev's signing config; carrying the flag back out of `repos/<repo>/` strips a signature the dev intentionally set up. Mechanical rule: shell inside `repos/<repo>/` AND branch is `patched/*` => use the flag; anywhere else => never use it. See the gotcha in `docs/patches.md`.
+
 ## Where to read more
 
 Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `patches.md`, `rocm-perf.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.
