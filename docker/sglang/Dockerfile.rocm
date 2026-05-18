@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.11-rocm720-mi30x-20260508
+ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.12-rocm720-mi30x-20260517
 
 FROM ${BASE_IMAGE}
 

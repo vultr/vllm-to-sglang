@@ -1,4 +1,4 @@
-From ec048f006d47794785408d7c3f4d3e255496ed75 Mon Sep 17 00:00:00 2001
+From 363130c10ed93353f5d8578403b71c9720d10fb6 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 4/5] fix(quark): bound MXFP4 workspace cache by bucketing M
@@ -36,7 +36,7 @@ Not upstreamed.
  1 file changed, 40 insertions(+), 8 deletions(-)
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index 72e2209..469f24b 100644
+index 72e2209e0..469f24bde 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -79,6 +79,32 @@ def _ceil_div(a, b):

@@ -1,4 +1,4 @@
-From 2f1b5a610ce4c806cdd3beebd7f2cb03fa055996 Mon Sep 17 00:00:00 2001
+From 57881dbfca9da3fb2da647c3cf1609a6e222c9c2 Mon Sep 17 00:00:00 2001
 From: Matthew Harris <byte@byteflux.net>
 Date: Sun, 17 May 2026 21:06:50 -0400
 Subject: [PATCH 3/5] debug(sglang): instrument MXFP4 workspace cache for leak
@@ -14,7 +14,7 @@ leak is fixed or the workspace is bounded.
  1 file changed, 57 insertions(+), 3 deletions(-)
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-index 3354a03..72e2209 100644
+index 3354a03bb..72e2209e0 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -79,10 +79,55 @@ def _ceil_div(a, b):

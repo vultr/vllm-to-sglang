@@ -1,4 +1,4 @@
-From ece1b502bcea3937a3416d261a97ee82af3c4b1e Mon Sep 17 00:00:00 2001
+From 9a650ae78e91bc9dea340218bbdc64fbf8b3b098 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 2/5] fix(communicator): disable MLP allreduce fusion under DP
@@ -30,10 +30,10 @@ Found debugging Kimi K2.6 MXFP4 on 8x MI300X; not upstreamed.
  1 file changed, 12 insertions(+), 5 deletions(-)
 
 diff --git a/python/sglang/srt/layers/communicator.py b/python/sglang/srt/layers/communicator.py
-index 853cf3a..6ba33c6 100644
+index 56d3fff29..ec9fa27bd 100644
 --- a/python/sglang/srt/layers/communicator.py
 +++ b/python/sglang/srt/layers/communicator.py
-@@ -720,11 +720,18 @@ class LayerCommunicator:
+@@ -726,11 +726,18 @@ class LayerCommunicator:
          if is_enable_moe_cp_allgather():
              return False
  

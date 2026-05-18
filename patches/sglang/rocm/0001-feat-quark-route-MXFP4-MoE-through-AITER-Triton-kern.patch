@@ -1,4 +1,4 @@
-From 686a069989f33c8ca21133c3e72726577d382ce9 Mon Sep 17 00:00:00 2001
+From a26ad8cb679deac1cd6c671dfd63ca211902429d Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 1/5] feat(quark): route MXFP4 MoE through AITER Triton kernels
@@ -57,7 +57,7 @@ Adapted from prior MXFP4 + MI300X work (GLM-5.x); not upstreamed.
  create mode 100644 python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
-index 2640d23..df02088 100644
+index fd3629cd7..9448479d8 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
 @@ -35,6 +35,28 @@ if _use_aiter:
@@ -149,7 +149,7 @@ index 2640d23..df02088 100644
              w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 new file mode 100644
-index 0000000..3354a03
+index 000000000..3354a03bb
 --- /dev/null
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -0,0 +1,230 @@
