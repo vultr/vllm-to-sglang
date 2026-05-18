@@ -1,7 +1,7 @@
-From 6922db21f27366f5c9c5787eb71a563d7012e210 Mon Sep 17 00:00:00 2001
+From 2f1b5a610ce4c806cdd3beebd7f2cb03fa055996 Mon Sep 17 00:00:00 2001
 From: Matthew Harris <byte@byteflux.net>
 Date: Sun, 17 May 2026 21:06:50 -0400
-Subject: [PATCH 3/3] debug(sglang): instrument MXFP4 workspace cache for leak
+Subject: [PATCH 3/4] debug(sglang): instrument MXFP4 workspace cache for leak
  hunt
 
 Log on every cache miss with the entry size and running cache totals,
