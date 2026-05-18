@@ -1,7 +1,7 @@
 From ec048f006d47794785408d7c3f4d3e255496ed75 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 4/4] fix(quark): bound MXFP4 workspace cache by bucketing M
+Subject: [PATCH 4/5] fix(quark): bound MXFP4 workspace cache by bucketing M
 
 _workspace_cache is keyed on M (per-DP token count). Under DP attention
 M varies per step across a wide range, so every unique runtime M
