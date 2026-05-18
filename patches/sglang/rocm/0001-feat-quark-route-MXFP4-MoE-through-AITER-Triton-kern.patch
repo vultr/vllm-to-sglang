@@ -1,59 +1,48 @@
-From a26ad8cb679deac1cd6c671dfd63ca211902429d Mon Sep 17 00:00:00 2001
-From: vllm-shim <vllm-shim@local>
-Date: Thu, 1 Jan 2026 00:00:00 +0000
-Subject: [PATCH 1/5] feat(quark): route MXFP4 MoE through AITER Triton kernels
+From c66e78447b2dc769f06bd82de449b989fba5d719 Mon Sep 17 00:00:00 2001
+From: Matt Harris <mharris@vultr.com>
+Date: Mon, 18 May 2026 20:40:14 +0000
+Subject: [PATCH 1/3] feat(quark): route MXFP4 MoE through AITER Triton kernels
  on gfx942
 
-AITER's `fused_moe.fused_moe()` dispatcher routes MXFP4 + per_1x32
-to CK GEMM kernels in `csrc/ck_gemm_moe_2stages/` whose `dispatch.h`
-ifdefs enable them only on gfx950 / gfx12 / gfx9.5. On gfx942 the
-function falls through to the bf16 path or aborts in the FP4
-activation quant call (`dynamic_per_group_scaled_quant_fp4 device
-not support Float4_e2m1fn_x2 dtype`).
+AITER's CK MXFP4 GEMM kernels are compile-time excluded on gfx942
+(dispatch.h enables them only on gfx95). On gfx942 the AITER MoeRunner
+path raises at inference time; the Triton kernels in
+aiter/ops/triton/moe/moe_op_mxfp4*.py work because they use
+tl.dot_scaled, which decomposes FP4 ops into BF16 upcast + BF16 MFMA.
 
-AITER ships parallel Triton kernels in
-`aiter/ops/triton/moe/moe_op_mxfp4*.py` that use `tl.dot_scaled`,
-a Triton-level primitive the compiler decomposes into BF16 upcast +
-BF16 MFMA. Those Triton kernels do work on gfx942, and this patch
-wires them in for the non-EP Quark MXFP4 MoE path:
+Route QuarkW4A4MXFp4MoE.apply_weights to a dedicated Triton dispatch
+(triton_mxfp4_dispatch.triton_mxfp4_moe) on gfx942. The dispatch is
+CUDA-graph-capture safe: all GPU tensors are pre-allocated in a
+workspace cache on the first call and reused on subsequent calls.
 
-1. Adds `_use_triton_mxfp4_fallback` in `quark_w4a4_mxfp4_moe.py`,
-   lit when AITER is enabled but `is_gfx95_supported()` returns
-   False. On gfx95+ the flag is False and the existing CK path is
-   used unchanged.
+Workspace caching strategy: keyed on a bucketed M value rather than
+exact M. Without bucketing, every unique runtime M (which varies per
+step under DP attention) allocates a new ~hundreds-of-MB entry that
+is never freed; in a representative Kimi-K2.6-MXFP4 run the cache grew
+to 98 entries / ~50 GiB per DP in ~13 minutes and crashed every TP
+worker with HIP out-of-memory. The fixed bucket schedule caps the
+cache at O(len(_M_BUCKETS)) entries per (top_k, num_experts,
+hidden_dim, inter_dim, device) tuple while still hitting on every
+graph-replay batch size.
 
-2. Skips the `e8m0_shuffle` of weight scales when the fallback is
-   active. The Triton kernels are invoked with `swizzle_mx_b=False`
-   and want the raw checkpoint scales; only the CK path on gfx95
-   wants pre-shuffled scales. The pre-shuffle of the weight bytes
-   themselves is already gated on gfx95 via `_is_shuffle_moe_mxfp4`,
-   so weights need no further gating.
+Concurrent prefill under DP attention drives the post-allgather M
+above the largest workspace bucket; for top_k=8 routed-expert MoEs
+this would require ~10 GiB allocations that hipMalloc cannot satisfy
+on top of in-flight activations, hanging the GPU. Chunk M to
+_MAX_M_PER_CALL=16384 inside triton_mxfp4_moe so every per-call
+workspace fits in the bucket schedule; per-chunk overhead is
+dominated by kernel-launch latency and is negligible relative to the
+GEMM cost.
 
-3. Short-circuits `QuarkW4A4MXFp4MoE.apply_weights` when the
-   fallback is set: calls `triton_mxfp4_moe` and returns a
-   `StandardCombineInput` directly, bypassing the MoeRunner -> AITER
-   `fused_moe` -> CK route.
+Diagnostic counters (calls/hits/misses + per-miss MB summary) are
+kept in the dispatch so cache growth can be correlated with HBM use
+in future investigations.
 
-4. Adds
-   `python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py`:
-   a CUDA-graph-safe dispatch shim that pre-allocates a workspace
-   cache, drives `moe_align_block_size` (AITER stage1-4 kernels) for
-   token sorting, then calls `fused_moe_mxfp4_silu` (stage 1:
-   gate_up + fused SiLU) and `fused_moe_mxfp4` (stage 2: down_proj),
-   then reduces over top_k into the output buffer. All AITER kernel
-   imports are verified to exist in the pinned AITER commit; both
-   Triton kernels use `tl.dot_scaled` and decompose to BF16 MFMA on
-   gfx942.
-
-This patch does NOT touch the MoRI EP path. The EP integration is
-in a companion patch gated separately on SGLANG_MORI_MXFP4_TRITON
-so non-EP can be validated in isolation first.
-
-Adapted from prior MXFP4 + MI300X work (GLM-5.x); not upstreamed.
+Not upstreamed.
 ---
- .../quark/schemes/quark_w4a4_mxfp4_moe.py     |  65 ++++-
- .../quark/schemes/triton_mxfp4_dispatch.py    | 230 ++++++++++++++++++
- 2 files changed, 284 insertions(+), 11 deletions(-)
+ .../quark/schemes/quark_w4a4_mxfp4_moe.py     |  65 ++-
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 373 ++++++++++++++++++
+ 2 files changed, 427 insertions(+), 11 deletions(-)
  create mode 100644 python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
@@ -149,10 +138,10 @@ index fd3629cd7..9448479d8 100644
              w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 new file mode 100644
-index 000000000..3354a03bb
+index 000000000..8f5d054ac
 --- /dev/null
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,373 @@
 +"""Triton MXFP4 MoE dispatch for gfx942 (MI300X).
 +
 +Bypasses AITER's fused_moe() dispatcher (which routes to CK kernels
@@ -234,13 +223,88 @@ index 000000000..3354a03bb
 +
 +_workspace_cache: dict = {}
 +
++# Bucket schedule for the workspace cache. The cache key includes M
++# (per-DP token count), and `max_padded`-derived tensors scale with M;
++# without bucketing every unique runtime M allocates a new ~hundreds-of-
++# MB entry that is never freed, and the cache grows unboundedly under
++# DP attention (which produces a wide spread of per-step M values).
++# Bucketing M to a small fixed schedule caps the cache at
++# O(len(_M_BUCKETS)) entries per (top_k, num_experts, hidden_dim,
++# inter_dim, device) tuple. The spacing up to 128 matches the
++# cuda_graph_bs cadence closely enough that adjacent batch sizes share
++# entries; powers of two above 128 cover the eager prefill range up to
++# _MAX_M_PER_CALL. Both warmup capture and steady-state route through
++# the same bucketing, so a cache HIT during graph replay returns the
++# exact tensor the graph was captured against. The cache stays bounded
++# because triton_mxfp4_moe chunks any M > _MAX_M_PER_CALL before
++# entering _get_workspace, so the fall-through `return M` is a defense
++# against future callers and never fires under chunked dispatch.
++_M_BUCKETS = (
++    1, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128,
++    256, 512, 1024, 2048, 4096, 8192, 16384,
++)
++
++
++def _bucket_m(M: int) -> int:
++    for b in _M_BUCKETS:
++        if M <= b:
++            return b
++    return M
++
++
++# Diagnostic counters to verify the suspected unbounded growth of
++# _workspace_cache. Every unique M (token batch) seen at runtime
++# allocates a new entry of ~hundreds of MB; DP attention varies M
++# per step, so this can leak HBM monotonically. The counters log on
++# every miss and emit a periodic summary on every call so HBM growth
++# can be correlated with cache size over time. Remove once the leak
++# is fixed.
++_workspace_cache_total_bytes = 0
++_workspace_cache_calls = 0
++_workspace_cache_hits = 0
++_WORKSPACE_SUMMARY_EVERY = 500
++
++
++def _ws_bytes(num_experts, max_padded, max_blocks, hidden_dim, inter_dim, M, dtype):
++    elem = torch.empty((), dtype=dtype).element_size()
++    f32 = 4
++    i32 = 4
++    return (
++        f32  # a_scale
++        + num_experts * f32  # b13_scale
++        + num_experts * f32  # b2_scale
++        + max_padded * i32  # sorted_token_ids
++        + max_blocks * i32  # expert_ids
++        + 1 * i32  # num_tokens_post_padded
++        + (num_experts + 1) * num_experts * i32  # tokens_cnts
++        + (num_experts + 1) * i32  # cumsum
++        + max_padded * inter_dim * elem  # stage1_out
++        + max_padded * hidden_dim * elem  # stage2_out
++        + max_padded * f32  # stage2_topk_weights
++        + M * hidden_dim * elem  # output
++    )
++
 +
 +def _get_workspace(M, top_k, num_experts, hidden_dim, inter_dim, device, dtype):
-+    key = (M, top_k, num_experts, hidden_dim, inter_dim, device)
++    global _workspace_cache_total_bytes, _workspace_cache_calls, _workspace_cache_hits
++    _workspace_cache_calls += 1
++    M_b = _bucket_m(M)
++    key = (M_b, top_k, num_experts, hidden_dim, inter_dim, device)
 +    if key in _workspace_cache:
++        _workspace_cache_hits += 1
++        if _workspace_cache_calls % _WORKSPACE_SUMMARY_EVERY == 0:
++            logger.info(
++                "MXFP4 workspace summary: calls=%d hits=%d misses=%d "
++                "entries=%d total=%.1f MB",
++                _workspace_cache_calls,
++                _workspace_cache_hits,
++                _workspace_cache_calls - _workspace_cache_hits,
++                len(_workspace_cache),
++                _workspace_cache_total_bytes / (1024 * 1024),
++            )
 +        return _workspace_cache[key]
 +
-+    num_valid = M * top_k
++    num_valid = M_b * top_k
 +    max_padded = num_valid + num_experts * _BLOCK_M - top_k
 +    max_blocks = _ceil_div(max_padded, _BLOCK_M)
 +
@@ -263,15 +327,25 @@ index 000000000..3354a03bb
 +        stage2_topk_weights=torch.empty(
 +            max_padded, 1, dtype=torch.float32, device=device
 +        ),
-+        output=torch.empty(M, hidden_dim, dtype=dtype, device=device),
++        output=torch.empty(M_b, hidden_dim, dtype=dtype, device=device),
 +    )
 +    _workspace_cache[key] = ws
-+    logger.info(
-+        "Allocated MXFP4 MoE workspace: M=%d top_k=%d max_padded=%d device=%s",
++    entry_bytes = _ws_bytes(
++        num_experts, max_padded, max_blocks, hidden_dim, inter_dim, M_b, dtype
++    )
++    _workspace_cache_total_bytes += entry_bytes
++    logger.warning(
++        "MXFP4 workspace MISS: M=%d (bucket=%d) top_k=%d max_padded=%d "
++        "entry=%.1f MB (cache: %d entries, %.1f MB total, %d calls, %d hits)",
 +        M,
++        M_b,
 +        top_k,
 +        max_padded,
-+        device,
++        entry_bytes / (1024 * 1024),
++        len(_workspace_cache),
++        _workspace_cache_total_bytes / (1024 * 1024),
++        _workspace_cache_calls,
++        _workspace_cache_hits,
 +    )
 +    return ws
 +
@@ -307,7 +381,61 @@ index 000000000..3354a03bb
 +    )
 +
 +
++# Cap M passed to a single dispatch call. The workspace's stage2_out
++# tensor scales as max_padded * hidden_dim; for top_k=8 routed-expert
++# MoEs with hidden_dim=7168, a single call at M=78886 requires a
++# ~10 GB allocation that hipMalloc cannot satisfy on top of in-flight
++# activations under concurrent prefill, hanging the GPU. Chunking the
++# call along the M dimension keeps every per-call workspace bounded;
++# the per-chunk overhead is dominated by kernel-launch latency and is
++# negligible relative to the GEMM work each chunk does.
++_MAX_M_PER_CALL = 16384
++
++
 +def triton_mxfp4_moe(
++    hidden_states: torch.Tensor,
++    w13_weight: torch.Tensor,
++    w2_weight: torch.Tensor,
++    w13_weight_scale: torch.Tensor,
++    w2_weight_scale: torch.Tensor,
++    topk_weights: torch.Tensor,
++    topk_ids: torch.Tensor,
++    expert_mask: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    M_total = hidden_states.shape[0]
++    if M_total <= _MAX_M_PER_CALL:
++        return _triton_mxfp4_moe_call(
++            hidden_states,
++            w13_weight,
++            w2_weight,
++            w13_weight_scale,
++            w2_weight_scale,
++            topk_weights,
++            topk_ids,
++            expert_mask,
++        )
++
++    hidden_dim = hidden_states.shape[1]
++    out = torch.empty(
++        M_total, hidden_dim, dtype=hidden_states.dtype, device=hidden_states.device
++    )
++    for start in range(0, M_total, _MAX_M_PER_CALL):
++        end = min(start + _MAX_M_PER_CALL, M_total)
++        chunk_out = _triton_mxfp4_moe_call(
++            hidden_states[start:end],
++            w13_weight,
++            w2_weight,
++            w13_weight_scale,
++            w2_weight_scale,
++            topk_weights[start:end],
++            topk_ids[start:end],
++            expert_mask,
++        )
++        out[start:end].copy_(chunk_out)
++    return out
++
++
++def _triton_mxfp4_moe_call(
 +    hidden_states: torch.Tensor,
 +    w13_weight: torch.Tensor,
 +    w2_weight: torch.Tensor,
@@ -381,5 +509,9 @@ index 000000000..3354a03bb
 +
 +    stage2_flat = ws.stage2_out.squeeze(0)
 +    valid_out = stage2_flat[:num_valid_tokens].view(M, top_k, hidden_dim)
-+    torch.sum(valid_out, dim=1, out=ws.output)
-+    return ws.output
++    # ws.output is sized for the cache bucket (>= M); slice to the actual
++    # M before reducing. The slice is a view, not a new allocation, and
++    # graph capture handles strided views of cached tensors correctly.
++    out = ws.output[:M]
++    torch.sum(valid_out, dim=1, out=out)
++    return out

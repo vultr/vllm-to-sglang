@@ -1,0 +1,68 @@
+From 3f47a24e65b1b4dfc8fe4619674fdf0dd3c5f0db Mon Sep 17 00:00:00 2001
+From: Matt Harris <mharris@vultr.com>
+Date: Mon, 18 May 2026 18:16:23 +0000
+Subject: [PATCH 3/3] fix(parallel_state): route _ATTN_TP via PyNCCL so
+ DP-attention captures cleanly on ROCm
+
+Under DP attention, the in-decode collectives on _ATTN_TP must be
+graph-friendly. With use_pynccl=False (the prior default unless
+SYNC_TOKEN_IDS_ACROSS_TP or symm_mem was on), they fall through to
+torch.distributed.ProcessGroupNCCL, whose watchdog thread polls
+hipEventQuery on events recorded inside an active HIP graph
+capture and aborts with 'operation not permitted on an event last
+recorded in a capturing stream'. PyNCCL doesn't enqueue WorkNCCL
+objects, so the watchdog has nothing to poll.
+
+Two parts:
+  1) _ATTN_TP init: use_pynccl=True (unconditional)
+  2) graph_capture(): include _ATTN_TP in the per-group context
+     stack so its pynccl_comm gets enabled during capture (other
+     groups _MOE_EP/_MOE_TP were already handled the same way).
+
+Workaround NCCL_BLOCKING_WAIT=1 also avoided the crash but
+serialized inter-DP allreduces, killing the very parallelism DP
+attention is meant to deliver.
+---
+ .../sglang/srt/distributed/parallel_state.py   | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/python/sglang/srt/distributed/parallel_state.py b/python/sglang/srt/distributed/parallel_state.py
+index 863f5f1a7..3ca91de2a 100644
+--- a/python/sglang/srt/distributed/parallel_state.py
++++ b/python/sglang/srt/distributed/parallel_state.py
+@@ -1567,7 +1567,13 @@ def graph_capture(stream: Optional[torch.cuda.Stream] = None):
+     ):
+         with contextlib.ExitStack() as stack:
+             seen = {id(_TP)}
+-            for group in (_MOE_EP, _MOE_TP):
++            # _ATTN_TP carries the in-decode DP-attention collectives; without
++            # entering its graph_capture, its pynccl_comm stays disabled and
++            # those collectives fall through to torch.distributed, whose
++            # ProcessGroupNCCL watchdog aborts on hipEventQuery against
++            # graph-captured streams (HIP: "operation not permitted on an
++            # event last recorded in a capturing stream"). See _ATTN_TP init.
++            for group in (_ATTN_TP, _MOE_EP, _MOE_TP):
+                 if group is not None and id(group) not in seen:
+                     seen.add(id(group))
+                     stack.enter_context(group.graph_capture(context))
+@@ -1920,11 +1926,19 @@ def initialize_model_parallel(
+                 ranks = list(range(st, en))
+                 group_ranks.append(ranks)
+ 
++        # use_pynccl=True (was: SYNC_TOKEN_IDS_ACROSS_TP or enable_symm_mem):
++        # under DP attention, the in-decode collectives on this group must run
++        # via PyNCCL so they participate in the graph_capture() pynccl_context.
++        # If left on torch.distributed, the ProcessGroupNCCL watchdog polls
++        # hipEventQuery on events recorded inside an active HIP graph capture
++        # and aborts with "operation not permitted on an event last recorded
++        # in a capturing stream" on ROCm. PyNCCL doesn't enqueue WorkNCCL
++        # objects, so there's no watchdog poll to trip the capture guard.
+         _ATTN_TP = init_model_parallel_group(
+             group_ranks,
+             get_world_group().local_rank,
+             backend,
+-            use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP or enable_symm_mem,
++            use_pynccl=True,
+             use_mscclpp_allreduce=False,
+             use_custom_allreduce=False,
+             use_torch_symm_mem_allreduce=False,
