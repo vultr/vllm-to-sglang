@@ -1,0 +1,100 @@
+From 6922db21f27366f5c9c5787eb71a563d7012e210 Mon Sep 17 00:00:00 2001
+From: Matthew Harris <byte@byteflux.net>
+Date: Sun, 17 May 2026 21:06:50 -0400
+Subject: [PATCH 3/3] debug(sglang): instrument MXFP4 workspace cache for leak
+ hunt
+
+Log on every cache miss with the entry size and running cache totals,
+plus a periodic summary every 500 calls. With DP attention the MoE
+sees varying M per step; if misses keep arriving in steady state the
+suspected unbounded workspace cache is leaking HBM. Revert once the
+leak is fixed or the workspace is bounded.
+---
+ .../quark/schemes/triton_mxfp4_dispatch.py    | 60 ++++++++++++++++++-
+ 1 file changed, 57 insertions(+), 3 deletions(-)
+
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+index 3354a03..72e2209 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
+@@ -79,10 +79,55 @@ def _ceil_div(a, b):
+ 
+ _workspace_cache: dict = {}
+ 
++# Diagnostic counters to verify the suspected unbounded growth of
++# _workspace_cache. Every unique M (token batch) seen at runtime
++# allocates a new entry of ~hundreds of MB; DP attention varies M
++# per step, so this can leak HBM monotonically. The counters log on
++# every miss and emit a periodic summary on every call so HBM growth
++# can be correlated with cache size over time. Remove once the leak
++# is fixed.
++_workspace_cache_total_bytes = 0
++_workspace_cache_calls = 0
++_workspace_cache_hits = 0
++_WORKSPACE_SUMMARY_EVERY = 500
++
++
++def _ws_bytes(num_experts, max_padded, max_blocks, hidden_dim, inter_dim, M, dtype):
++    elem = torch.empty((), dtype=dtype).element_size()
++    f32 = 4
++    i32 = 4
++    return (
++        f32  # a_scale
++        + num_experts * f32  # b13_scale
++        + num_experts * f32  # b2_scale
++        + max_padded * i32  # sorted_token_ids
++        + max_blocks * i32  # expert_ids
++        + 1 * i32  # num_tokens_post_padded
++        + (num_experts + 1) * num_experts * i32  # tokens_cnts
++        + (num_experts + 1) * i32  # cumsum
++        + max_padded * inter_dim * elem  # stage1_out
++        + max_padded * hidden_dim * elem  # stage2_out
++        + max_padded * f32  # stage2_topk_weights
++        + M * hidden_dim * elem  # output
++    )
++
+ 
+ def _get_workspace(M, top_k, num_experts, hidden_dim, inter_dim, device, dtype):
++    global _workspace_cache_total_bytes, _workspace_cache_calls, _workspace_cache_hits
++    _workspace_cache_calls += 1
+     key = (M, top_k, num_experts, hidden_dim, inter_dim, device)
+     if key in _workspace_cache:
++        _workspace_cache_hits += 1
++        if _workspace_cache_calls % _WORKSPACE_SUMMARY_EVERY == 0:
++            logger.info(
++                "MXFP4 workspace summary: calls=%d hits=%d misses=%d "
++                "entries=%d total=%.1f MB",
++                _workspace_cache_calls,
++                _workspace_cache_hits,
++                _workspace_cache_calls - _workspace_cache_hits,
++                len(_workspace_cache),
++                _workspace_cache_total_bytes / (1024 * 1024),
++            )
+         return _workspace_cache[key]
+ 
+     num_valid = M * top_k
+@@ -111,12 +156,21 @@ def _get_workspace(M, top_k, num_experts, hidden_dim, inter_dim, device, dtype):
+         output=torch.empty(M, hidden_dim, dtype=dtype, device=device),
+     )
+     _workspace_cache[key] = ws
+-    logger.info(
+-        "Allocated MXFP4 MoE workspace: M=%d top_k=%d max_padded=%d device=%s",
++    entry_bytes = _ws_bytes(
++        num_experts, max_padded, max_blocks, hidden_dim, inter_dim, M, dtype
++    )
++    _workspace_cache_total_bytes += entry_bytes
++    logger.warning(
++        "MXFP4 workspace MISS: M=%d top_k=%d max_padded=%d entry=%.1f MB "
++        "(cache: %d entries, %.1f MB total, %d calls, %d hits)",
+         M,
+         top_k,
+         max_padded,
+-        device,
++        entry_bytes / (1024 * 1024),
++        len(_workspace_cache),
++        _workspace_cache_total_bytes / (1024 * 1024),
++        _workspace_cache_calls,
++        _workspace_cache_hits,
+     )
+     return ws
+ 
