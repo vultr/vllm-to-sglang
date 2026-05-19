@@ -1,0 +1,46 @@
+From e9e2b0ce6ab064e7168ebbb54bd285bf194c938f Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 09:49:24 +0000
+Subject: [PATCH 08/15] indexer: optional per-stage sync to bisect HSA fault
+
+---
+ .../srt/layers/attention/dsv4/indexer.py       | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/python/sglang/srt/layers/attention/dsv4/indexer.py b/python/sglang/srt/layers/attention/dsv4/indexer.py
+index 3be539ac4..8aa39e84a 100644
+--- a/python/sglang/srt/layers/attention/dsv4/indexer.py
++++ b/python/sglang/srt/layers/attention/dsv4/indexer.py
+@@ -300,14 +300,32 @@ class C4IndexerBackendMixin:
+         if TYPE_CHECKING:
+             assert isinstance(self, CompressorBackendMixin)
+ 
++        import os as _os, sys as _sys
++        _bisect = _os.environ.get("VLLM_SHIM_INDEXER_BISECT") == "1"
++        _lid = c4_indexer.layer_id
++
++        def _sync(stage: str) -> None:
++            if not _bisect:
++                return
++            try:
++                torch.cuda.synchronize()
++            except Exception as e:
++                _sys.stderr.write(f"INDEXER_BISECT layer={_lid} stage={stage} EXC={e!r}\n")
++                _sys.stderr.flush()
++                raise
++
++        _sync("entry")
+         weights = c4_indexer.compute_weights(x, skip_scale=True)
++        _sync("after_compute_weights")
+         q_fp8, weights = c4_indexer.compute_q(q_lora, positions, weights)
++        _sync("after_compute_q")
+         self.forward_indexer_compressor(
+             x=x,
+             forward_batch=forward_batch,
+             layer_id=c4_indexer.layer_id,
+             compressor=c4_indexer.compressor,
+         )
++        _sync("after_indexer_compressor")
+         c4_indexer_kv_cache = token_to_kv_pool.get_index_k_with_scale_buffer(
+             layer_id=c4_indexer.layer_id,
+         )

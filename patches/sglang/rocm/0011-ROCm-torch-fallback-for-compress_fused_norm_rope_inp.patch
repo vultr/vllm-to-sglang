@@ -1,0 +1,98 @@
+From 89e8191944751f2089db1d3487ca48aba3b2dc5b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 13:03:16 +0000
+Subject: [PATCH 11/15] ROCm: torch fallback for
+ compress_fused_norm_rope_inplace (kernel HSA-faults on 64-lane wavefronts at
+ num_works=3)
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py | 69 +++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index 3da5687b1..85e206b6f 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -597,6 +597,72 @@ def compress_forward(
+     return out
+ 
+ 
++_COMPRESS_FUSED_NORM_ROPE_TORCH = torch.version.hip is not None
++
++
++def _compress_fused_norm_rope_torch(
++    kv: torch.Tensor,
++    weight: torch.Tensor,
++    eps: float,
++    freq_cis: torch.Tensor,
++    plan: Union[CompressorDecodePlan, CompressorPrefillPlan],
++) -> None:
++    # Pure-torch fallback for fused_norm_rope.cuh's compress kernel.
++    # The C kernel hardcodes kWarpThreads=32 (sgl_kernel/utils.cuh) and uses
++    # __syncwarp/warp-level reductions that HSA-fault on 64-lane gfx94*
++    # wavefronts when num_compress_tokens triggers divergent work_id ranges
++    # across the two logical "warps" per wavefront (e.g. num_works=3).
++    #
++    # Operation:
++    #   For each plan entry e = (ragged_id, batch_id, position, window_len):
++    #     1. RMSNorm in-place on kv[ragged_id] (full head_dim) with `weight`
++    #     2. RoPE in-place on the trailing rope_dim slice at rope_pos
++    head_dim = kv.shape[-1]
++    rope_dim = freq_cis.shape[-1]
++    nope_dim = head_dim - rope_dim
++
++    if plan.is_decode:
++        # CompressorDecodePlan: plan[1] is seq_lens (int32, [batch]).
++        # work_id maps 1:1 to kv row; skip rows where seq_len % ratio != 0.
++        seq_lens = plan[1]
++        ratio = plan.compress_ratio
++        valid = (seq_lens % ratio == 0)
++        ragged_ids = torch.nonzero(valid, as_tuple=False).flatten().to(torch.int64)
++        positions = (seq_lens[ragged_ids] - ratio).to(torch.int64)
++    else:
++        # CompressorPrefillPlan: plan[1] is uint8 tensor of PrefillPlan structs
++        # (16 bytes each: ragged_id u32, batch_id u32, position u32, window_len u32).
++        plan_u32 = plan[1].contiguous().view(torch.int32).view(-1, 4)
++        ragged_ids = plan_u32[:, 0].to(torch.int64)
++        # 0xFFFFFFFF read as int32 is -1; that's the sentinel for "skip".
++        keep = ragged_ids >= 0
++        ragged_ids = ragged_ids[keep]
++        rope_pos = plan_u32[keep, 2].to(torch.int64) + 1 - plan.compress_ratio
++        positions = rope_pos
++
++    if ragged_ids.numel() == 0:
++        return
++
++    # RMSNorm in place over each affected row.
++    rows = kv[ragged_ids].to(torch.float32)
++    weight_f = weight.to(torch.float32)
++    rms = (rows * rows).mean(dim=-1, keepdim=True).add(eps).rsqrt()
++    rows = rows * rms * weight_f
++    # RoPE on trailing rope_dim slice.
++    rope_pairs = rope_dim // 2
++    sel_freqs = freq_cis[positions]  # (N, rope_dim) real-flattened
++    sel_freqs = sel_freqs.view(-1, rope_pairs, 2)
++    freq_real = sel_freqs[..., 0]
++    freq_imag = sel_freqs[..., 1]
++    rope = rows[:, nope_dim:].view(-1, rope_pairs, 2)
++    x_real = rope[..., 0]
++    x_imag = rope[..., 1]
++    out_real = x_real * freq_real - x_imag * freq_imag
++    out_imag = x_real * freq_imag + x_imag * freq_real
++    rows[:, nope_dim:] = torch.stack([out_real, out_imag], dim=-1).view(-1, rope_dim)
++    kv[ragged_ids] = rows.to(kv.dtype)
++
++
+ def compress_fused_norm_rope_inplace(
+     kv: torch.Tensor,
+     weight: torch.Tensor,
+@@ -605,6 +671,9 @@ def compress_fused_norm_rope_inplace(
+     plan: Union[CompressorDecodePlan, CompressorPrefillPlan],
+ ) -> None:
+     freq_cis = torch.view_as_real(freq_cis).flatten(-2)
++    if _COMPRESS_FUSED_NORM_ROPE_TORCH:
++        _compress_fused_norm_rope_torch(kv, weight, eps, freq_cis, plan)
++        return
+     module = _jit_norm_rope_module(kv.dtype, kv.shape[-1], freq_cis.shape[-1])
+     module.forward(
+         kv,

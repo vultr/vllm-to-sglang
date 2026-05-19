@@ -1,0 +1,54 @@
+From b0ac966a0e08127b9a37062f430c9a4edb8b70ee Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 15:17:51 +0000
+Subject: [PATCH 15/15] ROCm: write FlashMLA cache as e4m3fn (triton reader
+ uses tl.float8e4nv = fn semantics)
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index c7196a56d..088ed39e7 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -1264,10 +1264,13 @@ def _fused_k_norm_rope_flashmla_torch(
+     # Pure-torch fallback for main_norm_rope.cuh::FusedKNormRopeFlashMLAKernel.
+     # Replicates the FlashMLA paged-cache byte layout:
+     #   per token, 576 bytes value + 8 bytes scale
+-    #     bytes [0..447]  : 448 fp8_e4m3fnuz nope values (linear)
++    #     bytes [0..447]  : 448 fp8_e4m3fn nope values (linear)
+     #     bytes [448..575]: 64 bf16 rope values (32 bf16x2 pairs)
+     #   scales region @ page_size*576: 8 bytes/token, 7 UE8M0 scales (one per
+     #   64-element nope subgroup) + 1 padding byte.
++    # IMPORTANT: the triton sparse-MLA decode kernel reads the nope bytes as
++    # tl.float8e4nv (= e4m3fn, NVIDIA-style, max=448), not e4m3fnuz. Write side
++    # must use e4m3fn semantics (max=448) so the round-trip preserves magnitude.
+     import math as _math
+     B, head_dim = kv.shape
+     assert head_dim == 512, f"FlashMLA layout requires kHeadDim=512, got {head_dim}"
+@@ -1276,10 +1279,7 @@ def _fused_k_norm_rope_flashmla_torch(
+     nope_dim = head_dim - rope_dim
+     log2_ps = int(_math.log2(page_size))
+     assert (1 << log2_ps) == page_size, "page_size must be pow2"
+-    # fnuz max is 240; the previous 448 caused values in (240, 448] to
+-    # saturate to fnuz inf on read, halving effective magnitude of the
+-    # cached nope values.
+-    fp8_max = 240.0 if torch.version.hip is not None else 448.0
++    fp8_max = 448.0  # e4m3fn max; matches downstream triton sparse-MLA reader
+ 
+     x = kv.float()
+     rms = (x * x).mean(dim=-1, keepdim=True).add(eps).rsqrt()
+@@ -1295,7 +1295,11 @@ def _fused_k_norm_rope_flashmla_torch(
+     scale_raw = abs_max / fp8_max
+     scale_ue8m0 = _ue8m0_cast(scale_raw)
+     inv_scale = _ue8m0_inv_scale(scale_ue8m0)
+-    nope_fp8 = (nope * inv_scale.unsqueeze(-1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fnuz)
++    # Cast to e4m3fn so the stored bytes are interpreted correctly by the
++    # downstream reader (which uses tl.float8e4nv == e4m3fn semantics).
++    # On ROCm torch may emulate float8_e4m3fn in software; that's fine since
++    # we only need the byte representation, not GPU-native fp8 ops.
++    nope_fp8 = (nope * inv_scale.unsqueeze(-1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+ 
+     page = (out_loc.to(torch.int64) >> log2_ps)
+     offset = (out_loc.to(torch.int64) & (page_size - 1))

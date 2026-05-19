@@ -1,7 +1,7 @@
-From 3f47a24e65b1b4dfc8fe4619674fdf0dd3c5f0db Mon Sep 17 00:00:00 2001
+From 40cfe9732373e3d71f6a6322013a28430637859e Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Mon, 18 May 2026 18:16:23 +0000
-Subject: [PATCH 3/3] fix(parallel_state): route _ATTN_TP via PyNCCL so
+Subject: [PATCH 03/15] fix(parallel_state): route _ATTN_TP via PyNCCL so
  DP-attention captures cleanly on ROCm
 
 Under DP attention, the in-decode collectives on _ATTN_TP must be

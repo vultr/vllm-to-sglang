@@ -1,0 +1,243 @@
+From 3c8c1db1f61b9f686aeedc1615945f89e6895a3b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 14:52:24 +0000
+Subject: [PATCH 13/15] ROCm: torch fallback for c4 compress_forward
+ (kWarpThreads=32 unsafe on 64-lane wavefronts)
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py | 215 ++++++++++++++++++++++++
+ 1 file changed, 215 insertions(+)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index c86110955..65ec554f0 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -586,6 +586,25 @@ def compress_forward(
+         F = online_module.decode if plan.is_decode else online_module.prefill
+         F(kv_score_buffer, kv_score_input, out, ape, indices, *plan[1:], extra_data)
+         return out
++    if torch.version.hip is not None and compress_ratio == 4:
++        # c4.cuh hardcodes kWarpThreads=32 across multiple kernels (write,
++        # forward) and uses warp-cooperative gmem loads that read kTileElements
++        # * 32 = 128 elements but on gfx94* the wavefront is 64-lane, so the
++        # top half of the wavefront races against bounds or silently corrupts
++        # the compressed-KV result depending on launch shape. Use a torch
++        # fallback that operates on the same buffers but without warp-size
++        # assumptions. See compress.cuh for the buffer layout and c4.cuh for
++        # the original kernel logic this is replacing.
++        _compress_forward_c4_torch(
++            kv_score_buffer=kv_score_buffer,
++            kv_score_input=kv_score_input,
++            out=out,
++            ape=ape,
++            indices=indices,
++            plan=plan,
++            extra_data=extra_data,
++        )
++        return out
+     module = _jit_compress_module(
+         head_dim,
+         kv_score_input.dtype,
+@@ -597,6 +616,202 @@ def compress_forward(
+     return out
+ 
+ 
++def _compress_forward_c4_torch(
++    *,
++    kv_score_buffer: torch.Tensor,
++    kv_score_input: torch.Tensor,
++    out: torch.Tensor,
++    ape: torch.Tensor,
++    indices: torch.Tensor,
++    plan: Union[CompressorDecodePlan, CompressorPrefillPlan],
++    extra_data: Optional[torch.Tensor],
++) -> None:
++    # Torch reimplementation of c4.cuh for ratio=4 prefill/decode.
++    #
++    # Per-token layout in kv_score_buffer (4 head_dim sub-sections):
++    #   [0 : H)        kv_overlap     (used by history i<4)
++    #   [H : 2H)       kv             (used by history i>=4)
++    #   [2H : 3H)      score_overlap  (used by history i<4)
++    #   [3H : 4H)      score          (used by history i>=4)
++    # kv_score_input has the same 4-section layout per row.
++    # kv_score_buffer shape: (num_pages, page_size, 4*H), where page_size is
++    # 4 in Page4Align mode (extra_data given as (B,4) C4IndexBundle) and 8
++    # in RingBuffer mode (no extra_data).
++    head_dim = out.shape[-1]
++    H = head_dim
++    element_size = H * 4
++    page_align = extra_data is not None
++
++    if plan.is_decode:
++        seq_lens = plan[1].to(torch.int64)
++        # Only batches whose seq_len is a multiple of compress_ratio (=4) emit
++        # a fresh compressed token this step.
++        ratio = plan.compress_ratio
++        positions = seq_lens - 1  # last-token position (0-based)
++        for b in range(seq_lens.shape[0]):
++            seq_len = int(seq_lens[b].item())
++            if seq_len % ratio != 0:
++                continue
++            index = int(indices[b].item())
++            position = seq_len - 1
++            # Step 1: write current input to its page slot.
++            if page_align:
++                kv_score_buffer[index, (seq_len + 3) % 4] = kv_score_input[b]
++                index_prev = int(extra_data[b].item())
++                # NOTE: decode page-align uses the previous page directly
++                # via (index_prev - index) byte offset; here we just look it
++                # up from extra_data[b] (single int32, the prev index).
++                index_overlap_page = index_prev
++                index_normal_page = index
++            else:
++                kv_score_buffer[index, (seq_len + 7) % 8] = kv_score_input[b]
++                index_overlap_page = index
++                index_normal_page = index
++            window_len = 8 if seq_len >= 8 else seq_len
++            _c4_forward_one_token(
++                out_row=out[b],
++                kv_score_buffer=kv_score_buffer,
++                kv_score_input=kv_score_input,
++                ape=ape,
++                ragged_id=b,
++                index_overlap_page=index_overlap_page,
++                index_normal_page=index_normal_page,
++                seq_len=seq_len,
++                window_len=window_len,
++                page_align=page_align,
++                H=H,
++            )
++        return
++
++    # Prefill path.
++    assert isinstance(plan, CompressorPrefillPlan)
++    compress_plan_u32 = plan[1].contiguous().view(torch.int32).view(-1, 4)
++    write_plan_u32 = plan[2].contiguous().view(torch.int32).view(-1, 4)
++
++    # WRITE step: copy ragged input rows into the buffer at the right page+slot.
++    # PrefillPlan entry: (ragged_id, batch_id, position, window_len).
++    for k in range(write_plan_u32.shape[0]):
++        entry = write_plan_u32[k]
++        ragged_id = int(entry[0].item())
++        if ragged_id < 0:
++            continue
++        batch_id = int(entry[1].item())
++        position = int(entry[2].item())
++        if page_align:
++            bundle = extra_data[batch_id]
++            write_first_page = int(bundle[2].item())
++            last_pos = int(bundle[3].item())
++            write_second_page = int(indices[batch_id].item())
++            page = write_first_page if position < last_pos else write_second_page
++            kv_score_buffer[page, position % 4] = kv_score_input[ragged_id]
++        else:
++            page = int(indices[batch_id].item())
++            kv_score_buffer[page, position % 8] = kv_score_input[ragged_id]
++
++    # COMPRESS step.
++    for k in range(compress_plan_u32.shape[0]):
++        entry = compress_plan_u32[k]
++        ragged_id = int(entry[0].item())
++        if ragged_id < 0:
++            continue
++        batch_id = int(entry[1].item())
++        position = int(entry[2].item())
++        window_len = int(entry[3].item())
++        seq_len = position + 1
++
++        if page_align:
++            bundle = extra_data[batch_id]
++            load_first_page = int(bundle[0].item())
++            load_second_page = int(bundle[1].item())
++            if window_len <= 4:
++                index_overlap_page = load_second_page
++                index_normal_page = load_second_page
++            else:
++                index_overlap_page = load_first_page
++                index_normal_page = load_second_page
++        else:
++            index_overlap_page = int(indices[batch_id].item())
++            index_normal_page = index_overlap_page
++
++        _c4_forward_one_token(
++            out_row=out[ragged_id],
++            kv_score_buffer=kv_score_buffer,
++            kv_score_input=kv_score_input,
++            ape=ape,
++            ragged_id=ragged_id,
++            index_overlap_page=index_overlap_page,
++            index_normal_page=index_normal_page,
++            seq_len=seq_len,
++            window_len=window_len,
++            page_align=page_align,
++            H=H,
++        )
++
++
++def _c4_forward_one_token(
++    *,
++    out_row: torch.Tensor,             # (H,) view
++    kv_score_buffer: torch.Tensor,     # (num_pages, page_size, 4*H)
++    kv_score_input: torch.Tensor,      # (num_q_tokens, 4*H)
++    ape: torch.Tensor,                 # (8, H)
++    ragged_id: int,
++    index_overlap_page: int,
++    index_normal_page: int,
++    seq_len: int,
++    window_len: int,
++    page_align: bool,
++    H: int,
++) -> None:
++    device = out_row.device
++    f32 = torch.float32
++    page_size = 4 if page_align else 8
++
++    kv_list = []
++    score_list = []
++    for i in range(8):
++        is_overlap = i < 4
++        if i < window_len:
++            if page_align:
++                page = index_overlap_page if is_overlap else index_normal_page
++                k = i % 4
++                row = kv_score_buffer[page, k]
++            else:
++                k = (seq_len + i) % 8
++                row = kv_score_buffer[index_overlap_page, k]
++        else:
++            # Ragged source: tokens before this prefill chunk land in the
++            # input stream at relative offset (i-7).
++            src_idx = ragged_id + i - 7
++            if 0 <= src_idx < kv_score_input.shape[0]:
++                row = kv_score_input[src_idx]
++            else:
++                row = torch.zeros(4 * H, device=device, dtype=kv_score_input.dtype)
++        if is_overlap:
++            kv_i = row[0:H].to(f32)
++            score_i = row[2 * H : 3 * H].to(f32)
++        else:
++            kv_i = row[H : 2 * H].to(f32)
++            score_i = row[3 * H : 4 * H].to(f32)
++        kv_list.append(kv_i)
++        score_list.append(score_i)
++
++    kv8 = torch.stack(kv_list, dim=0)         # (8, H)
++    score8 = torch.stack(score_list, dim=0)   # (8, H)
++    bias8 = ape.to(f32)                       # (8, H)
++
++    if seq_len == 4:
++        # Suppress the first 4 history slots when there's no prior context.
++        kv8[:4] = 0
++        score8[:4] = -1e9
++
++    s = score8 + bias8                                  # (8, H)
++    max_s = s.max(dim=0, keepdim=True).values
++    e = torch.exp(s - max_s)
++    num = (kv8 * e).sum(dim=0)
++    den = e.sum(dim=0)
++    out_row.copy_((num / den).to(out_row.dtype))
++
++
+ _COMPRESS_FUSED_NORM_ROPE_TORCH = torch.version.hip is not None
+ 
+ 

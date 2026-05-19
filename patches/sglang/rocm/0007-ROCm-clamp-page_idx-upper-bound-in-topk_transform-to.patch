@@ -1,0 +1,29 @@
+From b4f6abb0353d0c29824a88f92d74cd37206fd2b7 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 09:38:00 +0000
+Subject: [PATCH 07/15] ROCm: clamp page_idx upper bound in topk_transform
+ torch fallback
+
+---
+ python/sglang/srt/layers/attention/dsv4/indexer.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/attention/dsv4/indexer.py b/python/sglang/srt/layers/attention/dsv4/indexer.py
+index 8c0bc9132..3be539ac4 100644
+--- a/python/sglang/srt/layers/attention/dsv4/indexer.py
++++ b/python/sglang/srt/layers/attention/dsv4/indexer.py
+@@ -165,7 +165,13 @@ def topk_transform_512_pytorch_vectorized(
+     page_idx = raw_indices >> page_bits
+     offset_in_page = raw_indices & page_mask
+ 
+-    page_idx_clamped = torch.clamp(page_idx, min=0)
++    # Clamp to page_tables bounds before gather. When seq_len < page_size, only
++    # page_idx=0 is semantically valid, but raw_indices for the "needs_sequential"
++    # path covers 0..TOPK-1, producing page_idx values that exceed page_tables.shape[1].
++    # An unclamped gather is OOB on the high side and can fault on ROCm (CUDA
++    # silently returns garbage which would later get masked out via valid_topk).
++    max_pages = page_tables.shape[1]
++    page_idx_clamped = torch.clamp(page_idx, min=0, max=max_pages - 1)
+     physical_pages = torch.gather(page_tables, dim=1, index=page_idx_clamped.long())
+ 
+     page_indices = (physical_pages << page_bits) | offset_in_page

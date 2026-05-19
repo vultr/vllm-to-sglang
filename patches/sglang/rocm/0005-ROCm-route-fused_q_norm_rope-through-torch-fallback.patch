@@ -1,0 +1,22 @@
+From 199a81a0528b2bb45da5a5616874de6b299d1e31 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 09:12:45 +0000
+Subject: [PATCH 05/15] ROCm: route fused_q_norm_rope through torch fallback
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index 0b3519599..b788e2edb 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -653,7 +653,7 @@ def fused_rope(
+ fused_rope_inplace = fused_rope
+ 
+ 
+-_FUSED_Q_NORM_ROPE_TORCH = False  # test native Q kernel with kFusedQBlockSize=32 on ROCm
++_FUSED_Q_NORM_ROPE_TORCH = torch.version.hip is not None
+ 
+ 
+ def _fused_q_norm_rope_torch(

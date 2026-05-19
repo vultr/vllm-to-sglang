@@ -1,0 +1,82 @@
+From 0f287ae0300fd1dd508eb1fd68e4faf8e58a1bc3 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 12:51:13 +0000
+Subject: [PATCH 10/15] compressor: finer-grained syncs across compress_forward
+ steps
+
+---
+ .../srt/layers/attention/dsv4/compressor.py   | 29 +++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/python/sglang/srt/layers/attention/dsv4/compressor.py b/python/sglang/srt/layers/attention/dsv4/compressor.py
+index 356bab455..8e401772c 100644
+--- a/python/sglang/srt/layers/attention/dsv4/compressor.py
++++ b/python/sglang/srt/layers/attention/dsv4/compressor.py
+@@ -87,6 +87,14 @@ class CompressorBackendMixin:
+             metadata = (forward_batch.req_pool_indices.to(torch.int32), None, plan)
+         indices, extra_data, plan = metadata
+ 
++        import os as _os
++        _bisect = _os.environ.get("VLLM_SHIM_INDEXER_BISECT") == "1"
++
++        def _sync(_stage: str) -> None:
++            if _bisect:
++                torch.cuda.synchronize()
++
++        _sync("fc_pre_compress_forward")
+         kv_compressed = compress_forward(
+             kv_score_buffer=kv_score_buffer,
+             kv_score_input=kv_score_input,
+@@ -97,6 +105,7 @@ class CompressorBackendMixin:
+             head_dim=head_dim,
+             extra_data=extra_data,
+         )
++        _sync("fc_post_compress_forward")
+         compress_fused_norm_rope_inplace(
+             kv_compressed,
+             norm.weight,
+@@ -104,7 +113,12 @@ class CompressorBackendMixin:
+             freqs_cis_cache,
+             plan,
+         )
+-        return rotate_activation(kv_compressed) if rotate else kv_compressed
++        _sync("fc_post_fused_norm_rope")
++        if rotate:
++            out = rotate_activation(kv_compressed)
++            _sync("fc_post_rotate")
++            return out
++        return kv_compressed
+ 
+     def forward_core_compressor(
+         self,
+@@ -376,14 +390,23 @@ class Compressor(nn.Module):
+             assert x.shape[0] == 0
+             return x.new_empty(0, self.head_dim)
+ 
++        import os as _os
++        _bisect = _os.environ.get("VLLM_SHIM_INDEXER_BISECT") == "1"
++
++        def _sync(_stage: str) -> None:
++            if _bisect:
++                torch.cuda.synchronize()
++
++        _sync("cscore_entry")
+         kv_score = self.compute_kv_score(x, forward_batch)
++        _sync("cscore_done")
+ 
+         backend = forward_batch.attn_backend
+         if TYPE_CHECKING:
+             assert isinstance(backend, DeepseekV4AttnBackend)
+         kv_score_buffer = self.get_state_pool(forward_batch)
+         kv_score_buffer = kv_score_buffer.kv_score_buffer.kv_score
+-        return backend.forward_compress(
++        out = backend.forward_compress(
+             kv_score_buffer=kv_score_buffer,
+             kv_score_input=kv_score,
+             ape=self.ape.view(-1, self.head_dim),
+@@ -395,3 +418,5 @@ class Compressor(nn.Module):
+             forward_batch=forward_batch,
+             is_paged=True,
+         )
++        _sync("forward_compress_done")
++        return out

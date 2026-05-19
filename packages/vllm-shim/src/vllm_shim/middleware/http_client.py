@@ -20,7 +20,7 @@ def get_client() -> httpx.AsyncClient:
     """
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=10.0))
     return _client
 
 
@@ -30,7 +30,7 @@ def make_lifespan() -> object:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         global _client
-        _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=10.0))
         try:
             yield
         finally:

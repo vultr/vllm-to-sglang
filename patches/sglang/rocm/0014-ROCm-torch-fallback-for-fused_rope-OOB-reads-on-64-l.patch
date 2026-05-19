@@ -1,0 +1,76 @@
+From 46f6833190c40211cda177373eb27ac3498eb8af Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 15:05:32 +0000
+Subject: [PATCH 14/15] ROCm: torch fallback for fused_rope (OOB reads on
+ 64-lane wavefronts)
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py | 48 +++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index 65ec554f0..c7196a56d 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -1036,6 +1036,51 @@ def fused_norm_rope_inplace(
+     )
+ 
+ 
++_FUSED_ROPE_TORCH = torch.version.hip is not None
++
++
++def _fused_rope_torch(
++    q: torch.Tensor,
++    k: Optional[torch.Tensor],
++    freqs_cis: torch.Tensor,
++    positions: torch.Tensor,
++    inverse: bool,
++) -> None:
++    # rope.cuh assumes kWarpThreads=32 and reads freq_ptr[lane_id] for the
++    # full wavefront width; on gfx94* (64-lane) the lane_id range exceeds the
++    # rope_dim/2 freq entries and lanes 32..63 issue OOB reads, writing back
++    # garbage to the trailing half of the rope slice. Replace with a torch
++    # complex multiply.
++    pos_long = positions.to(torch.int64)
++    sel = freqs_cis[pos_long]  # (B,) complex of shape (rope_dim/2,)
++
++    def apply(t: torch.Tensor) -> None:
++        # t: (B, num_heads, head_dim); rope on trailing rope_dim.
++        rope_dim = freqs_cis.shape[-1] * 2
++        nope_dim = t.shape[-1] - rope_dim
++        rope_pairs = rope_dim // 2
++        body = t[..., nope_dim:].to(torch.float32).view(*t.shape[:-1], rope_pairs, 2)
++        x_real = body[..., 0]
++        x_imag = body[..., 1]
++        sel_b = sel
++        while sel_b.dim() < x_real.dim():
++            sel_b = sel_b.unsqueeze(-2)
++        f_real = sel_b.real
++        f_imag = sel_b.imag
++        if inverse:
++            out_real = x_real * f_real + x_imag * f_imag
++            out_imag = x_imag * f_real - x_real * f_imag
++        else:
++            out_real = x_real * f_real - x_imag * f_imag
++            out_imag = x_real * f_imag + x_imag * f_real
++        rotated = torch.stack([out_real, out_imag], dim=-1).flatten(-2).to(t.dtype)
++        t[..., nope_dim:].copy_(rotated)
++
++    apply(q)
++    if k is not None:
++        apply(k)
++
++
+ def fused_rope(
+     q: torch.Tensor,
+     k: Optional[torch.Tensor],
+@@ -1043,6 +1088,9 @@ def fused_rope(
+     positions: torch.Tensor,
+     inverse: bool = False,
+ ) -> None:
++    if _FUSED_ROPE_TORCH:
++        _fused_rope_torch(q, k, freqs_cis, positions, inverse)
++        return
+     freqs_real = torch.view_as_real(freqs_cis).flatten(-2).contiguous()
+     module = _jit_fused_rope_module()
+     module.forward(q, k, freqs_real, positions, inverse)

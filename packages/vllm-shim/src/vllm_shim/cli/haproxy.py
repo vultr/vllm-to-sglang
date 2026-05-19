@@ -22,8 +22,8 @@ _TEMPLATE = """global
 defaults
   mode http
   timeout connect 5s
-  timeout client 300s
-  timeout server 300s
+  timeout client 1800s
+  timeout server 1800s
 
 frontend proxy
   bind {listen_host}:{listen_port}

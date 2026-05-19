@@ -1,0 +1,145 @@
+From 02dd040c3bdb3829875cb86fb4100d59a14c7b8b Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 13:20:22 +0000
+Subject: [PATCH 12/15] ROCm: triton kernel for compress_fused_norm_rope
+ (replaces slow torch fallback)
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py | 117 +++++++++++++++++++++++-
+ 1 file changed, 116 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index 85e206b6f..c86110955 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -600,6 +600,121 @@ def compress_forward(
+ _COMPRESS_FUSED_NORM_ROPE_TORCH = torch.version.hip is not None
+ 
+ 
++@triton.jit
++def _compress_norm_rope_kernel(
++    input_ptr,
++    weight_ptr,
++    plan_ptr,             # int32 view of plan tensor, shape (N, 4)
++    freqs_ptr,
++    eps,
++    compress_ratio,
++    skip_sentinel: tl.constexpr,  # 1 for prefill (skip ragged_id==-1), 0 for decode
++    head_dim: tl.constexpr,
++    rope_dim: tl.constexpr,
++    BLOCK: tl.constexpr,  # power-of-two >= head_dim
++):
++    work_id = tl.program_id(0)
++    if skip_sentinel:
++        # Prefill: plan = (ragged_id, batch_id, position, window_len) per work item.
++        ragged_id = tl.load(plan_ptr + work_id * 4 + 0)
++        if ragged_id < 0:
++            return
++        plan_position = tl.load(plan_ptr + work_id * 4 + 2)
++        position = plan_position + 1 - compress_ratio
++    else:
++        # Decode: plan_ptr is seq_lens (int32, len=batch). Skip rows where
++        # seq_len % ratio != 0; ragged_id == work_id otherwise.
++        seq_len = tl.load(plan_ptr + work_id)
++        if (seq_len % compress_ratio) != 0:
++            return
++        ragged_id = work_id
++        position = seq_len - compress_ratio
++
++    offs = tl.arange(0, BLOCK)
++    mask = offs < head_dim
++
++    row_base = ragged_id.to(tl.int64) * head_dim
++    x = tl.load(input_ptr + row_base + offs, mask=mask, other=0.0).to(tl.float32)
++    w = tl.load(weight_ptr + offs, mask=mask, other=0.0).to(tl.float32)
++
++    sum_sq = tl.sum(x * x, axis=0)
++    inv_rms = 1.0 / tl.sqrt(sum_sq / head_dim + eps)
++    x = x * inv_rms * w
++
++    # RoPE on trailing rope_dim slice: pairs of (real, imag) at positions
++    # [nope_dim, nope_dim+1], [nope_dim+2, nope_dim+3], ...
++    rope_pairs: tl.constexpr = rope_dim // 2
++    nope_dim: tl.constexpr = head_dim - rope_dim
++    pair_idx = tl.arange(0, rope_pairs)
++    real_idx = nope_dim + pair_idx * 2
++    imag_idx = real_idx + 1
++    # Re-extract pre-rope values from x for the rope slice.
++    # We loaded x as a vector of size BLOCK; indexing along that to pull
++    # specific lanes is done via tl.gather-like masking.
++    real_mask = (offs[:, None] == real_idx[None, :])
++    imag_mask = (offs[:, None] == imag_idx[None, :])
++    x_real = tl.sum(tl.where(real_mask, x[:, None], 0.0), axis=0)
++    x_imag = tl.sum(tl.where(imag_mask, x[:, None], 0.0), axis=0)
++
++    freqs_base = position.to(tl.int64) * rope_dim
++    freq_real = tl.load(freqs_ptr + freqs_base + pair_idx * 2).to(tl.float32)
++    freq_imag = tl.load(freqs_ptr + freqs_base + pair_idx * 2 + 1).to(tl.float32)
++    out_real = x_real * freq_real - x_imag * freq_imag
++    out_imag = x_real * freq_imag + x_imag * freq_real
++
++    # Build the final per-lane output: x for non-rope lanes, rope-rotated for rope lanes.
++    # For lane at position real_idx[k] keep out_real[k]; imag_idx[k] keep out_imag[k];
++    # other lanes keep x.
++    rope_real_contrib = tl.sum(tl.where(real_mask, out_real[None, :], 0.0), axis=1)
++    rope_imag_contrib = tl.sum(tl.where(imag_mask, out_imag[None, :], 0.0), axis=1)
++    is_rope_lane = (offs >= nope_dim) & (offs < head_dim)
++    x_out = tl.where(is_rope_lane, rope_real_contrib + rope_imag_contrib, x)
++
++    # Cast back and store.
++    tl.store(input_ptr + row_base + offs, x_out.to(input_ptr.dtype.element_ty), mask=mask)
++
++
++def _compress_fused_norm_rope_triton(
++    kv: torch.Tensor,
++    weight: torch.Tensor,
++    eps: float,
++    freq_cis: torch.Tensor,
++    plan: Union[CompressorDecodePlan, CompressorPrefillPlan],
++) -> None:
++    # gfx94* replacement for fused_norm_rope.cuh. Uses one program per work item
++    # so each wavefront handles its own RMSNorm + RoPE without warp-level dispatch
++    # of multiple work items inside a wavefront.
++    head_dim = kv.shape[-1]
++    rope_dim = freq_cis.shape[-1]
++
++    if plan.is_decode:
++        plan_tensor = plan[1].to(torch.int32).contiguous()
++        num_works = plan_tensor.shape[0]
++        skip_sentinel = 0
++    else:
++        plan_tensor = plan[1].contiguous().view(torch.int32)
++        num_works = plan_tensor.numel() // 4
++        skip_sentinel = 1
++
++    if num_works == 0:
++        return
++
++    BLOCK = triton.next_power_of_2(head_dim)
++    _compress_norm_rope_kernel[(num_works,)](
++        kv,
++        weight,
++        plan_tensor,
++        freq_cis,
++        eps,
++        plan.compress_ratio,
++        skip_sentinel=skip_sentinel,
++        head_dim=head_dim,
++        rope_dim=rope_dim,
++        BLOCK=BLOCK,
++        num_warps=1,
++    )
++
++
+ def _compress_fused_norm_rope_torch(
+     kv: torch.Tensor,
+     weight: torch.Tensor,
+@@ -672,7 +787,7 @@ def compress_fused_norm_rope_inplace(
+ ) -> None:
+     freq_cis = torch.view_as_real(freq_cis).flatten(-2)
+     if _COMPRESS_FUSED_NORM_ROPE_TORCH:
+-        _compress_fused_norm_rope_torch(kv, weight, eps, freq_cis, plan)
++        _compress_fused_norm_rope_triton(kv, weight, eps, freq_cis, plan)
+         return
+     module = _jit_norm_rope_module(kv.dtype, kv.shape[-1], freq_cis.shape[-1])
+     module.forward(

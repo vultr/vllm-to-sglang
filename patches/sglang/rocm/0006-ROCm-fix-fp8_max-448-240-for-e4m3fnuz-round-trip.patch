@@ -1,0 +1,75 @@
+From 324b6c646cb502936c99c8c515fb65812d26ceee Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 09:28:02 +0000
+Subject: [PATCH 06/15] ROCm: fix fp8_max=448 -> 240 for e4m3fnuz round-trip
+
+---
+ python/sglang/jit_kernel/deepseek_v4.py             |  9 +++++++--
+ .../srt/layers/attention/nsa/triton_kernel.py       | 13 +++++++++----
+ 2 files changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/jit_kernel/deepseek_v4.py b/python/sglang/jit_kernel/deepseek_v4.py
+index b788e2edb..3da5687b1 100644
+--- a/python/sglang/jit_kernel/deepseek_v4.py
++++ b/python/sglang/jit_kernel/deepseek_v4.py
+@@ -741,7 +741,9 @@ def _fused_q_indexer_rope_hadamard_quant_torch(
+     rope_pairs = freqs_cis.shape[-1]
+     rope_dim = rope_pairs * 2
+     nope_dim = head_dim - rope_dim
+-    fp8_max = 448.0
++    # fnuz max is 240; using 448 lets the post-cast bytes saturate in the
++    # fnuz interpretation and lose ~50% magnitude on the read side.
++    fp8_max = 240.0 if torch.version.hip is not None else 448.0
+ 
+     x = q_input.float()
+     if rope_dim > 0:
+@@ -827,7 +829,10 @@ def _fused_k_norm_rope_flashmla_torch(
+     nope_dim = head_dim - rope_dim
+     log2_ps = int(_math.log2(page_size))
+     assert (1 << log2_ps) == page_size, "page_size must be pow2"
+-    fp8_max = 448.0  # matches math.cuh FP8_E4M3_MAX; saturates in fnuz, intentional
++    # fnuz max is 240; the previous 448 caused values in (240, 448] to
++    # saturate to fnuz inf on read, halving effective magnitude of the
++    # cached nope values.
++    fp8_max = 240.0 if torch.version.hip is not None else 448.0
+ 
+     x = kv.float()
+     rms = (x * x).mean(dim=-1, keepdim=True).add(eps).rsqrt()
+diff --git a/python/sglang/srt/layers/attention/nsa/triton_kernel.py b/python/sglang/srt/layers/attention/nsa/triton_kernel.py
+index a9209bc94..677bdb0b0 100644
+--- a/python/sglang/srt/layers/attention/nsa/triton_kernel.py
++++ b/python/sglang/srt/layers/attention/nsa/triton_kernel.py
+@@ -17,6 +17,7 @@ def _act_quant_kernel(
+     round_scale: tl.constexpr,
+     BLOCK_M: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    FNUZ: tl.constexpr,
+ ):
+     """
+     Triton kernel for activation quantization.
+@@ -27,10 +28,13 @@ def _act_quant_kernel(
+     pid_m = tl.program_id(0)
+     pid_n = tl.program_id(1)
+ 
+-    # FP8 constants
+-    fp8_min = -448.0
+-    fp8_max = 448.0
+-    fp8_max_inv = 1.0 / fp8_max
++    # FP8 constants. e4m3fn max is 448, e4m3fnuz (AMD gfx94*) max is 240.
++    # The downstream cache view-reinterprets bytes as fnuz on ROCm, so values
++    # in (240, 448] would saturate to fnuz inf and lose ~50% magnitude; scale
++    # must use the dtype-correct max so the round-trip preserves amax.
++    fp8_min: tl.constexpr = -240.0 if FNUZ else -448.0
++    fp8_max: tl.constexpr = 240.0 if FNUZ else 448.0
++    fp8_max_inv: tl.constexpr = 1.0 / fp8_max
+ 
+     # Calculate row and column offsets
+     row_start = pid_m * BLOCK_M
+@@ -135,6 +139,7 @@ def act_quant(
+         round_scale=round_scale,
+         BLOCK_M=BLOCK_M,
+         BLOCK_N=BLOCK_N,
++        FNUZ=(torch.version.hip is not None),
+         num_stages=0 if round_scale else 2,
+     )
+ 

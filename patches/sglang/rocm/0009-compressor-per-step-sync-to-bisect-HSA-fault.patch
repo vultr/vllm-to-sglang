@@ -1,0 +1,49 @@
+From 3dfc5e155c26ee6fd9f535e42517e5d9b851fae3 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 19 May 2026 12:41:10 +0000
+Subject: [PATCH 09/15] compressor: per-step sync to bisect HSA fault
+
+---
+ .../sglang/srt/layers/attention/dsv4/compressor.py   | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/python/sglang/srt/layers/attention/dsv4/compressor.py b/python/sglang/srt/layers/attention/dsv4/compressor.py
+index 332f52977..356bab455 100644
+--- a/python/sglang/srt/layers/attention/dsv4/compressor.py
++++ b/python/sglang/srt/layers/attention/dsv4/compressor.py
+@@ -155,23 +155,35 @@ class CompressorBackendMixin:
+         if TYPE_CHECKING:
+             assert isinstance(token_to_kv_pool, DeepSeekV4TokenToKVPool)
+ 
++        import os as _os
++        _bisect = _os.environ.get("VLLM_SHIM_INDEXER_BISECT") == "1"
++
++        def _sync(stage: str) -> None:
++            if _bisect:
++                torch.cuda.synchronize()
++
++        _sync(f"compressor_entry_l{layer_id}")
+         new_compressed_kv = compressor(x, forward_batch)
++        _sync(f"compressor_done_l{layer_id}")
+         if envs.SGLANG_OPT_USE_FUSED_STORE_CACHE.get():
+             token_to_kv_pool.set_index_k_fused(
+                 layer_id=layer_id,
+                 loc=self.forward_metadata.core_metadata.c4_out_loc,
+                 cache_k=new_compressed_kv,
+             )
++            _sync(f"set_fused_l{layer_id}")
+         else:
+             new_compressed_kv_fp8, new_compressed_kv_scale = act_quant(
+                 new_compressed_kv
+             )
++            _sync(f"act_quant_l{layer_id}")
+             token_to_kv_pool.set_index_k_scale_buffer(
+                 layer_id=layer_id,
+                 loc=self.forward_metadata.core_metadata.c4_out_loc,
+                 index_k=new_compressed_kv_fp8,
+                 index_k_scale=new_compressed_kv_scale,
+             )
++            _sync(f"set_k_l{layer_id}")
+ 
+ 
+ def is_overlap_compress(compress_ratio: int) -> bool:
