@@ -111,12 +111,8 @@ def collect(
         "rocm_perf": dict(rocm_perf),
         "hip_online_tuning": {
             "enabled": hip_online_tuning.enabled,
-            "storage": (
-                str(hip_online_tuning.storage) if hip_online_tuning.storage else None
-            ),
-            "target": (
-                str(hip_online_tuning.target) if hip_online_tuning.target else None
-            ),
+            "storage": (str(hip_online_tuning.storage) if hip_online_tuning.storage else None),
+            "target": (str(hip_online_tuning.target) if hip_online_tuning.target else None),
             "reason": hip_online_tuning.reason,
         },
     }
@@ -157,9 +153,7 @@ def print_summary(info: dict[str, Any]) -> None:
             f"{restore['source']} ({envs})\n"
         )
     else:
-        sys.stderr.write(
-            f"  aiter restore: enabled, nothing to restore from {restore['source']}\n"
-        )
+        sys.stderr.write(f"  aiter restore: enabled, nothing to restore from {restore['source']}\n")
     rocm_perf = info.get("rocm_perf") or {}
     if rocm_perf:
         envs = ", ".join(sorted(rocm_perf.keys()))
@@ -171,9 +165,7 @@ def print_summary(info: dict[str, Any]) -> None:
     reason = hot.get("reason")
     if reason and reason != REASON_DISABLED:
         if reason in (REASON_WILL_LINK, REASON_ALREADY_LINKED):
-            sys.stderr.write(
-                f"  hip online tuning: {hot['target']} -> {hot['storage']}\n"
-            )
+            sys.stderr.write(f"  hip online tuning: {hot['target']} -> {hot['storage']}\n")
         else:
             sys.stderr.write(f"  hip online tuning: not anchored ({reason})\n")
 
@@ -181,9 +173,7 @@ def print_summary(info: dict[str, Any]) -> None:
 def main() -> int:
     """vllm-shim-info console script: print the JSON written by the entrypoint."""
     if not INFO_PATH.exists():
-        sys.stderr.write(
-            f"No launch info at {INFO_PATH}; the shim may not have started yet.\n"
-        )
+        sys.stderr.write(f"No launch info at {INFO_PATH}; the shim may not have started yet.\n")
         return 1
     sys.stdout.write(INFO_PATH.read_text())
     return 0

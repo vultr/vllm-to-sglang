@@ -165,21 +165,31 @@ def test_underscore_tensor_parallel(translator: TRTLLMArgTranslator) -> None:
 
 
 def test_mixed_input_preserves_order(translator: TRTLLMArgTranslator) -> None:
-    out, dropped = translator.translate([
-        "--trust-remote-code", "true",
-        "--max-num-seqs", "256",
-        "--swap-space", "4",
-        "--config", "/tmp/cfg.yaml",
-    ])
+    out, dropped = translator.translate(
+        [
+            "--trust-remote-code",
+            "true",
+            "--max-num-seqs",
+            "256",
+            "--swap-space",
+            "4",
+            "--config",
+            "/tmp/cfg.yaml",
+        ]
+    )
     assert out == [
-        "--trust_remote_code", "true",
-        "--max_batch_size", "256",
-        "--config", "/tmp/cfg.yaml",
+        "--trust_remote_code",
+        "true",
+        "--max_batch_size",
+        "256",
+        "--config",
+        "/tmp/cfg.yaml",
     ]
     assert dropped == ["--swap-space", "4"]
 
 
 # === Short alias normalisation ==================================================
+
 
 def test_short_alias_tp(translator: TRTLLMArgTranslator) -> None:
     out, _ = translator.translate(["-tp", "8"])
@@ -211,6 +221,7 @@ def test_short_alias_drops(translator: TRTLLMArgTranslator) -> None:
 
 # === -O family ==================================================================
 
+
 def test_drop_optimization_level_long_form(translator: TRTLLMArgTranslator) -> None:
     out, dropped = translator.translate(["--optimization-level", "3"])
     assert out == []
@@ -231,13 +242,18 @@ def test_drop_O_with_separate_value(translator: TRTLLMArgTranslator) -> None:
 
 # === Speculative-config: drop entirely (no TRT-LLM CLI flag) ====================
 
+
 def test_drop_speculative_config(translator: TRTLLMArgTranslator) -> None:
-    out, dropped = translator.translate([
-        "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
-    ])
+    out, dropped = translator.translate(
+        [
+            "--speculative-config",
+            '{"method":"mtp","num_speculative_tokens":2}',
+        ]
+    )
     assert out == []
     assert dropped == [
-        "--speculative-config", '{"method":"mtp","num_speculative_tokens":2}',
+        "--speculative-config",
+        '{"method":"mtp","num_speculative_tokens":2}',
     ]
 
 
@@ -248,6 +264,7 @@ def test_drop_speculative_config_equals_form(translator: TRTLLMArgTranslator) ->
 
 
 # === Newly-classified flag drops (representative sample) ========================
+
 
 def test_drop_enable_auto_tool_choice(translator: TRTLLMArgTranslator) -> None:
     out, dropped = translator.translate(["--enable-auto-tool-choice"])
@@ -272,6 +289,7 @@ def test_drop_allowed_origins(translator: TRTLLMArgTranslator) -> None:
 
 
 # === Renames added in this pass =================================================
+
 
 def test_rename_kv_cache_dtype(translator: TRTLLMArgTranslator) -> None:
     out, _ = translator.translate(["--kv-cache-dtype", "fp8"])

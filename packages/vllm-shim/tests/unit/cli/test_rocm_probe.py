@@ -89,9 +89,7 @@ def test_probe_returns_none_when_rocminfo_fails(monkeypatch: pytest.MonkeyPatch)
 
 def test_probe_returns_none_when_no_gpu_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=["rocminfo"], returncode=0, stdout="", stderr=""
-        )
+        return subprocess.CompletedProcess(args=["rocminfo"], returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert rocm_probe.probe() is None

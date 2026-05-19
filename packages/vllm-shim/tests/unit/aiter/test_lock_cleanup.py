@@ -47,9 +47,7 @@ def test_plan_honors_operator_aiter_jit_dir_override(tmp_path: Path) -> None:
     # default JIT location; cleanup must scan their path or it would
     # leave their stale locks behind and clean an empty directory.
     elsewhere = tmp_path / "elsewhere"
-    plan = plan_cleanup(
-        shim_home=tmp_path, gpu=_GPU, env={"AITER_JIT_DIR": str(elsewhere)}
-    )
+    plan = plan_cleanup(shim_home=tmp_path, gpu=_GPU, env={"AITER_JIT_DIR": str(elsewhere)})
     assert plan.enabled is True
     assert plan.root == elsewhere
 
@@ -75,12 +73,12 @@ def test_plan_no_env_arg_means_default_path(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "lock",                              # csrc/cpp_itfs/utils.py:160
-        "lock_module_custom_all_reduce",     # the one in the user's wedged pod
+        "lock",  # csrc/cpp_itfs/utils.py:160
+        "lock_module_custom_all_reduce",  # the one in the user's wedged pod
         "lock_3rdparty_clone_composable_kernel",  # aiter/jit/core.py:716
-        "lock_module_fused_moe",             # aiter/jit/core.py:744
-        "mymodule.lock",                     # cpp_itfs func_name.lock pattern
-        "compile.lock",                      # core.py:309 new_file_path.lock
+        "lock_module_fused_moe",  # aiter/jit/core.py:744
+        "mymodule.lock",  # cpp_itfs func_name.lock pattern
+        "compile.lock",  # core.py:309 new_file_path.lock
     ],
 )
 def test_is_lock_file_matches_aiter_patterns(name: str) -> None:
@@ -90,13 +88,13 @@ def test_is_lock_file_matches_aiter_patterns(name: str) -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "locksmith.txt",     # contains "lock" but not at start/end with the right delimiters
-        "padlock.txt",       # contains "lock" mid-string
-        "blockwise.py",      # superstring of "lock"
-        "module.so",         # genuine build artifact, must not be swept
-        "lockfile.cfg",      # no underscore after "lock"; user-named, leave alone
-        "the.lock.bak",      # not "lock" and not ".lock" tail
-        "",                  # degenerate case
+        "locksmith.txt",  # contains "lock" but not at start/end with the right delimiters
+        "padlock.txt",  # contains "lock" mid-string
+        "blockwise.py",  # superstring of "lock"
+        "module.so",  # genuine build artifact, must not be swept
+        "lockfile.cfg",  # no underscore after "lock"; user-named, leave alone
+        "the.lock.bak",  # not "lock" and not ".lock" tail
+        "",  # degenerate case
     ],
 )
 def test_is_lock_file_rejects_non_lock_names(name: str) -> None:

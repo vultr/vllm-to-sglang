@@ -31,10 +31,12 @@ def test_allow_long_max_model_len(translator: TRTLLMEnvTranslator) -> None:
 
 
 def test_existing_target_is_not_overwritten(translator: TRTLLMEnvTranslator) -> None:
-    out = translator.translate({
-        "VLLM_NO_USAGE_STATS": "1",
-        "TRTLLM_NO_USAGE_STATS": "0",
-    })
+    out = translator.translate(
+        {
+            "VLLM_NO_USAGE_STATS": "1",
+            "TRTLLM_NO_USAGE_STATS": "0",
+        }
+    )
     assert out["TRTLLM_NO_USAGE_STATS"] == "0"
 
 

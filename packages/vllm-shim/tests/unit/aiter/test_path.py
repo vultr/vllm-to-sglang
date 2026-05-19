@@ -57,12 +57,7 @@ def test_shape_capture_root_full_layout(tmp_path: Path) -> None:
         parallelism=Parallelism(tp=8, ep=8),
     )
     assert root == (
-        tmp_path
-        / "aiter"
-        / "shapes"
-        / "gfx942-304cu"
-        / "moonshotai--Kimi-K2.6"
-        / "tp8-ep8"
+        tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "moonshotai--Kimi-K2.6" / "tp8-ep8"
     )
 
 

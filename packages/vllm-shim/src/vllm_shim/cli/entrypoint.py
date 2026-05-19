@@ -144,14 +144,8 @@ def _maybe_run_startup_tune(
     if hot is not None:
         cmd.extend(["--hot", str(hot)])
     hot_note = f", --hot {hot}" if hot is not None else ""
-    sys.stderr.write(
-        f"vllm-shim startup tune: running ({budget_seconds}s budget{hot_note})\n"
-    )
-    tune_env = (
-        None
-        if env is None
-        else {k: v for k, v in env.items() if k != "HIP_ONLINE_TUNING"}
-    )
+    sys.stderr.write(f"vllm-shim startup tune: running ({budget_seconds}s budget{hot_note})\n")
+    tune_env = None if env is None else {k: v for k, v in env.items() if k != "HIP_ONLINE_TUNING"}
     runner = run if run is not None else _default_tune_runner
     try:
         rc = runner(cmd, budget_seconds, tune_env)
@@ -165,14 +159,10 @@ def _maybe_run_startup_tune(
         # Broad on purpose: missing console script, AITER blowups,
         # permission errors all map to "skip and continue". Tuning is
         # never allowed to block the backend from launching.
-        sys.stderr.write(
-            f"vllm-shim startup tune: failed ({e}); continuing\n"
-        )
+        sys.stderr.write(f"vllm-shim startup tune: failed ({e}); continuing\n")
 
 
-def _default_tune_runner(
-    cmd: list[str], timeout: int, env: Mapping[str, str] | None
-) -> int:
+def _default_tune_runner(cmd: list[str], timeout: int, env: Mapping[str, str] | None) -> int:
     # env=None preserves subprocess.run's default (inherit os.environ).
     # A populated env is the merged backend_env (parent + translations
     # + rocm_perf_defaults), which is what AITER's JIT loader expects.
@@ -268,9 +258,7 @@ def main() -> int:
     # principle as translate_env_with_map: if the operator wrote it
     # into the pod spec, they meant it. The launch-info dump shows
     # only the overrides that actually took effect.
-    restored = {
-        k: v for k, v in restore_configs(restore_plan).items() if k not in backend_env
-    }
+    restored = {k: v for k, v in restore_configs(restore_plan).items() if k not in backend_env}
     backend_env.update(restored)
     capture_plan = plan_capture(
         shim_home=shim_home,
@@ -291,9 +279,7 @@ def main() -> int:
     # discipline as restore: only fill in what the operator left blank.
     # See cli/rocm_perf.py for source links and rationale.
     rocm_perf_applied = {
-        k: v
-        for k, v in rocm_perf_defaults(gpu, shim_home).items()
-        if k not in backend_env
+        k: v for k, v in rocm_perf_defaults(gpu, shim_home).items() if k not in backend_env
     }
     backend_env.update(rocm_perf_applied)
 
@@ -316,9 +302,7 @@ def main() -> int:
     _maybe_run_startup_tune(
         shim_home=shim_home,
         gpu=gpu,
-        budget_seconds=_parse_tune_budget(
-            os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_SECONDS")
-        ),
+        budget_seconds=_parse_tune_budget(os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_SECONDS")),
         hot=_parse_tune_hot(os.environ.get("VLLM_SHIM_TUNE_AT_STARTUP_HOT")),
         env=backend_env,
     )
@@ -348,9 +332,7 @@ def main() -> int:
     info.print_summary(launch_info)
 
     if capture_plan.enabled and capture_plan.root is not None:
-        backend_proc = subprocess.Popen(
-            backend_cmd, env=backend_env, stderr=subprocess.PIPE
-        )
+        backend_proc = subprocess.Popen(backend_cmd, env=backend_env, stderr=subprocess.PIPE)
         # The tee is a daemon thread; backend stderr is the only stream it
         # reads, and it exits on EOF when the backend closes its end. We
         # don't track it past the entrypoint - the supervisor's shutdown

@@ -60,16 +60,13 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--video-pruning-rate": ("--video_pruning_rate", True),
     # Renames boolean
     "--enable-chunked-prefill": ("--enable_chunked_prefill", False),
-
     # === Short aliases: rewrite to long form (TRT-LLM has no short flags) ===
     "-tp": ("--tp_size", True),
     "-pp": ("--pp_size", True),
-
     # === Default-already-matches: drop silently ===
     "--no-enable-chunked-prefill": (None, False),
     "--disable-log-requests": (None, False),
     "--disable-log-stats": (None, False),
-
     # === Engine knobs with no trtllm-serve equivalent: drop (with value) ===
     # Some have a YAML escape hatch via --config; see module docstring.
     "--additional-config": (None, True),
@@ -215,7 +212,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--weight-transfer-config": (None, True),
     "--worker-cls": (None, True),
     "--worker-extension-cls": (None, True),
-
     # === Engine knobs with no trtllm-serve equivalent: drop (boolean) ===
     "--aggregate-engine-logging": (None, False),
     "--allow-deprecated-quantization": (None, False),
@@ -275,7 +271,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--skip-tokenizer-init": (None, False),
     "--specialize-active-lora": (None, False),
     "--use-tqdm-on-load": (None, False),
-
     # === Frontend HTTP server flags handled by haproxy/middleware in the shim,
     # not by the engine. (api-key, ssl-keyfile/certfile/ca-certs, host, port
     # are common to vLLM and trtllm-serve and pass through.) ===

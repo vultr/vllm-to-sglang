@@ -99,9 +99,7 @@ def test_parses_different_csv_target() -> None:
     # Another tuned-config target. AITER ships nine of these (bf16,
     # a4w4, a8w8, a8w8 bpreshuffle, a8w8 blockscale, etc.); see
     # ``repos/aiter/aiter/jit/core.py``.
-    line = CANONICAL.replace(
-        "bf16_tuned_gemm.csv", "a8w8_blockscale_tuned_gemm.csv"
-    )
+    line = CANONICAL.replace("bf16_tuned_gemm.csv", "a8w8_blockscale_tuned_gemm.csv")
     shape = parse_line(line)
     assert shape is not None
     assert shape.target == "a8w8_blockscale_tuned_gemm"

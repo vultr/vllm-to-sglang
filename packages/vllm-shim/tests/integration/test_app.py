@@ -171,7 +171,8 @@ def app_custom_metrics(backend_address: ServiceAddress):  # type: ignore[no-unty
 
 @pytest.mark.asyncio
 async def test_metrics_uses_backend_metrics_path(  # type: ignore[no-untyped-def]
-    app_custom_metrics, httpx_mock,
+    app_custom_metrics,
+    httpx_mock,
 ) -> None:
     httpx_mock.add_response(
         method="GET",

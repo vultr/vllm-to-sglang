@@ -39,9 +39,7 @@ def test_plan_disabled_when_env_var_unset(tmp_path: Path) -> None:
 def test_plan_disabled_when_env_var_is_zero(tmp_path: Path) -> None:
     # AITER's C++ side accepts only "1" or "true"; mirror that exactly
     # so the shim doesn't anchor a file AITER won't read.
-    plan = plan_hip_online_tuning(
-        {"HIP_ONLINE_TUNING": "0"}, _MI300X, tmp_path, tmp_path
-    )
+    plan = plan_hip_online_tuning({"HIP_ONLINE_TUNING": "0"}, _MI300X, tmp_path, tmp_path)
     assert plan.enabled is False
     assert plan.reason == REASON_DISABLED
 
@@ -56,9 +54,7 @@ def test_plan_accepts_true_string(tmp_path: Path) -> None:
 def test_plan_disabled_when_no_gpu(tmp_path: Path) -> None:
     # CUDA host or dev box: the env var has no meaning since AITER's
     # gradlib isn't loaded. Anchoring would create a useless symlink.
-    plan = plan_hip_online_tuning(
-        {"HIP_ONLINE_TUNING": "1"}, None, tmp_path, tmp_path
-    )
+    plan = plan_hip_online_tuning({"HIP_ONLINE_TUNING": "1"}, None, tmp_path, tmp_path)
     assert plan.enabled is False
     assert plan.reason == REASON_NO_GPU
 
@@ -67,9 +63,7 @@ def test_plan_disabled_when_no_shim_home(tmp_path: Path) -> None:
     # Operator opted in but the shim couldn't resolve a PV. The plan
     # surfaces the reason so the launch info explains why anchoring
     # didn't happen; apply() will no-op.
-    plan = plan_hip_online_tuning(
-        {"HIP_ONLINE_TUNING": "1"}, _MI300X, None, tmp_path
-    )
+    plan = plan_hip_online_tuning({"HIP_ONLINE_TUNING": "1"}, _MI300X, None, tmp_path)
     assert plan.enabled is False
     assert plan.reason == REASON_NO_SHIM_HOME
 
@@ -169,13 +163,9 @@ def test_apply_is_idempotent_on_already_linked(tmp_path: Path) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
     cwd.mkdir()
-    apply_hip_online_tuning(
-        plan_hip_online_tuning({"HIP_ONLINE_TUNING": "1"}, _MI300X, home, cwd)
-    )
+    apply_hip_online_tuning(plan_hip_online_tuning({"HIP_ONLINE_TUNING": "1"}, _MI300X, home, cwd))
     (home / FILENAME).write_text("M,N,K,algo\nrow1\n")
-    apply_hip_online_tuning(
-        plan_hip_online_tuning({"HIP_ONLINE_TUNING": "1"}, _MI300X, home, cwd)
-    )
+    apply_hip_online_tuning(plan_hip_online_tuning({"HIP_ONLINE_TUNING": "1"}, _MI300X, home, cwd))
     assert (cwd / FILENAME).is_symlink()
     assert (home / FILENAME).read_text() == "M,N,K,algo\nrow1\n"
 

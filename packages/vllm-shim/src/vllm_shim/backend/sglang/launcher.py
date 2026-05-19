@@ -23,11 +23,15 @@ class SGLangLauncher(Launcher):
         parser = os.environ.get("SGLANG_TOOL_CALL_PARSER", DEFAULT_TOOL_CALL_PARSER)
         return [
             *self._invocation(),
-            "--model-path", model,
-            "--host", address.host,
-            "--port", str(address.port),
+            "--model-path",
+            model,
+            "--host",
+            address.host,
+            "--port",
+            str(address.port),
             "--enable-metrics",
-            "--tool-call-parser", parser,
+            "--tool-call-parser",
+            parser,
             *extra_args,
         ]
 

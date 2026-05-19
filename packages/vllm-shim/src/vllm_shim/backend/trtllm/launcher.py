@@ -27,10 +27,14 @@ class TRTLLMLauncher(Launcher):
         cmd = [
             "trtllm-serve",
             model,
-            "--host", address.host,
-            "--port", str(address.port),
-            "--backend", backend,
-            "--tool_parser", tool_parser,
+            "--host",
+            address.host,
+            "--port",
+            str(address.port),
+            "--backend",
+            backend,
+            "--tool_parser",
+            tool_parser,
         ]
         if reasoning_parser:
             cmd.extend(["--reasoning_parser", reasoning_parser])

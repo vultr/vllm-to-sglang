@@ -70,6 +70,7 @@ def test_translate_preserves_order() -> None:
     )
     assert out == ["--new-bool", "--unknown", "X", "--new-with-value", "Y"]
 
+
 # ---------- translate_prom_line ----------
 
 _NAME_MAP: dict[str, str] = {
@@ -94,9 +95,9 @@ def test_prom_line_renames_type_line() -> None:
 
 
 def test_prom_line_renames_histogram_suffixes() -> None:
-    assert translate_prom_line(
-        'src_latency_seconds_bucket{le="0.5"} 1', _NAME_MAP
-    ) == ['vllm:e2e_request_latency_seconds_bucket{le="0.5"} 1']
+    assert translate_prom_line('src_latency_seconds_bucket{le="0.5"} 1', _NAME_MAP) == [
+        'vllm:e2e_request_latency_seconds_bucket{le="0.5"} 1'
+    ]
     assert translate_prom_line("src_latency_seconds_sum 1.5", _NAME_MAP) == [
         "vllm:e2e_request_latency_seconds_sum 1.5"
     ]

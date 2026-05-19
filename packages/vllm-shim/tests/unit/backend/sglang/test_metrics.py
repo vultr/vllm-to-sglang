@@ -35,10 +35,7 @@ def test_renames_histogram_suffixes() -> None:
 
 
 def test_synthesizes_kv_cache_usage_perc() -> None:
-    raw = (
-        'sglang:num_used_tokens{model="x"} 50\n'
-        'sglang:max_total_num_tokens{model="x"} 200\n'
-    )
+    raw = 'sglang:num_used_tokens{model="x"} 50\nsglang:max_total_num_tokens{model="x"} 200\n'
     out = SGLangMetricsTranslator().translate(raw)
     assert "vllm:kv_cache_usage_perc" in out
     assert "25.0000" in out

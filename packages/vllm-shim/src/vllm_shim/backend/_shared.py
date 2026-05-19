@@ -57,11 +57,7 @@ def translate_with_arg_map(
         mapping = arg_map.get(arg)
         if mapping is None:
             # Pass through. If next token looks like a value, take it too.
-            if (
-                i + 1 < len(args)
-                and not args[i + 1].startswith("-")
-                and arg.startswith("--")
-            ):
+            if i + 1 < len(args) and not args[i + 1].startswith("-") and arg.startswith("--"):
                 out.extend([arg, args[i + 1]])
                 i += 2
             else:

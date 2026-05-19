@@ -60,19 +60,26 @@ def test_reads_equals_form() -> None:
 
 def test_reads_all_three_together() -> None:
     args = (
-        "--tp", "4",
-        "--ep-size", "4",
-        "--pipeline-parallel-size", "2",
+        "--tp",
+        "4",
+        "--ep-size",
+        "4",
+        "--pipeline-parallel-size",
+        "2",
     )
     assert _extract(*args) == Parallelism(tp=4, ep=4, pp=2)
 
 
 def test_ignores_unrelated_flags() -> None:
     args = (
-        "--model", "/data/m",
-        "--port", "8000",
-        "--tp", "8",
-        "--mem-fraction-static", "0.9",
+        "--model",
+        "/data/m",
+        "--port",
+        "8000",
+        "--tp",
+        "8",
+        "--mem-fraction-static",
+        "0.9",
     )
     assert _extract(*args) == Parallelism(tp=8)
 

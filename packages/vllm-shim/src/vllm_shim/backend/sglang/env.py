@@ -31,7 +31,6 @@ ENV_MAP: dict[str, str] = {
     "VLLM_RINGBUFFER_WARNING_INTERVAL": "SGLANG_RINGBUFFER_WARNING_INTERVAL",
     "VLLM_SKIP_P2P_CHECK": "SGLANG_SKIP_P2P_CHECK",
     "VLLM_USE_MODELSCOPE": "SGLANG_USE_MODELSCOPE",
-
     # ROCm-side equivalents. The master AITER toggle has the same semantics in
     # both engines (off by default, set=1 to engage AMD's AITER kernels). The
     # three QUICK_REDUCE_* names are interesting: vLLM exposes them under a

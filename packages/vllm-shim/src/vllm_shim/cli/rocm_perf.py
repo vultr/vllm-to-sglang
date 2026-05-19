@@ -99,9 +99,7 @@ def aiter_cache_key() -> str:
     return key or "default"
 
 
-def rocm_perf_defaults(
-    gpu: GpuAgent | None, shim_home: Path | None
-) -> dict[str, str]:
+def rocm_perf_defaults(gpu: GpuAgent | None, shim_home: Path | None) -> dict[str, str]:
     """Return the env-var defaults to merge into the backend environment.
 
     Empty dict when there's no ROCm GPU (CUDA hosts, dev boxes) or no

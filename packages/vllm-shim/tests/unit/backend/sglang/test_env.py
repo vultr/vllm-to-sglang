@@ -11,6 +11,7 @@ def translator() -> SGLangEnvTranslator:
 
 # === Renames take effect ========================================================
 
+
 @pytest.mark.parametrize("vllm_name,sglang_name", list(ENV_MAP.items()))
 def test_every_entry_renames(
     translator: SGLangEnvTranslator,
@@ -37,11 +38,13 @@ def test_rocm_quick_reduce_targets_unprefixed_upstream_name(
     translator: SGLangEnvTranslator,
 ) -> None:
     """SGLang reads the un-prefixed ROCM_QUICK_REDUCE_* names directly."""
-    out = translator.translate({
-        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "fp8",
-        "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB": "2048",
-        "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16": "1",
-    })
+    out = translator.translate(
+        {
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "fp8",
+            "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB": "2048",
+            "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16": "1",
+        }
+    )
     assert out["ROCM_QUICK_REDUCE_QUANTIZATION"] == "fp8"
     assert out["ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB"] == "2048"
     assert out["ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16"] == "1"
@@ -49,12 +52,15 @@ def test_rocm_quick_reduce_targets_unprefixed_upstream_name(
 
 # === Operator overrides ========================================================
 
+
 def test_existing_target_is_not_overwritten(translator: SGLangEnvTranslator) -> None:
     """If the user has already set the SGLang-side name, keep it."""
-    out = translator.translate({
-        "VLLM_USE_MODELSCOPE": "1",
-        "SGLANG_USE_MODELSCOPE": "0",  # operator override
-    })
+    out = translator.translate(
+        {
+            "VLLM_USE_MODELSCOPE": "1",
+            "SGLANG_USE_MODELSCOPE": "0",  # operator override
+        }
+    )
     assert out["SGLANG_USE_MODELSCOPE"] == "0"
 
 
@@ -68,6 +74,7 @@ def test_target_set_with_no_source_passes_through(
 
 
 # === Unrelated env preserved ===================================================
+
 
 def test_unrelated_env_is_preserved(translator: SGLangEnvTranslator) -> None:
     parent = {
@@ -90,6 +97,7 @@ def test_pure_function_does_not_mutate_input(translator: SGLangEnvTranslator) ->
 
 # === Notable non-translations ==================================================
 
+
 def test_vllm_port_translates_to_sglang_port(translator: SGLangEnvTranslator) -> None:
     """Both engines use this as a base port for internal service-port
     allocation (NOT the listen port, which comes from --port). The shim
@@ -104,11 +112,13 @@ def test_per_feature_aiter_toggles_not_translated(
     translator: SGLangEnvTranslator,
 ) -> None:
     """Per-feature AITER toggles don't have 1:1 SGLang equivalents."""
-    out = translator.translate({
-        "VLLM_ROCM_USE_AITER_MLA": "1",
-        "VLLM_ROCM_USE_AITER_MOE": "1",
-        "VLLM_ROCM_USE_AITER_RMSNORM": "1",
-    })
+    out = translator.translate(
+        {
+            "VLLM_ROCM_USE_AITER_MLA": "1",
+            "VLLM_ROCM_USE_AITER_MOE": "1",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+        }
+    )
     # Source preserved (backend ignores).
     assert out["VLLM_ROCM_USE_AITER_MLA"] == "1"
     # No invented SGLang-side targets.

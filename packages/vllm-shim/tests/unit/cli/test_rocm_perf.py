@@ -129,9 +129,7 @@ def test_aiter_jit_dir_uses_key_when_file_populated(
     key_file.write_text("abc123def456\n")
     monkeypatch.setattr(rocm_perf, "_AITER_CACHE_KEY_FILE", key_file)
     out = rocm_perf_defaults(_MI300X, tmp_path)
-    assert out["AITER_JIT_DIR"] == str(
-        tmp_path / "aiter" / "jit" / "abc123def456"
-    )
+    assert out["AITER_JIT_DIR"] == str(tmp_path / "aiter" / "jit" / "abc123def456")
 
 
 def test_aiter_jit_dir_falls_back_when_file_empty(

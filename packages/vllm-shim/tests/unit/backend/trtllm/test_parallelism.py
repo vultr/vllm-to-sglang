@@ -44,9 +44,12 @@ def test_reads_equals_form() -> None:
 
 def test_reads_all_three_together() -> None:
     args = (
-        "--tp_size", "4",
-        "--ep_size", "4",
-        "--pp_size", "2",
+        "--tp_size",
+        "4",
+        "--ep_size",
+        "4",
+        "--pp_size",
+        "2",
     )
     assert _extract(*args) == Parallelism(tp=4, ep=4, pp=2)
 
@@ -54,9 +57,12 @@ def test_reads_all_three_together() -> None:
 def test_ignores_unrelated_flags() -> None:
     args = (
         "/data/m",
-        "--port", "8000",
-        "--tp_size", "8",
-        "--kv_cache_free_gpu_memory_fraction", "0.9",
+        "--port",
+        "8000",
+        "--tp_size",
+        "8",
+        "--kv_cache_free_gpu_memory_fraction",
+        "0.9",
     )
     assert _extract(*args) == Parallelism(tp=8)
 

@@ -17,7 +17,5 @@ def select() -> Backend:
     name = os.environ.get("VLLM_SHIM_BACKEND", "sglang")
     cls = _BACKENDS.get(name)
     if cls is None:
-        raise ValueError(
-            f"Unknown backend: {name!r}. Known: {sorted(_BACKENDS)}"
-        )
+        raise ValueError(f"Unknown backend: {name!r}. Known: {sorted(_BACKENDS)}")
     return cls()

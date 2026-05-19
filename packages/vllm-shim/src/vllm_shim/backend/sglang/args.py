@@ -63,7 +63,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--no-enable-prefix-caching": ("--disable-radix-cache", False),
     "--trust-remote-code": ("--trust-remote-code", False),
     "--trust_remote_code": ("--trust-remote-code", False),
-
     # === Short aliases: rewrite to long form (SGLang accepts no short flags) ===
     "-tp": ("--tp", True),
     "-pp": ("--pipeline-parallel-size", True),
@@ -71,7 +70,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "-q": ("--quantization", True),
     "-n": ("--nnodes", True),
     "-r": ("--node-rank", True),
-
     # === Default-already-matches: drop silently (no behavior change) ===
     "--enable-prefix-caching": (None, False),
     "--enable-chunked-prefill": (None, False),
@@ -80,7 +78,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--disable-log-stats": (None, False),
     # SGLang default is autotune-enabled; --disable-flashinfer-autotune is the opt-out.
     "--enable-flashinfer-autotune": (None, False),
-
     # === Engine knobs with no SGLang equivalent: drop (with value) ===
     "--additional-config": (None, True),
     "--all2all-backend": (None, True),  # values differ from SGLang's --moe-a2a-backend choices
@@ -197,7 +194,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--weight-transfer-config": (None, True),
     "--worker-cls": (None, True),
     "--worker-extension-cls": (None, True),
-
     # === Engine knobs with no SGLang equivalent: drop (boolean) ===
     "--aggregate-engine-logging": (None, False),
     "--allow-deprecated-quantization": (None, False),
@@ -240,7 +236,6 @@ ARG_MAP: dict[str, tuple[str | None, bool]] = {
     "--skip-mm-profiling": (None, False),
     "--specialize-active-lora": (None, False),
     "--use-tqdm-on-load": (None, False),
-
     # === Frontend HTTP server flags handled by the shim's haproxy/middleware,
     # not the engine. SGLang has no equivalent for any of these, so dropping is
     # the right move. (api-key, ssl-keyfile/certfile/ca-certs, enable-ssl-refresh,
@@ -312,10 +307,14 @@ def _translate_speculative_config(json_value: str) -> list[str] | None:
     if not isinstance(n, int) or n <= 0:
         return None
     return [
-        "--speculative-algorithm", "EAGLE",
-        "--speculative-num-steps", str(n),
-        "--speculative-eagle-topk", "1",
-        "--speculative-num-draft-tokens", str(n + 1),
+        "--speculative-algorithm",
+        "EAGLE",
+        "--speculative-num-steps",
+        str(n),
+        "--speculative-eagle-topk",
+        "1",
+        "--speculative-num-draft-tokens",
+        str(n + 1),
     ]
 
 

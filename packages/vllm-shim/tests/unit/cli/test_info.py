@@ -27,9 +27,7 @@ def _disabled_restore() -> RestorePlan:
 
 
 def _disabled_hip_tuning() -> HipTuningPlan:
-    return HipTuningPlan(
-        enabled=False, storage=None, target=None, reason=REASON_DISABLED
-    )
+    return HipTuningPlan(enabled=False, storage=None, target=None, reason=REASON_DISABLED)
 
 
 def _sample_args() -> dict[str, object]:
@@ -158,9 +156,7 @@ def test_collect_aiter_restore_enabled_shape() -> None:
         backend_env={},
     )
     assert out["aiter_restore"]["enabled"] is True
-    assert out["aiter_restore"]["source"] == str(
-        Path("/data/vllm-shim/aiter/configs/gfx942-304cu")
-    )
+    assert out["aiter_restore"]["source"] == str(Path("/data/vllm-shim/aiter/configs/gfx942-304cu"))
     # The serialized overrides are the env-var -> path mapping AITER
     # will read at import time; tests assert on the dict directly so
     # any divergence between the in-memory and dumped shapes is loud.
@@ -352,10 +348,7 @@ def test_print_summary_shows_capture_path_when_enabled(
     # Operators reading pod logs should see *where* shapes will land so
     # they can tail the directory while loading; the reason string adds
     # nothing when enabled.
-    assert (
-        "aiter capture: enabled -> /data/vllm-shim/aiter/shapes/gfx942-304cu/m/tp8"
-        in err
-    )
+    assert "aiter capture: enabled -> /data/vllm-shim/aiter/shapes/gfx942-304cu/m/tp8" in err
 
 
 def test_print_summary_shows_restore_count_and_env_vars_when_enabled(

@@ -42,9 +42,7 @@ from pathlib import PurePosixPath
 # require the shape fields to appear in any particular order in the
 # anchor; the per-field regexes below catch a truncated line by
 # returning None for any missing field.
-_ANCHOR_RE = re.compile(
-    r"shape is .* not found tuned config in (?P<path>\S+\.csv)"
-)
+_ANCHOR_RE = re.compile(r"shape is .* not found tuned config in (?P<path>\S+\.csv)")
 
 # Each field is extracted independently so reordering or new fields in
 # future AITER versions doesn't break the parser. The log line spells

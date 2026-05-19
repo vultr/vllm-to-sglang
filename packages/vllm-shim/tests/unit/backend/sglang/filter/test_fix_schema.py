@@ -10,14 +10,18 @@ def test_applies_to_chat_completions_post() -> None:
 
 
 def test_fixes_properties_array_to_object() -> None:
-    body = json.dumps({
-        "tools": [{
-            "function": {
-                "name": "f",
-                "parameters": {"type": "object", "properties": []},
-            }
-        }]
-    }).encode()
+    body = json.dumps(
+        {
+            "tools": [
+                {
+                    "function": {
+                        "name": "f",
+                        "parameters": {"type": "object", "properties": []},
+                    }
+                }
+            ]
+        }
+    ).encode()
     out = json.loads(FixToolSchemas().transform(body))
     assert out["tools"][0]["function"]["parameters"]["properties"] == {}
 
@@ -30,33 +34,39 @@ def test_replaces_non_dict_parameters() -> None:
 
 
 def test_recurses_into_nested_items() -> None:
-    body = json.dumps({
-        "tools": [{
-            "function": {
-                "name": "f",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "list": {"type": "array", "items": {"properties": []}}
-                    },
-                },
-            }
-        }]
-    }).encode()
+    body = json.dumps(
+        {
+            "tools": [
+                {
+                    "function": {
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"list": {"type": "array", "items": {"properties": []}}},
+                        },
+                    }
+                }
+            ]
+        }
+    ).encode()
     out = json.loads(FixToolSchemas().transform(body))
     items = out["tools"][0]["function"]["parameters"]["properties"]["list"]["items"]
     assert items["properties"] == {}
 
 
 def test_drops_non_list_required() -> None:
-    body = json.dumps({
-        "tools": [{
-            "function": {
-                "name": "f",
-                "parameters": {"type": "object", "properties": {}, "required": "name"},
-            }
-        }]
-    }).encode()
+    body = json.dumps(
+        {
+            "tools": [
+                {
+                    "function": {
+                        "name": "f",
+                        "parameters": {"type": "object", "properties": {}, "required": "name"},
+                    }
+                }
+            ]
+        }
+    ).encode()
     out = json.loads(FixToolSchemas().transform(body))
     assert "required" not in out["tools"][0]["function"]["parameters"]
 

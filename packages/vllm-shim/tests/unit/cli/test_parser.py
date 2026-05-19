@@ -28,9 +28,7 @@ def test_equals_form_for_host_port() -> None:
 
 
 def test_passthrough_preserves_remaining_argv() -> None:
-    p = ArgParser().parse(
-        ["serve", "m", "--tensor-parallel-size", "8", "--trust-remote-code"]
-    )
+    p = ArgParser().parse(["serve", "m", "--tensor-parallel-size", "8", "--trust-remote-code"])
     assert p.passthrough == ("--tensor-parallel-size", "8", "--trust-remote-code")
 
 
