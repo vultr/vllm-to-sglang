@@ -39,14 +39,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vllm_shim.aiter.capture import resolve_shim_home
-from vllm_shim.aiter.shape_store import padded_m_gl0
+from vllm_shim.aiter.shape_store import HITS_COLUMN, SHAPE_COLUMNS, parse_hits
 from vllm_shim.cli.rocm_probe import bucket as bucket_for_gpu
 from vllm_shim.cli.rocm_probe import probe as probe_rocm
-
-# Column containing AITER's M (batch * seq) dimension. Pre-bucketing
-# capture writes raw values that have to be rounded up to AITER's
-# tuning grid before the tuner can do anything useful with them.
-_M_COLUMN: str = "M"
 
 # Default to the layout baked into the SGLang-ROCm shim image. ``/opt/venv``
 # is the Python 3.10 env that ships AITER's tuner; ``/sgl-workspace/aiter``
@@ -182,190 +177,67 @@ def discover_shape_files(shim_home: Path, bucket: str, target: str) -> list[Path
     return sorted(root.glob(f"*/*/{target}.csv"))
 
 
-def canonicalize_shape_files(files: list[Path]) -> int:
-    """Rewrite shape CSVs in place to the canonical persisted form.
+def merge_shape_files(
+    files: list[Path],
+    destination: Path,
+    *,
+    top_k: int | None = None,
+) -> tuple[int, int]:
+    """Read per-source shape CSVs and write AITER's untuned input.
 
-    Pads raw M values onto AITER's tuning grid. Pre-bucketing capture
-    stored the raw M from the log line; AITER's runtime lookup pads M
-    into discrete buckets before checking the tuned config, so off-grid
-    raw values are dead weight for the tuner. After padding, rows that
-    collapse to identical tuples are deduplicated so the file shrinks
-    toward its canonical minimum. Returns the count of files actually
-    rewritten; idempotent on already-clean files.
+    Inputs are the per-(model, parallelism) shape capture CSVs written
+    by ``ShapeStore``. They carry the shim's full schema including the
+    ``hits`` column; this function:
 
-    Writes go through a sibling ``.tmp`` file plus an atomic
-    ``Path.replace`` so a crash mid-rewrite never leaves a half-
-    written CSV in place. Safe to run at startup-tune time because the
-    backend hasn't launched yet, so no capture process is appending
-    to these files concurrently.
+    1. Sums hits per shape key across every input file.
+    2. Optionally truncates to the ``top_k`` shapes with the highest
+       summed hits, descending. Ties break by insertion order.
+    3. Writes ``destination`` with just the AITER-required columns
+       (``hits`` is dropped). AITER's tuners use ``pd.read_csv`` and
+       ``drop_duplicates`` over all columns; stripping ``hits`` keeps
+       the tuner contract unchanged whether or not we ranked.
+
+    Returns ``(rows_total, rows_in)``: unique-shape count after merge,
+    and the row count actually written to ``destination``. They differ
+    only when ``top_k`` truncates.
+
+    Missing ``hits`` cells default to 1 via ``parse_hits``, so CSVs
+    captured before the column existed read back as "seen at least
+    once" rather than being treated as zero-weight.
     """
-    rewritten = 0
-    for path in files:
-        if _canonicalize_one(path):
-            rewritten += 1
-    return rewritten
-
-
-def _canonicalize_one(path: Path) -> bool:
-    """Rewrite ``path`` if any row needs M padding or dedup.
-
-    Returns True when the file was rewritten, False when every row is
-    already canonical (or the file is empty / malformed in a way that
-    doesn't include the M column).
-    """
-    with path.open(newline="") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return False
-        try:
-            m_col = header.index(_M_COLUMN)
-        except ValueError:
-            return False
-        rows = list(reader)
-    cleaned: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
-    changed = False
-    for row in rows:
-        new_row = list(row)
-        if m_col < len(new_row):
-            try:
-                m_raw = int(new_row[m_col])
-            except ValueError:
-                m_raw = None
-            if m_raw is not None:
-                padded = padded_m_gl0(m_raw)
-                if padded != m_raw:
-                    new_row[m_col] = str(padded)
-                    changed = True
-        key = tuple(new_row)
-        if key in seen:
-            # Two raw rows collapsed onto the same padded bucket
-            # (or were already identical). Drop the duplicate;
-            # the rewrite below shrinks the file accordingly.
-            changed = True
-            continue
-        seen.add(key)
-        cleaned.append(new_row)
-    if not changed:
-        return False
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(cleaned)
-    tmp.replace(path)
-    return True
-
-
-def apply_hot_filter(path: Path, top_k: int) -> tuple[int, int]:
-    """Truncate ``path`` to the top-k heuristically-hottest shapes.
-
-    Hot = smallest ``(M, N, K)`` first. In autoregressive LLM serving
-    the decode phase runs at ``M = active_batch`` (small, typically
-    1-256) and calls every layer's GEMMs once per token; prefill
-    shapes are large M but run once per request. Call count therefore
-    skews orders of magnitude toward small-M shapes, so sorting M
-    ascending and truncating keeps the long tail that dominates
-    real-world performance at a fraction of the tuning cost.
-
-    Returns ``(rows_before, rows_after)``. When ``rows_before <=
-    top_k`` the file is left untouched. Idempotent and safe to run on
-    files lacking the schema columns (no-op + same-length return).
-
-    The heuristic is a stand-in for measured call frequency. Workloads
-    dominated by long-context single-shot prefill (rather than
-    chat-style decode) should set ``top_k`` wide enough to cover
-    their shapes, or skip the filter entirely.
-    """
-    with path.open(newline="") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return (0, 0)
-        rows = list(reader)
-    rows_before = len(rows)
-    if rows_before <= top_k:
-        return (rows_before, rows_before)
-    try:
-        m_col = header.index(_M_COLUMN)
-        n_col = header.index("N")
-        k_col = header.index("K")
-    except ValueError:
-        # File lacks the canonical schema (corrupt or pre-shim);
-        # leave it alone rather than reorder rows of unknown meaning.
-        return (rows_before, rows_before)
-
-    def sort_key(row: list[str]) -> tuple[int, int, int]:
-        try:
-            return (int(row[m_col]), int(row[n_col]), int(row[k_col]))
-        except (ValueError, IndexError):
-            # Malformed row sorts to the end so the well-formed shapes
-            # at the top of the order are the ones that actually get
-            # tuned. Stable sort within the bucket preserves capture
-            # order for any operator-side debugging.
-            return (sys.maxsize, sys.maxsize, sys.maxsize)
-
-    rows.sort(key=sort_key)
-    rows = rows[:top_k]
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
-    tmp.replace(path)
-    return (rows_before, top_k)
-
-
-def merge_shape_files(files: list[Path], destination: Path) -> int:
-    """Concatenate shape CSVs into ``destination`` with row-level dedup.
-
-    Every captured shape file shares the schema defined in
-    ``shape_store._HEADER``. We dedup on the full row tuple so two
-    captures with different ``bias`` or ``dtype`` for the same
-    ``(M, N, K)`` both survive - the tuner treats them as separate
-    inputs. Returns the row count written (excluding the header).
-
-    Callers running this against operator volumes should invoke
-    ``canonicalize_shape_files`` first to pad pre-bucketing M values
-    onto AITER's grid. This function assumes its inputs are already
-    canonical.
-    """
-    seen: set[tuple[str, ...]] = set()
-    header: list[str] | None = None
-    rows: list[list[str]] = []
+    aggregated: dict[tuple[str, ...], int] = {}
     for path in files:
         with path.open(newline="") as f:
-            reader = csv.reader(f)
-            try:
-                file_header = next(reader)
-            except StopIteration:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
                 continue
-            if header is None:
-                header = file_header
-            elif file_header != header:
-                # Different shape captures should all use shape_store's
-                # canonical header; if they don't, something upstream
-                # is wrong and the tuner output would be garbage.
-                raise ValueError(
-                    f"header mismatch in {path}: expected {header}, got {file_header}"
-                )
+            missing = [c for c in SHAPE_COLUMNS if c not in reader.fieldnames]
+            if missing:
+                raise ValueError(f"missing column(s) {missing} in {path}: got {reader.fieldnames}")
             for row in reader:
-                key = tuple(row)
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(row)
-    if header is None:
-        return 0
+                key = tuple(row[c] for c in SHAPE_COLUMNS)
+                hits = parse_hits(row.get(HITS_COLUMN))
+                aggregated[key] = aggregated.get(key, 0) + hits
+    rows_total = len(aggregated)
+    if rows_total == 0:
+        return 0, 0
+    items = list(aggregated.items())
+    if top_k is not None and top_k < rows_total:
+        # Stable sort by -hits keeps the input-encounter order for
+        # equally-hot shapes, so operator-side debugging can correlate
+        # rows back to the source files in deterministic order.
+        items.sort(key=lambda kv: kv[1], reverse=True)
+        items = items[:top_k]
+    rows_in = len(items)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", newline="") as f:
+    tmp = destination.with_suffix(destination.suffix + ".tmp")
+    with tmp.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
-    return len(rows)
+        writer.writerow(SHAPE_COLUMNS)
+        for key, _hits in items:
+            writer.writerow(list(key))
+    tmp.replace(destination)
+    return rows_total, rows_in
 
 
 def build_command(
@@ -390,9 +262,7 @@ def build_command(
     FlyDSL path keep their default args.
     """
     extra_args = (
-        _NO_FLYDSL_EXTRA_ARGS.get(spec.target, spec.extra_args)
-        if no_flydsl
-        else spec.extra_args
+        _NO_FLYDSL_EXTRA_ARGS.get(spec.target, spec.extra_args) if no_flydsl else spec.extra_args
     )
     cmd: list[str] = [
         str(python),
@@ -462,15 +332,7 @@ def tune_target(
             returncode=None,
             skipped_reason="no captured shapes",
         )
-    # Pad pre-bucketing M values in place before feeding the merge
-    # step. After this returns, every source CSV is on AITER's grid
-    # and downstream readers (this run plus any future operator-driven
-    # invocations) get canonical data. Idempotent on already-clean files.
-    canonicalize_shape_files(files)
-    rows = merge_shape_files(files, untuned_file)
-    rows_total = rows
-    if hot is not None and rows > 0:
-        rows_total, rows = apply_hot_filter(untuned_file, hot)
+    rows_total, rows = merge_shape_files(files, untuned_file, top_k=hot)
     cmd = build_command(
         spec,
         python=python,
@@ -528,17 +390,13 @@ def _print_list(shim_home: Path, bucket: str) -> int:
         files = discover_shape_files(shim_home, bucket, target)
         tuned = configs_root(shim_home, bucket) / f"{target}.csv"
         tuned_marker = "tuned" if tuned.exists() else "untuned"
-        sys.stdout.write(
-            f"  {target}: {len(files)} shape file(s), {tuned_marker}\n"
-        )
+        sys.stdout.write(f"  {target}: {len(files)} shape file(s), {tuned_marker}\n")
     return 0
 
 
 def _print_result(result: TuneResult) -> None:
     if result.skipped_reason:
-        sys.stderr.write(
-            f"  {result.target}: skipped ({result.skipped_reason})\n"
-        )
+        sys.stderr.write(f"  {result.target}: skipped ({result.skipped_reason})\n")
         if result.command:
             sys.stderr.write(f"    would run: {' '.join(result.command)}\n")
         return
@@ -547,9 +405,7 @@ def _print_result(result: TuneResult) -> None:
         shapes = f"{result.rows_in} of {result.rows_total} shapes (hot)"
     else:
         shapes = f"{result.rows_in} shapes"
-    sys.stderr.write(
-        f"  {result.target}: {shapes} -> {result.tuned_file} [{status}]\n"
-    )
+    sys.stderr.write(f"  {result.target}: {shapes} -> {result.tuned_file} [{status}]\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -564,10 +420,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--bucket",
-        help=(
-            "Hardware bucket (e.g. gfx942-304cu). Inferred from "
-            "rocminfo when omitted."
-        ),
+        help=("Hardware bucket (e.g. gfx942-304cu). Inferred from rocminfo when omitted."),
     )
     parser.add_argument(
         "--target",
@@ -584,10 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         "--python",
         type=Path,
         default=DEFAULT_PYTHON,
-        help=(
-            "Python interpreter that has AITER installed "
-            f"(default: {DEFAULT_PYTHON})."
-        ),
+        help=(f"Python interpreter that has AITER installed (default: {DEFAULT_PYTHON})."),
     )
     parser.add_argument(
         "--shim-home",
@@ -621,13 +471,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         metavar="N",
         help=(
-            "Tune only the N hottest shapes per target. 'Hot' is "
-            "currently a heuristic: smallest (M, N, K) first, which "
-            "approximates the decode-phase GEMMs that dominate call "
-            "count in autoregressive serving. Default: tune every "
-            "captured shape. Composes with --retune; with the default "
-            "(incremental) mode AITER skips already-tuned rows, so "
-            "growing --hot across runs converges on the full set."
+            "Tune only the N hottest shapes per target, ranked by the "
+            "summed 'hits' column captured at serve time (one increment "
+            "per AITER miss line). Default: tune every captured shape. "
+            "Composes with --retune; with the default (incremental) "
+            "mode AITER skips already-tuned rows, so growing --hot "
+            "across runs converges on the full set."
         ),
     )
     parser.add_argument(
@@ -662,9 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         return _print_list(shim_home, bucket)
 
     targets = (args.target,) if args.target else known_targets()
-    sys.stderr.write(
-        f"tuning bucket={bucket} shim_home={shim_home} aiter_root={args.aiter_root}\n"
-    )
+    sys.stderr.write(f"tuning bucket={bucket} shim_home={shim_home} aiter_root={args.aiter_root}\n")
     failures = 0
     for target in targets:
         result = tune_target(

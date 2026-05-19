@@ -7,9 +7,7 @@ import pytest
 from vllm_shim.aiter import tune
 from vllm_shim.aiter.tune import (
     TuneResult,
-    apply_hot_filter,
     build_command,
-    canonicalize_shape_files,
     discover_shape_files,
     known_targets,
     main,
@@ -17,15 +15,34 @@ from vllm_shim.aiter.tune import (
     tune_target,
 )
 
-_HEADER = "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle"
-_ROW_A = "1024,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
-_ROW_B = "2048,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
-_ROW_C = "4096,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+# Full capture-side schema, including the shim-added ``hits`` column.
+_HEADER = "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,hits"
+# Pre-hits schema (what ShapeStore wrote before the column was added,
+# and what tune outputs for AITER's tuner after stripping ``hits``).
+_LEGACY_HEADER = "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle"
 
 
-def _write(path: Path, *rows: str) -> Path:
+def _row(m: int = 1024, hits: int = 1) -> str:
+    """Build a capture-format row string with an explicit hit count."""
+    return f"{m},7168,512,False,torch.bfloat16,torch.bfloat16,False,False,{hits}"
+
+
+def _aiter_row(m: int = 1024) -> str:
+    """Row in the AITER tuner-input format (no ``hits`` column)."""
+    return f"{m},7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+
+
+# Three distinct shapes used across merge/tune tests. Hits default to 1
+# so legacy-style assertions about set membership keep working; tests
+# that exercise hot-ranking re-build the rows with explicit hit counts.
+_ROW_A = _row(m=1024)
+_ROW_B = _row(m=2048)
+_ROW_C = _row(m=4096)
+
+
+def _write(path: Path, *rows: str, header: str = _HEADER) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join((_HEADER, *rows)) + "\n")
+    path.write_text("\n".join((header, *rows)) + "\n")
     return path
 
 
@@ -74,184 +91,112 @@ def test_merge_dedups_across_files(tmp_path: Path) -> None:
     f1 = _write(tmp_path / "f1.csv", _ROW_A, _ROW_B)
     f2 = _write(tmp_path / "f2.csv", _ROW_A, _ROW_C)
     dest = tmp_path / "merged" / "out.csv"
-    rows = merge_shape_files([f1, f2], dest)
-    assert rows == 3  # A, B, C (one A dropped)
-    text = dest.read_text().splitlines()
-    assert text[0] == _HEADER
-    assert set(text[1:]) == {_ROW_A, _ROW_B, _ROW_C}
+    rows_total, rows_in = merge_shape_files([f1, f2], dest)
+    # Three unique shapes: A appears in both files but collapses.
+    assert (rows_total, rows_in) == (3, 3)
+    lines = dest.read_text().splitlines()
+    # Output is the AITER-input schema: no ``hits`` column.
+    assert lines[0] == _LEGACY_HEADER
+    assert set(lines[1:]) == {_aiter_row(1024), _aiter_row(2048), _aiter_row(4096)}
 
 
 def test_merge_empty_list_writes_nothing(tmp_path: Path) -> None:
     dest = tmp_path / "merged" / "out.csv"
-    assert merge_shape_files([], dest) == 0
+    assert merge_shape_files([], dest) == (0, 0)
     assert not dest.exists()
 
 
-def test_merge_rejects_header_mismatch(tmp_path: Path) -> None:
+def test_merge_rejects_missing_required_column(tmp_path: Path) -> None:
+    # A capture file that's lost one of the shape-identifying columns
+    # is a sign of upstream corruption; failing loud is better than
+    # silently writing a garbage tuner input.
     f1 = _write(tmp_path / "f1.csv", _ROW_A)
     f2 = tmp_path / "f2.csv"
     f2.write_text("M,N,K\n1024,7168,512\n")
-    with pytest.raises(ValueError, match="header mismatch"):
+    with pytest.raises(ValueError, match="missing column"):
         merge_shape_files([f1, f2], tmp_path / "out.csv")
 
 
-# ---------- apply_hot_filter ----------
+def test_merge_sums_hits_across_files(tmp_path: Path) -> None:
+    # The same shape captured in two pods (or across two pod
+    # generations) should have its hit counts summed at merge time so
+    # the ranking sees the workload's true call frequency.
+    f1 = _write(tmp_path / "f1.csv", _row(m=1024, hits=7))
+    f2 = _write(tmp_path / "f2.csv", _row(m=1024, hits=15))
+    dest = tmp_path / "out.csv"
+    rows_total, rows_in = merge_shape_files([f1, f2], dest, top_k=1)
+    assert (rows_total, rows_in) == (1, 1)
+    # We can't observe the summed hits in the output (the column is
+    # stripped), but with top_k=1 the surviving row must be the merged
+    # one; a buggy implementation that didn't sum would still pass
+    # here, so the real assertion is in the hot-ranking tests below.
+    lines = dest.read_text().splitlines()
+    assert lines[1] == _aiter_row(1024)
 
 
-def test_hot_filter_noop_when_rows_fit_under_top_k(tmp_path: Path) -> None:
-    # No truncation needed: file should be byte-identical, no rewrite.
-    path = _write(tmp_path / "in.csv", _ROW_A, _ROW_B)
-    before_text = path.read_text()
-    before, after = apply_hot_filter(path, top_k=10)
-    assert (before, after) == (2, 2)
-    assert path.read_text() == before_text
+def test_merge_defaults_missing_hits_column_to_one(tmp_path: Path) -> None:
+    # A CSV captured before the hits column was added must still merge
+    # cleanly; each row counts for 1. Two legacy-format files with the
+    # same shape produce a merged hit count of 2.
+    legacy_row = "1024,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
+    f1 = _write(tmp_path / "f1.csv", legacy_row, header=_LEGACY_HEADER)
+    f2 = _write(tmp_path / "f2.csv", legacy_row, header=_LEGACY_HEADER)
+    dest = tmp_path / "out.csv"
+    rows_total, rows_in = merge_shape_files([f1, f2], dest)
+    assert (rows_total, rows_in) == (1, 1)
+    lines = dest.read_text().splitlines()
+    assert lines[1] == _aiter_row(1024)
 
 
-def test_hot_filter_sorts_by_m_ascending_then_truncates(tmp_path: Path) -> None:
-    # _ROW_A = M 1024, _ROW_B = M 2048, _ROW_C = M 4096. Hot-filter to
-    # 2 must keep A and B (the two smallest M's) and drop C.
-    path = _write(tmp_path / "in.csv", _ROW_C, _ROW_A, _ROW_B)
-    before, after = apply_hot_filter(path, top_k=2)
-    assert (before, after) == (3, 2)
-    lines = path.read_text().splitlines()
-    assert lines[0] == _HEADER
-    # Order matters: smallest M first so the operator can confirm
-    # which shapes the heuristic kept.
-    assert lines[1] == _ROW_A
-    assert lines[2] == _ROW_B
+def test_merge_top_k_keeps_hottest_by_hits(tmp_path: Path) -> None:
+    # Three shapes with distinct hit counts. top_k=2 must keep the two
+    # with the highest counts, regardless of their M values.
+    hot = _row(m=2048, hits=100)
+    warm = _row(m=1024, hits=50)
+    cold = _row(m=4096, hits=1)
+    f = _write(tmp_path / "in.csv", cold, hot, warm)
+    dest = tmp_path / "out.csv"
+    rows_total, rows_in = merge_shape_files([f], dest, top_k=2)
+    assert (rows_total, rows_in) == (3, 2)
+    lines = dest.read_text().splitlines()
+    assert lines[0] == _LEGACY_HEADER
+    # Order: highest hits first, so the operator can read the file
+    # top-down to see which shapes the ranking surfaced.
+    assert lines[1] == _aiter_row(2048)
+    assert lines[2] == _aiter_row(1024)
 
 
-def test_hot_filter_secondary_sort_by_n_then_k(tmp_path: Path) -> None:
-    # Same M; secondary sort orders by (N, K) for deterministic output.
-    same_m_small_n = "256,4096,256,False,torch.bfloat16,torch.bfloat16,False,False"
-    same_m_big_n = "256,8192,256,False,torch.bfloat16,torch.bfloat16,False,False"
-    same_m_small_k = "256,4096,128,False,torch.bfloat16,torch.bfloat16,False,False"
-    path = _write(tmp_path / "in.csv", same_m_big_n, same_m_small_n, same_m_small_k)
-    before, after = apply_hot_filter(path, top_k=2)
-    assert (before, after) == (3, 2)
-    lines = path.read_text().splitlines()
-    # (256, 4096, 128) < (256, 4096, 256) < (256, 8192, 256)
-    assert lines[1] == same_m_small_k
-    assert lines[2] == same_m_small_n
+def test_merge_top_k_above_unique_count_is_noop(tmp_path: Path) -> None:
+    f = _write(tmp_path / "in.csv", _ROW_A, _ROW_B)
+    dest = tmp_path / "out.csv"
+    rows_total, rows_in = merge_shape_files([f], dest, top_k=10)
+    # No truncation when the cap exceeds the unique-shape count.
+    assert (rows_total, rows_in) == (2, 2)
 
 
-def test_hot_filter_handles_empty_file(tmp_path: Path) -> None:
-    # Edge: file has only the header. Function must not blow up on
-    # next(reader) -> StopIteration when iterating rows.
-    path = tmp_path / "in.csv"
-    path.write_text("")
-    before, after = apply_hot_filter(path, top_k=5)
-    assert (before, after) == (0, 0)
-
-
-def test_hot_filter_leaves_unknown_schema_alone(tmp_path: Path) -> None:
-    # Defensive: a file without the M column shouldn't get sorted to
-    # arbitrary garbage. The function returns the row count unchanged
-    # and doesn't rewrite.
-    path = tmp_path / "in.csv"
-    path.write_text("foo,bar\n1,2\n3,4\n5,6\n")
-    before_text = path.read_text()
-    before, after = apply_hot_filter(path, top_k=1)
-    assert (before, after) == (3, 3)
-    assert path.read_text() == before_text
-
-
-def test_hot_filter_writes_atomically_via_tmp(tmp_path: Path) -> None:
-    # Atomic rewrite: no leftover .tmp file after a successful pass.
-    # If a crash interrupts the write, the original survives intact.
-    path = _write(tmp_path / "in.csv", _ROW_C, _ROW_A, _ROW_B)
-    apply_hot_filter(path, top_k=1)
-    siblings = sorted(p.name for p in tmp_path.iterdir())
-    assert siblings == ["in.csv"]
-
-
-# ---------- canonicalize_shape_files ----------
-
-
-def test_canonicalize_skips_already_clean_files(tmp_path: Path) -> None:
-    # Idempotent: an already-canonical file is not rewritten. This
-    # matters because tune_target runs canonicalize_shape_files on
-    # every invocation; we don't want needless disk churn or atime
-    # noise on already-clean PVs.
-    f = _write(tmp_path / "clean.csv", _ROW_A)
-    mtime_before = f.stat().st_mtime_ns
-    rewritten = canonicalize_shape_files([f])
-    assert rewritten == 0
-    assert f.stat().st_mtime_ns == mtime_before
-
-
-def test_canonicalize_collapses_duplicate_rows(tmp_path: Path) -> None:
-    # Identical rows are pure waste; canonicalize collapses them so
-    # the on-disk file shrinks toward its minimal representation.
-    f = _write(tmp_path / "dup.csv", _ROW_A, _ROW_A)
-    canonicalize_shape_files([f])
-    lines = f.read_text().splitlines()
-    assert len(lines) == 2  # header + 1 data row
-
-
-def test_canonicalize_pads_raw_m_and_dedups(tmp_path: Path) -> None:
-    # Raw M values from pre-bucketing capture (e.g. m=257) round up
-    # to AITER's tuning-grid bucket. Two raw rows captured at different
-    # real M values may collapse onto the same bucket; canonicalize
-    # dedups so the resulting file has one row per (padded_m, ...) tuple.
-    raw_257 = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
-    raw_258 = "258,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
-    f = _write(tmp_path / "raw.csv", raw_257, raw_258)
-    rewritten = canonicalize_shape_files([f])
-    assert rewritten == 1
-    lines = f.read_text().splitlines()
-    # Both raw values pad to 288 (M<=1024 -> multiple of 32; 257 and
-    # 258 both round up to 288). Verify dedup + canonical M value.
-    assert lines[0] == _HEADER
-    assert len(lines) == 2  # header + one canonical row
-    assert lines[1].startswith("288,")
-
-
-def test_canonicalize_uses_atomic_write(tmp_path: Path) -> None:
-    # Tmp file is renamed over the original. After a successful
-    # canonicalize call, no stray ``.tmp`` should remain in the dir.
-    raw_row = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
-    f = _write(tmp_path / "raw.csv", raw_row)
-    canonicalize_shape_files([f])
-    leftovers = list(tmp_path.glob("*.tmp"))
+def test_merge_writes_atomically_via_tmp(tmp_path: Path) -> None:
+    # The merged file is rewritten on every tune run; a crash midway
+    # through should leave the previous file intact rather than
+    # corrupt it. No .tmp survivors after a successful write.
+    f = _write(tmp_path / "in.csv", _ROW_A)
+    dest = tmp_path / "merged" / "out.csv"
+    merge_shape_files([f], dest)
+    leftovers = list(dest.parent.glob("*.tmp"))
     assert leftovers == []
 
 
-def test_canonicalize_handles_empty_file(tmp_path: Path) -> None:
-    # Truncated / empty CSV (e.g. a partial capture write that lost
-    # the header) must not raise. We just skip it.
-    empty = tmp_path / "empty.csv"
-    empty.write_text("")
-    assert canonicalize_shape_files([empty]) == 0
-
-
-def test_tune_target_canonicalizes_before_merge(tmp_path: Path) -> None:
-    # End-to-end: a pre-bucketing shape file under shapes/<bucket>/
-    # <model>/<para>/ gets padded in place by tune_target before the
-    # merge produces the untuned input. The source file on disk should
-    # be canonical after tune_target returns, and the merged untuned
-    # file should also reflect the padded M.
-    raw = "257,7168,512,False,torch.bfloat16,torch.bfloat16,False,False"
-    source = tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv"
-    _write(source, raw)
-
-    runner, _calls = _spy_runner()
-    result = tune_target(
-        "bf16_tuned_gemm",
-        shim_home=tmp_path,
-        bucket="gfx942-304cu",
-        aiter_root=Path("/aiter"),
-        python=Path("py"),
-        retune=False,
-        dry_run=False,
-        run=runner,
-    )
-    assert result.returncode == 0
-    # Source file got padded onto the grid.
-    assert "257," not in source.read_text()
-    assert "288," in source.read_text()
-    # Untuned file (the tuner input) reflects the canonical M.
-    assert "288," in result.untuned_file.read_text()
+def test_merge_strips_hits_column_from_output(tmp_path: Path) -> None:
+    # AITER's tuners read the merged file via pd.read_csv +
+    # drop_duplicates over all columns. Carrying our ``hits`` column
+    # into that pipeline risks unintended behaviour, so the output
+    # schema is always the AITER-native one regardless of input shape.
+    f = _write(tmp_path / "in.csv", _row(m=1024, hits=42))
+    dest = tmp_path / "out.csv"
+    merge_shape_files([f], dest)
+    lines = dest.read_text().splitlines()
+    assert lines[0] == _LEGACY_HEADER
+    assert "hits" not in lines[0]
+    assert "42" not in lines[1]
 
 
 # ---------- build_command ----------
@@ -498,15 +443,19 @@ def test_tune_target_runner_failure_surfaces_returncode(tmp_path: Path) -> None:
     assert result.returncode == 7
 
 
-def test_tune_target_hot_filter_truncates_merged_input(tmp_path: Path) -> None:
-    # Three shapes captured, hot=2: tuner sees only the two smallest M
-    # shapes. ``rows_total`` preserves the pre-truncation count so the
-    # operator-facing summary can report "2 of 3 shapes (hot)".
+def test_tune_target_hot_filter_truncates_by_hits(tmp_path: Path) -> None:
+    # Three shapes captured with distinct hit counts. hot=2 picks the
+    # two with the most hits; the third drops out. ``rows_total``
+    # preserves the pre-truncation count so the operator-facing
+    # summary can report "2 of 3 shapes (hot)".
+    cold = _row(m=4096, hits=1)
+    warm = _row(m=1024, hits=50)
+    hot = _row(m=2048, hits=100)
     _write(
         tmp_path / "aiter" / "shapes" / "gfx942-304cu" / "m" / "tp1" / "bf16_tuned_gemm.csv",
-        _ROW_C,
-        _ROW_A,
-        _ROW_B,
+        cold,
+        warm,
+        hot,
     )
     runner, calls = _spy_runner()
     result = tune_target(
@@ -523,9 +472,10 @@ def test_tune_target_hot_filter_truncates_merged_input(tmp_path: Path) -> None:
     assert result.rows_in == 2
     assert result.rows_total == 3
     assert len(calls) == 1
-    # Verify on disk that AITER will read exactly the two smallest M's.
+    # On disk the survivors are the two highest-hit shapes, ranked
+    # hottest-first. ``hits`` column is stripped from the AITER input.
     rows = result.untuned_file.read_text().splitlines()
-    assert rows[1:] == [_ROW_A, _ROW_B]
+    assert rows[1:] == [_aiter_row(2048), _aiter_row(1024)]
 
 
 def test_tune_target_hot_filter_noop_when_under_top_k(tmp_path: Path) -> None:
@@ -624,12 +574,8 @@ def test_main_list_prints_per_target_state(
         _ROW_A,
     )
     (tmp_path / "aiter" / "configs" / "gfx942-304cu").mkdir(parents=True)
-    (tmp_path / "aiter" / "configs" / "gfx942-304cu" / "a8w8_tuned_gemm.csv").write_text(
-        "header\n"
-    )
-    rc = main(
-        ["--shim-home", str(tmp_path), "--bucket", "gfx942-304cu", "--list"]
-    )
+    (tmp_path / "aiter" / "configs" / "gfx942-304cu" / "a8w8_tuned_gemm.csv").write_text("header\n")
+    rc = main(["--shim-home", str(tmp_path), "--bucket", "gfx942-304cu", "--list"])
     out = capsys.readouterr().out
     assert rc == 0
     # Captured but not tuned:

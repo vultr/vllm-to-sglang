@@ -1,4 +1,4 @@
-"""Persist captured AITER shapes to CSV with dedup.
+"""Persist captured AITER shapes to CSV with per-shape hit counts.
 
 One CSV per AITER target (the basename AITER itself looks up, e.g.
 ``bf16_tuned_gemm.csv``). The directory the store writes into is
@@ -6,30 +6,46 @@ supplied by the caller; it encodes hardware bucket + model +
 parallelism in its path so files can't cross-pollinate between
 incompatible setups.
 
-Column order and naming match AITER's own ``save_shapes`` writer in
-``repos/aiter/aiter/tuned_gemm.py`` so the captured CSV is a drop-in
-``--untune_file`` for the per-target tune scripts (``M, N, K, bias,
-dtype, outdtype, scaleAB, bpreshuffle``). The shape-key columns the
-tuner actually cares about are ``M, N, K`` (and ``B`` for batched
-variants we don't currently produce); the rest are descriptive and
-identify the kernel family.
+Column order is ``M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle,
+hits``. The first eight columns mirror AITER's own ``save_shapes``
+writer in ``repos/aiter/aiter/tuned_gemm.py`` so the downstream
+``vllm-shim-tune`` step can read these files by column name and produce
+a strict-schema AITER tuner input. The trailing ``hits`` column counts
+how many times AITER logged a miss for the shape; it drives the
+hot-shape ranking that ``tune.merge_shape_files`` applies via ``--hot``.
 
-Dedup is double-bucketed: an in-memory set per target prevents repeat
-writes during this process, and on first write to a target the existing
-CSV (if any) is loaded into that set so restarts converge on a deduped
-file. Concurrent writers on a shared persistent volume could in theory
-produce duplicate rows; we accept that and document it.
+Persistence model:
+
+- First sight of a key: increment to 1 and flush the per-target CSV
+  immediately, so a crash before the next flush still records the
+  shape's existence.
+- Repeat sight: increment in memory; flush only when
+  ``flush_interval_seconds`` has elapsed since the last write. A hot
+  shape that fires thousands of times per second during decode would
+  otherwise rewrite the CSV every line; this throttles to roughly one
+  rewrite per target per window.
+
+Hit counts read from disk default to 1 when the column is missing or
+malformed, so existing CSVs written before the column was introduced
+read back as "seen at least once" and round-trip into the new schema
+on the next flush.
+
+Concurrent writers on a shared persistent volume could in theory
+double-count or lose increments; we accept that and document it.
 """
 
 import csv
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from vllm_shim.aiter.log_parser import AiterShape
 
-# Column order is the contract with the AITER tuner. ``outdtype`` (not
+# Column order is the contract with downstream consumers (tune's merge
+# step and the AITER tuner it shells out to). ``outdtype`` (not
 # ``otype``) is intentional - that's what AITER's CSV schema uses, even
 # though the runtime log line spells the same value as ``otype=``.
+# ``hits`` is the shim-side addition that ranks shapes for ``--hot``.
 _HEADER: tuple[str, ...] = (
     "M",
     "N",
@@ -39,7 +55,17 @@ _HEADER: tuple[str, ...] = (
     "outdtype",
     "scaleAB",
     "bpreshuffle",
+    "hits",
 )
+
+# Columns that identify a unique shape. ``hits`` is value, not identity.
+SHAPE_COLUMNS: tuple[str, ...] = _HEADER[:-1]
+HITS_COLUMN: str = "hits"
+
+# Default flush cadence. Picked to bound recent-count loss on crash
+# without burning I/O on every increment when a hot shape fires
+# thousands of times per second.
+DEFAULT_FLUSH_INTERVAL_SECONDS: float = 30.0
 
 _ShapeKey = tuple[int, int, int, bool, str, str, bool, bool]
 
@@ -91,27 +117,47 @@ def _key(shape: AiterShape) -> _ShapeKey:
     )
 
 
-def _row(shape: AiterShape) -> list[str]:
+def _row_from_key(key: _ShapeKey, hits: int) -> list[str]:
+    m, n, k, bias, dtype, outdtype, scale_ab, bpreshuffle = key
     return [
-        str(padded_m_gl0(shape.m)),
-        str(shape.n),
-        str(shape.k),
-        str(shape.bias),
-        shape.dtype,
-        shape.outdtype,
-        str(shape.scale_ab),
-        str(shape.bpreshuffle),
+        str(m),
+        str(n),
+        str(k),
+        str(bias),
+        dtype,
+        outdtype,
+        str(scale_ab),
+        str(bpreshuffle),
+        str(hits),
     ]
 
 
-def _row_to_key(row: dict[str, str]) -> _ShapeKey:
-    # ``padded_m_gl0`` here makes the in-memory dedup set consistent
-    # with the bucketing rule even when the on-disk CSV still carries
-    # raw M values from a pre-bucketing capture run. New writes go
-    # through ``_key``/``_row`` which also pad, so disk converges to
-    # canonical as new shapes accumulate; the formal cleanup of any
-    # remaining raw M rows happens in ``tune.canonicalize_shape_files``.
-    return (
+def parse_hits(value: str | None) -> int:
+    """Read a ``hits`` cell with the shim's default-to-1 semantics.
+
+    Missing, empty, non-integer, or non-positive values all map to 1.
+    Rationale: a row exists in the CSV iff the shape was seen at least
+    once, so 1 is the most conservative non-noisy default and matches
+    the value a fresh first-sight write would produce.
+    """
+    if value is None or value == "":
+        return 1
+    try:
+        n = int(value)
+    except ValueError:
+        return 1
+    return max(1, n)
+
+
+def _row_to_state(row: dict[str, str]) -> tuple[_ShapeKey, int]:
+    """Decode a persisted CSV row into ``(key, hits)``.
+
+    ``padded_m_gl0`` is applied so that any pre-bucketing raw M still
+    on disk converges to the canonical bucket on read. Two raw rows
+    that collapse onto the same padded bucket sum their hits in the
+    caller.
+    """
+    key: _ShapeKey = (
         padded_m_gl0(int(row["M"])),
         int(row["N"]),
         int(row["K"]),
@@ -121,56 +167,94 @@ def _row_to_key(row: dict[str, str]) -> _ShapeKey:
         row["scaleAB"] == "True",
         row["bpreshuffle"] == "True",
     )
+    return key, parse_hits(row.get(HITS_COLUMN))
 
 
 @dataclass(slots=True)
 class ShapeStore:
-    """Writer that appends a deduped CSV row per AITER shape."""
+    """Append-or-increment writer for one capture directory.
+
+    ``root`` is the per-(bucket, model, parallelism) directory; one
+    CSV per AITER target lands inside it. ``flush_interval_seconds``
+    throttles the increment-driven rewrites; first-sight writes
+    bypass the throttle so a new shape is persisted immediately.
+    """
 
     root: Path
-    _seen: dict[str, set[_ShapeKey]] = None  # type: ignore[assignment]
+    flush_interval_seconds: float = DEFAULT_FLUSH_INTERVAL_SECONDS
+    _state: dict[str, dict[_ShapeKey, int]] = None  # type: ignore[assignment]
+    _dirty: set[str] = None  # type: ignore[assignment]
+    _last_flush: dict[str, float] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        self._seen = {}
+        self._state = {}
+        self._dirty = set()
+        self._last_flush = {}
 
     def add(self, shape: AiterShape) -> bool:
-        """Append ``shape`` to its target CSV if unseen.
+        """Increment the hit count for ``shape``.
 
-        Returns True when a new row was written, False when the shape
-        was already on file (in memory or on disk).
+        Returns True when this was the first time the shape was seen
+        (in memory or on disk), False on repeat. First-sight writes
+        flush immediately; repeat sights flush only when the throttle
+        window has elapsed.
         """
         path = self.root / f"{shape.target}.csv"
-        seen = self._seen_for(path, shape.target)
+        counts = self._load_target(path, shape.target)
         key = _key(shape)
-        if key in seen:
-            return False
-        seen.add(key)
-        self._append(path, shape)
-        return True
+        first_sight = key not in counts
+        counts[key] = counts.get(key, 0) + 1
+        self._dirty.add(shape.target)
+        if first_sight or self._should_flush(shape.target):
+            self._flush(path, shape.target)
+        return first_sight
 
-    def _seen_for(self, path: Path, target: str) -> set[_ShapeKey]:
-        cached = self._seen.get(target)
+    def flush(self) -> None:
+        """Force-flush every target with pending increments.
+
+        Useful for tests and for any future caller that wants to drain
+        pending counts on a clean shutdown signal.
+        """
+        for target in list(self._dirty):
+            path = self.root / f"{target}.csv"
+            self._flush(path, target)
+
+    def _load_target(self, path: Path, target: str) -> dict[_ShapeKey, int]:
+        cached = self._state.get(target)
         if cached is not None:
             return cached
-        existing: set[_ShapeKey] = set()
+        counts: dict[_ShapeKey, int] = {}
         if path.exists():
             with path.open(newline="") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     try:
-                        existing.add(_row_to_key(row))
+                        key, hits = _row_to_state(row)
                     except (KeyError, ValueError):
                         # Corrupt row in an existing file shouldn't
-                        # stop dedup from working for the rest.
+                        # stop dedup from working for the rest. The
+                        # next flush drops these rows entirely; we
+                        # don't preserve unparseable bytes.
                         continue
-        self._seen[target] = existing
-        return existing
+                    counts[key] = counts.get(key, 0) + hits
+        self._state[target] = counts
+        return counts
 
-    def _append(self, path: Path, shape: AiterShape) -> None:
+    def _should_flush(self, target: str) -> bool:
+        last = self._last_flush.get(target, 0.0)
+        return time.monotonic() - last >= self.flush_interval_seconds
+
+    def _flush(self, path: Path, target: str) -> None:
+        counts = self._state.get(target)
+        if counts is None:
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists()
-        with path.open("a", newline="") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", newline="") as f:
             writer = csv.writer(f)
-            if write_header:
-                writer.writerow(_HEADER)
-            writer.writerow(_row(shape))
+            writer.writerow(_HEADER)
+            for key, hits in counts.items():
+                writer.writerow(_row_from_key(key, hits))
+        tmp.replace(path)
+        self._dirty.discard(target)
+        self._last_flush[target] = time.monotonic()

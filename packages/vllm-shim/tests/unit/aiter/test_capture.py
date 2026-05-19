@@ -44,9 +44,7 @@ def test_plan_disabled_when_shim_home_unresolvable() -> None:
     # ``shim_home=None`` is what ``resolve_shim_home`` returns only when
     # even ``Path.home()`` failed - rare, but the plan must still produce
     # a clean disabled state with a stable reason.
-    plan = plan_capture(
-        shim_home=None, gpu=_GPU, model="gpt2", parallelism=Parallelism()
-    )
+    plan = plan_capture(shim_home=None, gpu=_GPU, model="gpt2", parallelism=Parallelism())
     assert plan.enabled is False
     assert plan.root is None
     assert plan.reason == REASON_NO_SHIM_HOME
@@ -70,9 +68,7 @@ def test_plan_no_gpu_takes_priority_over_no_shim_home() -> None:
     # When both are missing, the GPU check is the more fundamental
     # prerequisite (AITER capture is meaningless without ROCm); pick a
     # stable reason order so the launch-info dump is predictable.
-    plan = plan_capture(
-        shim_home=None, gpu=None, model="gpt2", parallelism=Parallelism()
-    )
+    plan = plan_capture(shim_home=None, gpu=None, model="gpt2", parallelism=Parallelism())
     assert plan.reason == REASON_NO_GPU
 
 
@@ -137,8 +133,10 @@ def test_callback_ignores_non_aiter_lines(tmp_path: Path) -> None:
 
 
 def test_callback_dedups_repeated_lines(tmp_path: Path) -> None:
-    # AITER emits the same shape miss every time the kernel is hit;
-    # the store's dedup must keep the CSV from growing unbounded.
+    # AITER emits the same shape miss every time the kernel is hit.
+    # The store counts hits in memory and keeps the on-disk CSV at one
+    # row per unique shape, so the file can't grow unbounded under a
+    # hot-loop of repeat misses.
     store = ShapeStore(tmp_path)
     cb = build_callback(store)
     for _ in range(5):

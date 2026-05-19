@@ -236,22 +236,17 @@ The tuner consolidates inputs per (bucket, target): every captured `shapes/<buck
 
 ### Hot-shape filtering
 
-`--hot N` truncates the merged untuned CSV to the N shapes most likely to dominate runtime call count, before handing it to AITER's tuner. The summary line in the tuner's stderr output reports how many shapes were kept vs. dropped:
+`--hot N` truncates the merged untuned CSV to the N shapes with the highest measured call frequency before handing it to AITER's tuner. The summary line in the tuner's stderr output reports how many shapes were kept vs. dropped:
 
 ```
   bf16_tuned_gemm: 100 of 247 shapes (hot) -> /data/.../bf16_tuned_gemm.csv [ok]
 ```
 
-**Heuristic, not measured frequency.** "Hot" is currently defined as smallest `(M, N, K)` first. In autoregressive LLM serving the decode phase runs at `M = active_batch` (small, typically 1-256) and invokes every layer's GEMMs once per token, while prefill shapes are large M but run once per request. Call count therefore skews orders of magnitude toward small-M shapes, so the M-ascending sort puts decode at the front of the queue and truncating preserves the long tail that actually moves serving latency.
+**How "hot" is measured.** Every capture CSV under `shapes/<bucket>/<model>/<parallelism>/<target>.csv` carries a trailing `hits` column. ShapeStore increments it once per AITER miss line (one increment per call to that shape's GEMM). `merge_shape_files` sums hits per unique shape across the per-(model, parallelism) source files, sorts descending, and keeps the top N. The merged file handed to AITER's tuner has the `hits` column stripped so the tuner sees its canonical input schema.
 
-When `--hot` is a poor fit:
-
-- Long-context single-shot prefill workloads (large M, few decode steps) shouldn't use `--hot`, or should set N wide enough to cover the prefill shapes.
-- Static-batch workloads where all captured shapes share the same M see arbitrary truncation; either skip `--hot` or set N to the total shape count.
+`hits` columns missing from older capture data default to 1 on read, so a shim-version mismatch never silently zero-weights existing shapes; the column round-trips into the new schema on the next flush.
 
 **Composes with `--retune`.** Default incremental mode (no `--retune`) makes AITER diff the input against the existing tuned CSV and only tune new rows, so growing `--hot` across runs (e.g. 100 today, 500 next week, full set later) converges on full coverage without redoing earlier work.
-
-**Future work.** The heuristic is a stand-in for measured frequency. Adding a count column to the capture path is a follow-up; the `--hot` knob will keep its current name and semantics so operator workflows don't have to change.
 
 ### Tuning at pod startup
 

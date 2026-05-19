@@ -35,8 +35,10 @@ def test_first_add_creates_csv_with_header(tmp_path: Path) -> None:
     csv_path = tmp_path / "bf16_tuned_gemm.csv"
     assert csv_path.exists()
     rows = _read_rows(csv_path)
-    # Column order and naming match AITER's own ``save_shapes`` writer
-    # so this CSV is a drop-in ``--untune_file`` for the tuner.
+    # First eight columns mirror AITER's own ``save_shapes`` writer.
+    # The trailing ``hits`` column is the shim-side addition that ranks
+    # shapes for ``vllm-shim-tune --hot``; tune strips it before
+    # handing the merged file to AITER.
     assert rows == [
         {
             "M": "1024",
@@ -47,6 +49,7 @@ def test_first_add_creates_csv_with_header(tmp_path: Path) -> None:
             "outdtype": "torch.bfloat16",
             "scaleAB": "False",
             "bpreshuffle": "False",
+            "hits": "1",
         }
     ]
 
@@ -132,9 +135,9 @@ def test_header_written_only_once(tmp_path: Path) -> None:
         # M <= 256: ceil to multiple of 16
         (1, 16),
         (15, 16),
-        (16, 16),       # already on grid
+        (16, 16),  # already on grid
         (17, 32),
-        (256, 256),     # boundary, stays on grid
+        (256, 256),  # boundary, stays on grid
         # 256 < M <= 1024: ceil to multiple of 32
         (257, 288),
         (1024, 1024),
@@ -157,8 +160,8 @@ def test_padded_m_gl0_grids(raw: int, expected: int) -> None:
 
 def test_padded_m_gl0_handles_nonpositive() -> None:
     # AITER never logs M<=0 in practice, but the helper must not
-    # blow up if a corrupt CSV row feeds in a stray value: the
-    # canonicalize pass calls this on every existing row.
+    # blow up if a corrupt CSV row feeds in a stray value: it is
+    # called on every existing row at load time.
     assert padded_m_gl0(0) == 0
     assert padded_m_gl0(-5) == -5
 
@@ -214,3 +217,104 @@ def test_corrupt_existing_row_does_not_block_writes(tmp_path: Path) -> None:
     assert store.add(_shape()) is False
     # And a fresh shape should still write.
     assert store.add(_shape(m=4096)) is True
+
+
+# ---------- hits column ----------
+
+
+def test_repeat_add_increments_hits(tmp_path: Path) -> None:
+    # Repeat sightings of the same shape accumulate into the hits
+    # column instead of being thrown away by a dedup set. flush_interval=0
+    # forces a flush on every increment so the disk state reflects the
+    # in-memory counter without needing time to pass.
+    store = ShapeStore(tmp_path, flush_interval_seconds=0)
+    for _ in range(5):
+        store.add(_shape())
+    rows = _read_rows(tmp_path / "bf16_tuned_gemm.csv")
+    assert len(rows) == 1
+    assert rows[0]["hits"] == "5"
+
+
+def test_first_sight_writes_hits_one(tmp_path: Path) -> None:
+    # First-sight write should always include the hits column with the
+    # initial count, regardless of flush throttling.
+    store = ShapeStore(tmp_path)
+    store.add(_shape())
+    rows = _read_rows(tmp_path / "bf16_tuned_gemm.csv")
+    assert rows[0]["hits"] == "1"
+
+
+def test_legacy_csv_without_hits_defaults_to_one(tmp_path: Path) -> None:
+    # An on-disk capture written before the hits column was introduced
+    # should read back as hits=1 (it was seen at least once or it
+    # wouldn't be in the file). After a triggering write, the file is
+    # rewritten with the new schema and the legacy row carries hits=1.
+    path = tmp_path / "bf16_tuned_gemm.csv"
+    path.write_text(
+        "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle\n"
+        "1024,7168,512,False,torch.bfloat16,torch.bfloat16,False,False\n"
+    )
+    store = ShapeStore(tmp_path, flush_interval_seconds=0)
+    # Touch a NEW shape so the file gets rewritten via first-sight flush.
+    store.add(_shape(m=2048))
+    rows = _read_rows(path)
+    # Both rows present, both with hits>=1 (legacy default).
+    by_m = {r["M"]: r["hits"] for r in rows}
+    assert by_m == {"1024": "1", "2048": "1"}
+
+
+def test_legacy_csv_increment_sums_default_and_new(tmp_path: Path) -> None:
+    # When a legacy row (no hits) is hit again, its on-disk count
+    # should reflect default(1) + new(1) = 2. This is the practical
+    # path on the first capture after a shim upgrade.
+    path = tmp_path / "bf16_tuned_gemm.csv"
+    path.write_text(
+        "M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle\n"
+        "1024,7168,512,False,torch.bfloat16,torch.bfloat16,False,False\n"
+    )
+    store = ShapeStore(tmp_path, flush_interval_seconds=0)
+    store.add(_shape())  # same shape as the legacy row
+    rows = _read_rows(path)
+    assert rows[0]["hits"] == "2"
+
+
+def test_repeat_increment_is_throttled_by_flush_interval(tmp_path: Path) -> None:
+    # A hot shape that fires thousands of times per second must not
+    # rewrite the CSV every line. Default interval is set high enough
+    # that repeat writes are deferred until flush() is called.
+    store = ShapeStore(tmp_path, flush_interval_seconds=3600)
+    store.add(_shape())  # first sight flushes regardless
+    initial_mtime = (tmp_path / "bf16_tuned_gemm.csv").stat().st_mtime_ns
+    for _ in range(10):
+        store.add(_shape())
+    # File is still the first-sight version; repeat increments stayed
+    # in memory because the throttle window hasn't elapsed.
+    after_repeats = (tmp_path / "bf16_tuned_gemm.csv").stat().st_mtime_ns
+    assert after_repeats == initial_mtime
+    rows = _read_rows(tmp_path / "bf16_tuned_gemm.csv")
+    assert rows[0]["hits"] == "1"  # disk count lags in-memory count
+    # Explicit flush drains the pending increments.
+    store.flush()
+    rows_after_flush = _read_rows(tmp_path / "bf16_tuned_gemm.csv")
+    assert rows_after_flush[0]["hits"] == "11"
+
+
+def test_flush_is_idempotent_when_nothing_dirty(tmp_path: Path) -> None:
+    store = ShapeStore(tmp_path, flush_interval_seconds=0)
+    store.add(_shape())
+    mtime_before = (tmp_path / "bf16_tuned_gemm.csv").stat().st_mtime_ns
+    # Nothing has happened since the implicit first-sight flush; an
+    # explicit flush() should be a no-op (no dirty targets).
+    store.flush()
+    mtime_after = (tmp_path / "bf16_tuned_gemm.csv").stat().st_mtime_ns
+    assert mtime_before == mtime_after
+
+
+def test_flush_uses_atomic_rename(tmp_path: Path) -> None:
+    # Atomic-rewrite via .tmp + replace; a crash mid-flush must leave
+    # the previous CSV intact rather than a half-written file.
+    store = ShapeStore(tmp_path, flush_interval_seconds=0)
+    store.add(_shape())
+    store.add(_shape())
+    leftovers = list(tmp_path.glob("*.tmp"))
+    assert leftovers == []
