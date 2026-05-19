@@ -70,9 +70,10 @@ def strip_dtype_quotes(value: str) -> str:
     as a malformed dtype/device. We strip one matched pair only; values
     without quotes pass through unchanged.
 
-    Shared with the CSV-read paths in ``shape_store`` and ``tune`` so
-    that pre-fix capture data on operator volumes is auto-canonicalized
-    on read instead of forcing operators to scrub the PV by hand.
+    Called from ``parse_line`` so the canonical (unquoted) form is
+    what lands in the capture CSV. Downstream readers in
+    ``shape_store`` and ``tune`` can therefore trust the on-disk
+    dtype/outdtype values as-is.
     """
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         return value[1:-1]

@@ -74,12 +74,14 @@ vLLM accepts both `--gpu-memory-utilization` and `--gpu_memory_utilization`. Bot
 
 ### Unknown-flag heuristic
 
-When a flag isn't in `ARG_MAP`, the translator looks at the next token:
+When a `--`-prefixed flag isn't in `ARG_MAP`, the translator looks at the next token:
 
 - If it's another flag (starts with `-`), the unknown flag is treated as a boolean and emitted alone.
 - If it's a value-shaped token, both are emitted as a flag/value pair.
 
 This means `--foo bar` and `--foo --bar` are both handled correctly without an explicit registration.
+
+The lookahead applies only to long-form (`--`-prefixed) unknown flags. A bare-minus unknown like `-x foo` is emitted alone and the next token is processed independently, on the reasoning that short-form flags without an explicit map entry are usually typos rather than backend-only shorthands. All recognised short aliases (`-tp`, `-pp`, `-q`, etc.) have explicit map entries; see "Short aliases" below.
 
 ### Dropped vs. ignored
 
@@ -99,7 +101,7 @@ A handful of vLLM inputs need handling that the (flag, value) shape of `ARG_MAP`
 
 ### Short aliases
 
-vLLM accepts `-tp`, `-pp`, `-dp`, `-q`, `-n`, `-r`, `-asc`, `-sc`, `-ac`, `-cc`, `-ep`, `-dcp`, `-pcp`, and the `-dpa…-dpr` family for various data-parallel knobs. Neither SGLang nor TRT-LLM defines any of these. The two ARG_MAPs include explicit entries for all of them: those whose long-form has an equivalent are renamed to the long form (`-tp` → `--tp` for SGLang, `--tp_size` for TRT-LLM); the rest are dropped (with their value, where applicable).
+vLLM accepts `-tp`, `-pp`, `-dp`, `-q`, `-n`, `-r`, `-asc`, `-sc`, `-ac`, `-cc`, `-ep`, `-dcp`, `-pcp`, and the `-dpa…-dpr` family for various data-parallel knobs. Neither SGLang nor TRT-LLM defines any of these. The two ARG_MAPs include explicit entries for all of them: those whose long-form has a backend equivalent are renamed to that long form (e.g. `-tp` → `--tp` for SGLang, `--tp_size` for TRT-LLM); the rest are dropped (with their value, where applicable). The canonical decision per alias lives in each backend's `ARG_MAP`; expect drops where the corresponding long-form is itself dropped (e.g. SGLang's `-ep` follows `--enable-expert-parallel`, which has no SGLang flag).
 
 ### Renames that look 1:1 but aren't
 
@@ -116,7 +118,7 @@ SGLang's `mem_fraction_static` is the **static-only fraction**: weights + KV cac
 
 Forwarding the same number (e.g. `0.8`) therefore under-budgets the dynamic pool relative to vLLM. Symptoms: SGLang loads weights cleanly, KV cache initialises, then OOMs *under load* once activations or CUDA-graph allocations grow into the now-tight `(1 - 0.8) = 20%` budget. High TP, long contexts, or large running batches make this worse because NCCL/flashinfer-fusion buffers and per-rank workspaces all draw from that same dynamic pool.
 
-If a manifest carries `--gpu-memory-utilization 0.9` because vLLM was happy at 0.9, the same value will likely OOM under SGLang. Drop the number a few points (the SGLang DeepSeek-V3 benchmark configs in `repos/sglang/benchmark/deepseek_v3/README.md` use 0.82-0.85 for TP=4/8 MoE workloads), or omit the flag entirely so SGLang's autotune (`server_args.py:1296-1314`) sets it from `chunked_prefill_size` and `cuda_graph_max_bs`.
+If a manifest carries `--gpu-memory-utilization 0.9` because vLLM was happy at 0.9, the same value will likely OOM under SGLang. Drop the number a few points (the SGLang DeepSeek-V3 benchmark configs in `repos/sglang/benchmark/deepseek_v3/README.md` use 0.82-0.85 for TP=4/8 MoE workloads), or omit the flag entirely so SGLang's `compute_gpu_dependent_settings` autotune sets it from `chunked_prefill_size` and `cuda_graph_max_bs`.
 
 The shim does **not** automatically transform the number: the right delta depends on `chunked_prefill_size`, `cuda_graph_max_bs`, TP size, and model, none of which the translator knows. The rename happens; the operator picks the value.
 

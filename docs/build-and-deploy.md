@@ -37,6 +37,20 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends haproxy && \
     rm -rf /var/lib/apt/lists/*
 
+# Apply local patches to the upstream checkout in /sgl-workspace.
+COPY patches/ /tmp/patches/
+COPY scripts/ /tmp/scripts/
+RUN bash /tmp/scripts/apply-patches.sh sglang cuda /sgl-workspace/sglang && \
+    rm -rf /tmp/patches /tmp/scripts
+
+# Fresh transformers from upstream main, past PyPI, so newer model
+# architectures land without waiting on a release cycle.
+RUN uv pip install --no-cache \
+        --python /usr/bin/python \
+        --python-preference only-system \
+        --break-system-packages \
+        --upgrade git+https://github.com/huggingface/transformers.git
+
 COPY pyproject.toml uv.lock /src/
 COPY packages /src/packages
 RUN uv pip install --no-cache \
@@ -48,19 +62,21 @@ RUN uv pip install --no-cache \
         distro
 ```
 
-Five things going on:
+Seven things going on:
 
 1. **`ARG BASE_IMAGE`**: pinned at the top so it's overridable per build (`--build-arg BASE_IMAGE=…`) but has a sane default. The default tracks the upstream backend image we're known to work against.
 2. **Multi-stage `COPY --from=ghcr.io/astral-sh/uv:…`**: copies `uv` and `uvx` from the official Astral image. Avoids a curl-and-install dance and keeps the version explicit.
 3. **`apt-get install haproxy`**: the only system package we add. The base image already has CUDA/ROCm + Python + the inference engine.
-4. **Source copy + targeted install.** `pyproject.toml`, `uv.lock`, and `packages/` go into `/src/`. The `--python /usr/bin/python` flag pins which interpreter receives the install (the SGLang/TRT-LLM CUDA images have other interpreters lying around; without this flag uv may pick the wrong one or download a managed Python). `--python-preference only-system` blocks the managed-Python fallback. `--break-system-packages` is needed because Ubuntu 24.04 marks the system site-packages as PEP 668 externally-managed; uv refuses without it.
-5. **`distro`** (SGLang CUDA only): a required `openai` runtime dependency that the upstream `lmsysorg/sglang:cu130-runtime` image bundles `openai` without. Without it, `import sglang.launch_server` fails. Added at the same install step.
+4. **`apply-patches.sh` against the in-image upstream checkout.** `patches/` and `scripts/` are COPYed into `/tmp` so the script can replay every `.patch` under `patches/<repo>/[<tier>/]` onto the base image's git checkout at `/sgl-workspace/<repo>`. The install in step 6 picks up the patched source because the base image installs the upstream package editably from that checkout. `/tmp/patches` and `/tmp/scripts` are deleted in the same layer so they don't bloat the final image. See `docs/patches.md` for the layout and the dev round-trip.
+5. **Bleeding-edge `transformers` upgrade.** Forces `transformers` from upstream main, past both the base image's pin and the latest PyPI release. New model architectures (recent Kimi/Qwen revisions, etc.) and their fixes land without waiting on a `transformers` release. Same `--python` / `--python-preference` / `--break-system-packages` triad as step 6.
+6. **Source copy + targeted install.** `pyproject.toml`, `uv.lock`, and `packages/` go into `/src/`. The `--python /usr/bin/python` flag pins which interpreter receives the install (the SGLang/TRT-LLM CUDA images have other interpreters lying around; without this flag uv may pick the wrong one or download a managed Python). `--python-preference only-system` blocks the managed-Python fallback. `--break-system-packages` is needed because Ubuntu 24.04 marks the system site-packages as PEP 668 externally-managed; uv refuses without it.
+7. **`distro`** (SGLang CUDA only): a required `openai` runtime dependency that the upstream `lmsysorg/sglang:cu130-runtime` image bundles `openai` without. Without it, `import sglang.launch_server` fails. Added at the same install step.
 
 ### Per-image divergence
 
 Convergence isn't a goal anymore: each base image has its own quirks the Dockerfile has to absorb.
 
-**`docker/trtllm/Dockerfile.cuda`** is the closest cousin to the canonical example: same install structure, no `distro` (the NVIDIA TRT-LLM image's `openai` install is complete), different `BASE_IMAGE` default (`nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14`).
+**`docker/trtllm/Dockerfile.cuda`** is the closest cousin to the canonical example: same install structure, same upstream-`transformers` upgrade, no `distro` (the NVIDIA TRT-LLM image's `openai` install is complete), no `apply-patches.sh` block (there are no TRT-LLM patches today; the COPY+RUN pair will be added when the first patch lands), different `BASE_IMAGE` default (`nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc14`).
 
 **`docker/sglang/Dockerfile.rocm`** diverges more substantially because the AMD/ROCm base image's Python is 3.10 and vllm-shim requires 3.12:
 
@@ -107,14 +123,16 @@ The pipeline is in `Jenkinsfile`. Three stages:
 ### Discover
 
 ```groovy
-def combos = findFiles(glob: 'docker/*/Dockerfile.*').collect { f ->
-    [backend: f.path.split('/')[1], platform: f.name - 'Dockerfile.']
-}
-if (params.BACKEND?.trim())  { combos = combos.findAll { it.backend == params.BACKEND.trim() } }
+def lines = sh(returnStdout: true, script: 'ls docker/*/Dockerfile.* 2>/dev/null || true').trim()
+def combos = lines ? lines.split('\n').collect { p ->
+    def parts = p.split('/')
+    [backend: parts[1], platform: parts[2] - 'Dockerfile.']
+} : []
+if (params.BACKEND?.trim())  { combos = combos.findAll { it.backend  == params.BACKEND.trim()  } }
 if (params.PLATFORM?.trim()) { combos = combos.findAll { it.platform == params.PLATFORM.trim() } }
 ```
 
-Walks `docker/*/Dockerfile.*`, parses the directory and suffix into `{backend, platform}` tuples. The `BACKEND` and `PLATFORM` job parameters narrow the matrix; both empty means "build everything found."
+A shell `ls` walks `docker/*/Dockerfile.*` from the workspace root, then Groovy splits each result into `{backend, platform}`. (`findFiles` would be the obvious Groovy-native call but it pulls in the Pipeline Utility Steps plugin; the `ls` form avoids that dependency.) The `BACKEND` and `PLATFORM` job parameters narrow the matrix; both empty means "build everything found."
 
 If the resulting set is empty, the pipeline errors out. This protects against silently building nothing when a typo leaves no matches.
 
@@ -129,7 +147,7 @@ def jobs = env.COMBOS.split(',').collectEntries { combo ->
                 --file ${dockerfile} \\
                 --tag ${imageRef} \\
                 --cache-from type=registry,ref=${cacheRef} \\
-                --cache-to   type=registry,ref=${cacheRef},mode=max \\
+                --cache-to   type=registry,ref=${cacheRef},mode=min,ignore-error=true \\
                 --push \\
                 .
         """
@@ -141,7 +159,7 @@ parallel jobs
 Each `(backend, platform)` becomes a parallel branch. Each branch:
 
 - Authenticates to the Vultr container registry using the `ATL_VCR_VLLM` Jenkins credential.
-- Runs `docker buildx build` with registry-backed cache (`mode=max` so the cache itself stores intermediate layers, not just the final manifest).
+- Runs `docker buildx build` with registry-backed cache. `mode=min` stores only the final image's layers (not intermediate stages) and `ignore-error=true` keeps the build green if the cache push itself fails (e.g. transient registry hiccup). This trades cache hit rate on edits to intermediate layers for lower registry-storage cost and noisy-cache-write resilience; if rebuilds start feeling slow because intermediate layers are missing from cache, `mode=max` is the knob to flip.
 - Tags the result `${TAG}-${BACKEND}-${PLATFORM}` and pushes.
 
 ### Tag scheme

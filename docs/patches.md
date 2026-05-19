@@ -30,20 +30,21 @@ clean.
 
 ```
 patches/
-├── aiter/                       # mono-platform repo, flat layout
-│   ├── 0001-perf-gradlib-…patch
-│   └── 0002-feat-triton-enable-AFP4WFP4-…patch
-└── sglang/                      # multi-platform repo, tiered layout
+├── <mono-platform-repo>/        # flat layout, e.g. AITER
+│   ├── 0001-<slug>.patch
+│   └── 0002-<slug>.patch
+└── <multi-platform-repo>/       # tiered layout, e.g. SGLang
     ├── base/                    # applies on every Dockerfile.<platform>
-    │   ├── 0001-feat-deepseek-…patch
-    │   └── 0002-fix-quark-exclude-…patch
+    │   ├── 0001-<slug>.patch
+    │   └── 0002-<slug>.patch
     ├── cuda/                    # only when building Dockerfile.cuda
-    │   └── .gitkeep             # (no platform-specific patches yet)
+    │   └── .gitkeep             # placeholder when the tier is empty
     └── rocm/                    # only when building Dockerfile.rocm
-        ├── 0001-feat-quark-mxfp4-triton-…patch
-        ├── 0002-feat-mori-…patch
-        └── 0003-fix-communicator-…patch
+        ├── 0001-<slug>.patch
+        └── 0002-<slug>.patch
 ```
+
+For the current concrete contents, look at `patches/` itself; this doc avoids naming specific patches because numbering shifts as patches land or get upstreamed.
 
 Rules:
 
@@ -344,21 +345,23 @@ change":
 - *Do the patches share a single motivation paragraph?* If yes, the
   message wants to be one body, and so should the diff.
 
-The aiter `0002-feat-triton-enable-AFP4WFP4-…` patch is the canonical
-example: shipping the gfx942 GEMM-AFP4WFP4 config is meaningless
-without also widening `is_fp4_avail()` to include gfx942 (the assert
-fires before the config is read), and widening the assert is
-meaningless without the config (the next line will crash on a missing
-file). They're two halves of one feature; one patch.
+A common shape of this: shipping a new arch-gated tuned config is
+meaningless without widening the runtime's "is this arch supported?"
+assert to include the new arch (the assert fires before the config is
+read), and widening the assert is meaningless without the config (the
+next line will crash on a missing file). Two halves of one feature;
+one patch.
 
-The cross-tier case is the MoRI EP support patch
-(`rocm/0002-feat-mori-…`), which carries both the `MoriEPMoE`
-registration in compressed-tensors (a pure-Python change that would
-trivially fit `base/`) and the gfx942 Triton dispatch (rocm-only).
-Splitting by tier would put two halves of "make MoRI work with Quark
-MXFP4" in different directories with different numbering; the
-classification rule above (effect AND code both cross-platform)
-keeps them together.
+The cross-tier case follows the same principle: when a feature has a
+pure-Python registration (which would trivially fit `base/`) AND a
+platform-specific kernel dispatch (which only exists on, say, ROCm),
+the two halves still belong in one patch on the platform tier rather
+than split across `base/` and `<platform>/`. Splitting by tier would
+put two halves of one feature in different directories with different
+numbering, and the platform-only half asserts on the registration's
+presence. The classification rule above (effect AND code both
+cross-platform) keeps them together; pick the tier that the
+platform-specific half requires.
 
 When iterating, the natural flow is "commit each working step on the
 patched branch, then squash before regenerating patches." `git rebase

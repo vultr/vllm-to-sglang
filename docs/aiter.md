@@ -73,7 +73,7 @@ A few invariants to know about:
 
 - **`StreamTee` is a daemon thread.** A stalled backend producer cannot keep the supervisor alive past its shutdown deadline; the tee disappears when the process exits.
 - **Callback errors are swallowed.** Tee survival outranks any single shape-capture write. A broken store (disk full, read-only volume) must not silence the backend's stderr.
-- **`ShapeStore` dedups twice.** An in-memory set per target prevents repeat writes during this process, and on first write to a target the existing CSV is loaded into that set so restarts converge on a deduped file. Concurrent writers on a shared persistent volume could in theory produce duplicate rows; we accept that and the operator can dedupe offline if it ever matters.
+- **`ShapeStore` counts hits per shape.** An in-memory `{shape -> hits}` map per target absorbs repeat increments without touching disk; first sights flush immediately (so a crash still records the shape's existence), repeat sights are throttled to one rewrite per `flush_interval_seconds` (default 30 s). On first write to a target the existing CSV is loaded into the map so counts accumulate across restarts. Concurrent writers on a shared persistent volume could in theory double-count or lose increments; we accept that and the operator can dedupe offline if it ever matters.
 - **One CSV per AITER target.** Targets come from the basename of the AITER config path the log line names. `bf16_tuned_gemm.csv`, `a8w8_blockscale_tuned_gemm.csv`, etc. The directory part of that path is whatever AITER was configured to read (its install dir by default, our `$VLLM_SHIM_HOME/aiter/configs/<bucket>/` when restore is active) and unrelated to where we write the capture file.
 
 ## Restore: how AITER gets pointed at our configs
@@ -231,6 +231,7 @@ Key flags:
 | `--aiter-root` | `/sgl-workspace/aiter` | Path to the AITER source tree (where the tuner scripts live). |
 | `--python` | `/opt/venv/bin/python` | Python interpreter that has AITER installed. The shim itself runs under `/opt/shim`'s Python 3.12; AITER lives in `/opt/venv`'s 3.10. |
 | `--hot N` | unset (tune all) | Tune only the N hottest shapes per target. See "Hot-shape filtering" below. |
+| `--no-flydsl` | off | Exclude FlyDSL candidates from the tuner's libtype list for the two targets that include them (`bf16_tuned_gemm`, `a8w8_bpreshuffle_tuned_gemm`). FlyDSL candidates JIT-compile per kernel during benchmarking and dominate per-shape wall-time; dropping them shrinks the candidate pool so a time-budgeted run covers more shapes. The startup-tune path passes this automatically (see below). |
 
 The tuner consolidates inputs per (bucket, target): every captured `shapes/<bucket>/<model>/<parallelism>/<target>.csv` is unioned into one deduped untuned file before AITER is invoked. The intermediate file lands under `$VLLM_SHIM_HOME/aiter/untuned/<bucket>/<target>.csv` so the operator can inspect what was fed into AITER if a tune misbehaves.
 
@@ -261,9 +262,9 @@ extraEnvs:
                    # 0 / unset = tune everything that was captured
 ```
 
-When `VLLM_SHIM_TUNE_AT_STARTUP_SECONDS` is set to a positive integer, the entrypoint runs `vllm-shim-tune --shim-home <...> --bucket <...>` between the AITER restore step and the backend spawn, with that many seconds as a hard wall-clock budget. The GPU is uncontested during this window because the backend hasn't started yet, so tuner benchmark measurements are clean (concurrent serving traffic would poison them).
+When `VLLM_SHIM_TUNE_AT_STARTUP_SECONDS` is set to a positive integer, the entrypoint runs `vllm-shim-tune --shim-home <...> --bucket <...> --no-flydsl` between the AITER restore step and the backend spawn, with that many seconds as a hard wall-clock budget. `--no-flydsl` is always passed by the startup path because FlyDSL candidates JIT-compile per kernel and dominate wall-time, which collides hard with a fixed budget; operator-driven manual runs default to the broader candidate set unless they opt in explicitly (see "Key flags" above). The GPU is uncontested during this window because the backend hasn't started yet, so tuner benchmark measurements are clean (concurrent serving traffic would poison them).
 
-`VLLM_SHIM_TUNE_AT_STARTUP_HOT` appends `--hot N` to that command (see "Hot-shape filtering" above for what the heuristic does). Use it together with the budget when the captured-shape set is too large to tune in full within `progressDeadlineSeconds`: hot-filtering shrinks the input so the budget is far less likely to truncate mid-shape, and the remaining shapes accumulate on subsequent restarts (incremental mode skips already-tuned rows).
+`VLLM_SHIM_TUNE_AT_STARTUP_HOT` appends `--hot N` to that command (see "Hot-shape filtering" above for how shapes are ranked). Use it together with the budget when the captured-shape set is too large to tune in full within `progressDeadlineSeconds`: hot-filtering shrinks the input so the budget is far less likely to truncate mid-shape, and the remaining shapes accumulate on subsequent restarts (incremental mode skips already-tuned rows).
 
 Failure modes are all swallowed: timeout, missing console script, AITER crash. The supervisor logs a single status line and proceeds to launch the backend. Partial tunes are safe because AITER writes tuned rows incrementally; a killed-mid-shape subprocess leaves a valid (partial) CSV that the next restart picks up.
 
@@ -298,11 +299,13 @@ When AITER adds a new tuned-config target, three places must move in lockstep: t
 | Module | Role |
 |---|---|
 | `vllm_shim.aiter.log_parser` | `AiterShape` dataclass + `parse_line(str) -> AiterShape | None`. Pure. |
-| `vllm_shim.aiter.shape_store` | `ShapeStore`: append a deduped CSV row per AITER shape. |
+| `vllm_shim.aiter.shape_store` | `ShapeStore`: count hits per AITER shape and persist per-target CSVs with throttled atomic rewrites. |
 | `vllm_shim.aiter.stream_tee` | `StreamTee`: daemon thread that copies bytes to a sink and lines to a callback. |
 | `vllm_shim.aiter.path` | `sanitize_model`, `shape_capture_root`. Pure. |
 | `vllm_shim.aiter.capture` | `CapturePlan`, `plan_capture`, `resolve_shim_home`, `build_callback`. |
+| `vllm_shim.aiter.lock_cleanup` | `plan_cleanup`, `cleanup_locks`: clear orphaned AITER `FileBaton` lock files on the PV before the backend spawns, so a previous pod's crash mid-build doesn't wedge the next pod's JIT step. |
 | `vllm_shim.aiter.restore` | `RestorePlan`, `plan_restore`, `restore_configs`. |
+| `vllm_shim.aiter.hip_online_tuning` | `plan_hip_online_tuning`, `apply_hip_online_tuning`: anchor gradlib's CWD-relative `hip_online_tuning_res.csv` on the PV via a symlink so accumulated tuning data survives pod restarts. |
 | `vllm_shim.aiter.tune` | `TunerSpec`, `_SPECS`, `tune_target`, `main` (the `vllm-shim-tune` console script). |
 | `vllm_shim.cli.rocm_probe` | `parse_rocminfo`, `probe`, `bucket`. Shells out to `rocminfo`. |
 | `vllm_shim.values.parallelism` | `Parallelism` value + `path_segment()`. |

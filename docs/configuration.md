@@ -137,7 +137,7 @@ Some constants have purposeful homes in code rather than env. If you need to cha
 
 - **Port offsets** (`+1` for backend, `+2` for middleware): `vllm_shim.values.port_allocation.PortAllocation.from_listen`. Changing this means coordinating with the haproxy template and the env vars above.
 - **Shutdown grace** (25 seconds): `Supervisor.__init__` default. See `docs/supervisor.md`.
-- **Metrics cache TTL** (1 second): `MetricsHandler.CACHE_SECONDS`.
+- **Metrics cache TTL** (1 second): module-level `CACHE_SECONDS` in `vllm_shim.middleware.handler.metrics`.
 - **httpx timeouts** (300s read, 10s connect): `vllm_shim.middleware.http_client.get_client`.
 - **haproxy timeouts**: `_TEMPLATE` in `vllm_shim.cli.haproxy`.
 - **Error dump truncation** (8000/4000 bytes): `_REQ_TRUNC` / `_RESP_TRUNC` in `vllm_shim.middleware.error_dump`.

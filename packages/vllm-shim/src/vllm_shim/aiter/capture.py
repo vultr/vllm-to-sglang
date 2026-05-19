@@ -99,9 +99,11 @@ def build_callback(store: ShapeStore) -> Callable[[str], None]:
     """Wrap ``parse_line + store.add`` for ``StreamTee.callback``.
 
     Lines that don't match the AITER shape-not-found pattern are
-    ignored (``parse_line`` returns None). The store handles its own
-    dedup so the callback can be called for every stderr line without
-    paying for repeat writes.
+    ignored (``parse_line`` returns None). The store keeps a hit
+    counter in memory and throttles disk writes (first sights flush
+    immediately; repeat sights wait for the per-target flush window),
+    so the callback can be called for every stderr line without
+    paying disk cost on the hot path.
     """
 
     def on_line(line: str) -> None:

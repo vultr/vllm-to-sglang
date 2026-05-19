@@ -12,7 +12,7 @@ The pipeline lives in two files:
 For each `/metrics` request:
 
 1. Cache check (1-second TTL). On hit, return the cached translation.
-2. `httpx.AsyncClient.get(backend metrics URL, timeout=10s)`. On connection error or timeout, return a 503 with the error body.
+2. `httpx.AsyncClient.get(backend metrics URL, timeout=httpx.Timeout(10.0, connect=5.0))`. The 10s read ceiling is for backends that compute `/metrics` lazily under load; the 5s connect ceiling fails fast when the backend isn't reachable at the TCP layer. On connection error or timeout, return a 503 with the error body.
 3. On non-200 from the backend, forward the response unchanged.
 4. On 200, run `backend.metrics.translate(text)` and cache the result.
 
@@ -60,7 +60,7 @@ Three series exist in vLLM's exposition format but have no direct SGLang equival
 
 | vLLM series | Source | Logic |
 |---|---|---|
-| `vllm:kv_cache_usage_perc` | Derived | First pass collects `sglang:num_used_tokens` and `sglang:max_total_num_tokens` per label set. Then `usage = used / capacity * 100`, emitted with the original labels. Skipped entirely if either input series is missing. |
+| `vllm:kv_cache_usage_perc` | Derived | First pass collects `sglang:num_used_tokens` and `sglang:max_total_num_tokens` per label set. Then `usage = used / capacity * 100`, emitted with the original labels. The whole synthesized block is skipped only when neither input series appears at all. When one of them appears but a particular label is missing on the other side, the per-label fallback emits `0.0` rather than dropping the label (capacity defaults to `0.0`, then the divide-by-zero guard returns `0.0`). |
 | `vllm:healthy_pods_total` | Synthesized | Always `1` with `endpoint="default"`. The fact that the middleware is responding implies the pod is healthy enough to scrape. |
 | `vllm:num_requests_swapped` | Synthesized | Always `0`. SGLang has no swap; the metric exists in vLLM dashboards and alerting on a constant zero is fine. |
 

@@ -87,7 +87,7 @@ The declared order matters for *drain quality* even though the SIGTERMs go out s
 | `vllm_shim.backend.sglang` | The concrete SGLang backend (args, env, launcher, metrics, two filters, parallelism). |
 | `vllm_shim.backend.trtllm` | The concrete TensorRT-LLM backend (args, env, launcher, metrics, no filters, parallelism). |
 | `vllm_shim.backend.registry` | `select()`: env-driven backend dispatch (`VLLM_SHIM_BACKEND`). |
-| `vllm_shim.aiter` | AITER shape capture (stderr tee + dedup CSV) and config restore (symlink seeding). ROCm only; no-op elsewhere. See `docs/aiter.md`. |
+| `vllm_shim.aiter` | AITER shape capture (stderr tee + per-shape hit counter CSV) and config restore (env-var injection). ROCm only; no-op elsewhere. See `docs/aiter.md`. |
 | `vllm_shim.middleware` | FastAPI app, three handlers (health, metrics, proxy), shared httpx client, error-dump helper. |
 | `vllm-entrypoints` package | Top-level `vllm/` namespace whose `__main__.py` files redirect `python -m vllm.X` invocations to the shim. See `docs/entrypoints.md`. |
 

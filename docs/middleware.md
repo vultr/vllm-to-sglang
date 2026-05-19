@@ -113,7 +113,9 @@ The path is configurable via `VLLM_SHIM_LOG` (default `/tmp/vllm-shim.log`). See
 
 ## httpx client lifecycle
 
-A single process-global `httpx.AsyncClient` is reused across all requests (`packages/vllm-shim/src/vllm_shim/middleware/http_client.py`). It's created in the FastAPI lifespan handler and closed during shutdown. Timeouts: 300s read, 10s connect.
+A single process-global `httpx.AsyncClient` is reused across all proxy requests (`packages/vllm-shim/src/vllm_shim/middleware/http_client.py`). It's created in the FastAPI lifespan handler and closed during shutdown. Timeouts on the shared client: 300s read, 10s connect.
+
+`HealthHandler` and `MetricsHandler` do not use the shared client; each issues its own `httpx` call with its own timeout because the right ceiling on a `/health` probe (~seconds) is nothing like the right ceiling on a chat-completion stream (minutes). Current values: `HealthHandler` uses `httpx.Timeout(5.0, connect=2.0)`, `MetricsHandler` uses `httpx.Timeout(10.0, connect=5.0)`.
 
 Outside a running lifespan (e.g., in tests using `ASGITransport`), `get_client` lazily creates a default client so callers don't need to manage the lifespan explicitly. This is what `tests/integration/test_app.py` relies on.
 

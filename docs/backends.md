@@ -23,7 +23,7 @@ class Backend(ABC):
     def __init__(self) -> None: ...
 ```
 
-A backend is a bag of six components plus two class-level constants. Subclasses set the six instance attributes in `__init__`. There's no logic on the base class; `Backend` is purely a contract object.
+A backend is a bag of six components plus three class-level constants (`name`, `health_path`, `metrics_path`). Subclasses set the six instance attributes in `__init__` and override any class constants that differ from the defaults. There's no logic on the base class; `Backend` is purely a contract object.
 
 The six components are each their own ABC:
 
@@ -36,7 +36,7 @@ The six components are each their own ABC:
 | `filters` | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. See `docs/middleware.md`. |
 | `parallelism` | `ParallelismExtractor` | `extract(post_translation_argv) -> Parallelism`. Reads tp/ep/pp from the argv that's about to be handed to the launcher. Used by the AITER shape-capture path; see `docs/aiter.md`. |
 
-All five are intentionally stateless or self-contained. The supervisor and middleware never reach into a backend's internals; they only call these methods.
+All six are intentionally stateless or self-contained. The supervisor and middleware never reach into a backend's internals; they only call these methods.
 
 `health_path` is a class-level constant for the upstream `/health` URL. SGLang exposes `/health`; another backend might use `/v1/health` or `/healthz` and would override this. haproxy's `httpchk` and the middleware's `HealthHandler` both read it.
 
