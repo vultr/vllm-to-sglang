@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.12-rocm720-mi30x-20260517
+ARG BASE_IMAGE=lmsysorg/sglang:v0.5.12-rocm720-mi30x
 
 FROM ${BASE_IMAGE}
 
@@ -38,25 +38,41 @@ RUN cd /sgl-workspace/triton-custom && \
     MAX_JOBS=${MAX_JOBS} \
     uv pip install --no-cache --python /opt/venv/bin/python --no-build-isolation -e .
 
+# Reset the base image's bundled AITER checkout to AITER_VERSION so this
+# image and the vLLM ROCm image (docker/vllm/Dockerfile.rocm) build
+# against the same upstream commit, driven by one pin in
+# scripts/sync-repos.sh. The reset wipes any stale refs/vllm-shim/upstream
+# anchor so apply-patches.sh re-pins to the new HEAD; without this an
+# AITER bump would silently rebase base/ patches onto a different
+# upstream commit instead of failing loudly.
+ARG AITER_VERSION=cdcfa833bdf554ca75594c90dde4316ea9b50199
+RUN cd /sgl-workspace/aiter && \
+    git fetch --depth 1 origin ${AITER_VERSION} && \
+    git reset --hard FETCH_HEAD && \
+    git submodule update --init --recursive --depth 1 && \
+    (git update-ref -d refs/vllm-shim/upstream 2>/dev/null || true)
+
 # Apply local patches to AITER and SGLang before installing. See
 # docs/aiter.md "Upstream patches" for the rationale, and
 # scripts/apply-patches.sh for the branch model. Patches live at
 # patches/<repo>/[<tier>/] at the repo root; scripts/apply-patches.sh
 # replays them onto the upstream checkout as a stack of commits on
-# patched/<platform>. A base-image bump that breaks any patch fails
-# the image build loudly (via git am) instead of silently producing a
-# half-patched image. Capture AITER's post-patch HEAD to
-# /etc/vllm-shim/aiter-cache-key so the shim can namespace AITER's
-# JIT .so cache by AITER+patches version at runtime: bumping AITER
-# OR editing a patch rotates the cache namespace and AITER recompiles
-# from the new source instead of silently loading a stale .so from
-# the PV. See vllm_shim.cli.rocm_perf.aiter_cache_key for the read
-# side, and docs/aiter.md "JIT cache namespacing by AITER commit"
-# for the rationale.
+# patched/<tier>. A base-image bump that breaks any patch fails the
+# image build loudly (via git am) instead of silently producing a
+# half-patched image. AITER's tier here is "sglang" (the engine context
+# this image hosts), not "rocm": the vLLM ROCm image uses the "vllm"
+# tier against the same base/ patches. Capture AITER's post-patch HEAD
+# to /etc/vllm-shim/aiter-cache-key so the shim can namespace AITER's
+# JIT .so cache by AITER+patches version at runtime: bumping AITER OR
+# editing a patch rotates the cache namespace and AITER recompiles from
+# the new source instead of silently loading a stale .so from the PV.
+# See vllm_shim.cli.rocm_perf.aiter_cache_key for the read side, and
+# docs/aiter.md "JIT cache namespacing by AITER commit" for the
+# rationale.
 COPY patches/ /tmp/patches/
 COPY scripts/ /tmp/scripts/
-RUN bash /tmp/scripts/apply-patches.sh aiter  rocm /sgl-workspace/aiter  && \
-    bash /tmp/scripts/apply-patches.sh sglang rocm /sgl-workspace/sglang && \
+RUN bash /tmp/scripts/apply-patches.sh aiter  sglang /sgl-workspace/aiter && \
+    bash /tmp/scripts/apply-patches.sh sglang rocm   /sgl-workspace/sglang && \
     mkdir -p /etc/vllm-shim && \
     git -C /sgl-workspace/aiter rev-parse --short=12 HEAD \
         > /etc/vllm-shim/aiter-cache-key && \

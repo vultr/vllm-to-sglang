@@ -1,4 +1,4 @@
-From f671d5d19db5c3d6c999b885485c019ecbf06ec7 Mon Sep 17 00:00:00 2001
+From 6677eb2313ba299e6b3400b1b49533a4fd0978c5 Mon Sep 17 00:00:00 2001
 From: vllm-shim <vllm-shim@local>
 Date: Thu, 1 Jan 2026 00:00:00 +0000
 Subject: [PATCH 2/2] feat(triton): enable AFP4WFP4 GEMM on gfx942 via BF16
@@ -118,10 +118,10 @@ index 0000000..e4ba2da
 +    }
 +}
 diff --git a/aiter/ops/triton/utils/_triton/arch_info.py b/aiter/ops/triton/utils/_triton/arch_info.py
-index 0c49a1f..6e5ecd6 100644
+index 1d94c63..1d93149 100644
 --- a/aiter/ops/triton/utils/_triton/arch_info.py
 +++ b/aiter/ops/triton/utils/_triton/arch_info.py
-@@ -17,7 +17,13 @@ def is_gluon_avail():
+@@ -22,7 +22,13 @@ def is_gluon_avail():
  
  
  def is_fp4_avail():

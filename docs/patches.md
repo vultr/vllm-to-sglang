@@ -30,47 +30,44 @@ clean.
 
 ```
 patches/
-├── <mono-platform-repo>/        # flat layout, e.g. AITER
+├── <flat-repo>/                 # mono-tier layout: no base/, no subdirs
 │   ├── 0001-<slug>.patch
 │   └── 0002-<slug>.patch
-└── <multi-platform-repo>/       # tiered layout, e.g. SGLang
-    ├── base/                    # applies on every Dockerfile.<platform>
+└── <tiered-repo>/               # base + per-tier overrides
+    ├── base/                    # always applied first
     │   ├── 0001-<slug>.patch
     │   └── 0002-<slug>.patch
-    ├── cuda/                    # only when building Dockerfile.cuda
+    ├── <tier-a>/                # applied on top when this tier is requested
     │   └── .gitkeep             # placeholder when the tier is empty
-    └── rocm/                    # only when building Dockerfile.rocm
+    └── <tier-b>/
         ├── 0001-<slug>.patch
         └── 0002-<slug>.patch
 ```
+
+Today both `patches/aiter/` and `patches/sglang/` use the tiered layout. The concrete tiers:
+
+- `patches/sglang/{base, cuda, rocm}/`: tier name is the host *platform* (axis: which Dockerfile.<platform> is being built).
+- `patches/aiter/{base, sglang, vllm}/`: tier name is the host *engine context* (axis: which inference engine ships AITER in the image being built). Both ROCm Dockerfiles patch the same AITER source-of-truth pin; `sglang/` and `vllm/` exist to host engine-specific overrides if base/ ever needs splitting.
 
 For the current concrete contents, look at `patches/` itself; this doc avoids naming specific patches because numbering shifts as patches land or get upstreamed.
 
 Rules:
 
-- **Mono-platform repos** (AITER doesn't exist on CUDA) sit flat under
-  `patches/<repo>/`. No `base/` or `<platform>/` subdir.
-- **Multi-platform repos** (SGLang runs on both CUDA and ROCm) split
-  into `base/` (always applied) and `<platform>/` (rocm, cuda, ...).
-  The script applies `base/` first, then the matching platform tier
-  on top. Every supported platform must have a directory under
-  `patches/<repo>/`, even when it carries no platform-specific
-  patches: a `.gitkeep` file keeps the empty dir tracked, and the
-  required-subdir check in `apply-patches.sh` turns a Dockerfile
-  typo (e.g. `cuad` instead of `cuda`) into a build-time error
-  instead of a silent "base only" build.
-- **Filename prefix `NNNN-`** is the apply order. `git format-patch`
-  generates it from commit order on the patched branch; the rest of
-  the filename comes from the commit subject after sanitization.
+- **Tier name is free-form**, not bound to platform. The script treats it as an opaque directory + branch suffix; what axis it represents is a per-repo convention. AITER's tiers are engine contexts; SGLang's are platforms. CUDA-only or ROCm-only repos can still use a tiered layout if the dev wants a `base/` anchor for cross-context fixes.
+- **Tiered layout requires every supported tier to have a directory** under `patches/<repo>/`, even when it carries no tier-specific patches: a `.gitkeep` file keeps the empty dir tracked, and the required-subdir check in `apply-patches.sh` turns a Dockerfile typo (e.g. `cuad` instead of `cuda`, or `sglnag` instead of `sglang`) into a build-time error instead of a silent "base only" build.
+- **Mono-tier repos** (no `base/` subdir under `patches/<repo>/`) sit flat. The script auto-detects "no `base/`" and treats the `patches/<repo>/` directory itself as the only tier.
+- **Filename prefix `NNNN-`** is the apply order. `git format-patch` generates it from commit order on the patched branch; the rest of the filename comes from the commit subject after sanitization.
 
 Classification cheat sheet for a new patch:
 
 | Touches | Goes in |
 |---|---|
-| Pure Python, no `aiter.*` / HIP / CUDA imports, AND has runtime effect on every platform | `sglang/base/` |
-| Imports from `aiter.*` or uses MoRI / HIP-specific paths | `sglang/rocm/` |
-| Imports from CUDA-only kernels / flashinfer / NCCL specifics | `sglang/cuda/` |
-| AITER itself | `aiter/` (mono-platform) |
+| Pure Python in SGLang, no `aiter.*` / HIP / CUDA imports, AND has runtime effect on every platform | `sglang/base/` |
+| Imports from `aiter.*` or uses MoRI / HIP-specific paths in SGLang | `sglang/rocm/` |
+| Imports from CUDA-only kernels / flashinfer / NCCL specifics in SGLang | `sglang/cuda/` |
+| AITER source, applies regardless of which engine ships it | `aiter/base/` |
+| AITER edit that only makes sense when SGLang hosts it (e.g. a workaround for SGLang's import sequence) | `aiter/sglang/` |
+| AITER edit that only makes sense when vLLM hosts it | `aiter/vllm/` |
 
 Two axes have to hold for `base/`: the *code* is cross-platform AND
 the *runtime effect* is cross-platform. A platform-agnostic Python
@@ -271,13 +268,14 @@ the offending file in `repos/<repo>/` ready to inspect.
 
 ### What happens at image build
 
-`docker/sglang/Dockerfile.rocm` runs:
+`docker/sglang/Dockerfile.rocm` runs (after a prior step resets the
+base image's bundled AITER checkout to `AITER_VERSION`):
 
 ```dockerfile
 COPY patches/ /tmp/patches/
 COPY scripts/ /tmp/scripts/
-RUN bash /tmp/scripts/apply-patches.sh aiter  rocm /sgl-workspace/aiter  && \
-    bash /tmp/scripts/apply-patches.sh sglang rocm /sgl-workspace/sglang && \
+RUN bash /tmp/scripts/apply-patches.sh aiter  sglang /sgl-workspace/aiter && \
+    bash /tmp/scripts/apply-patches.sh sglang rocm   /sgl-workspace/sglang && \
     mkdir -p /etc/vllm-shim && \
     git -C /sgl-workspace/aiter rev-parse --short=12 HEAD \
         > /etc/vllm-shim/aiter-cache-key && \
@@ -289,6 +287,31 @@ the image build aborts rather than silently producing a half-patched
 image. The AITER cache-key write happens AFTER patching, so the SHA
 captures upstream+patches together (see `docs/aiter.md`,
 "JIT cache namespacing by AITER commit").
+
+The two `apply-patches.sh` calls use different tier axes: `aiter sglang`
+selects the `aiter/sglang/` engine-context tier, while `sglang rocm`
+selects the `sglang/rocm/` platform tier. Both run with `base/`
+applied first.
+
+`docker/vllm/Dockerfile.rocm` follows the same pattern with the vLLM
+engine context:
+
+```dockerfile
+COPY patches/ /tmp/patches/
+COPY scripts/ /tmp/scripts/
+RUN bash /tmp/scripts/apply-patches.sh aiter vllm /opt/aiter && \
+    mkdir -p /etc/vllm-shim && \
+    git -C /opt/aiter rev-parse --short=12 HEAD \
+        > /etc/vllm-shim/aiter-cache-key && \
+    rm -rf /tmp/patches /tmp/scripts
+```
+
+The vLLM base image ships AITER as a pip wheel rather than a git
+checkout, so a preceding step uninstalls the wheel and bootstraps a
+real git repo at `/opt/aiter` against the same `AITER_VERSION` pin (see
+`docker/vllm/Dockerfile.rocm`). Both ROCm images then write
+`/etc/vllm-shim/aiter-cache-key` the same way and the runtime cache
+namespace separates by SHA automatically.
 
 `docker/sglang/Dockerfile.cuda` does the same for the CUDA platform:
 

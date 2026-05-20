@@ -12,7 +12,7 @@
 # it's skipped; otherwise the script clones (shallow, depth=1) or
 # fetches the new ref into the existing repo and detaches HEAD onto it.
 #
-# A *_VERSION value is either an upstream tag (e.g. "v0.5.11") or a
+# A *_VERSION value is either an upstream tag (e.g. "v0.5.12") or a
 # 40-char commit SHA. SHAs are required when the base image ships a
 # post-tag commit (typical for the ROCm forks: aiter, sglang). Bare-SHA
 # fetches rely on github.com's default uploadpack.allowReachableSHA1InWant.
@@ -28,10 +28,15 @@ set -euo pipefail
 #   docker run --rm --entrypoint bash <image> -c \
 #     'git -C /sgl-workspace/sglang rev-parse HEAD; \
 #      git -C /sgl-workspace/aiter  rev-parse HEAD'
-AITER_VERSION="a6bb499375849eec45d68c5ccaebc8865fd422c0"   # v0.1.12.post1-150-ga6bb49937
-SGLANG_VERSION="eccfd6dea79c7d24425fe6a19a4b008cf84ad665"  # gateway-v0.3.1-4022-geccfd6dea
+#
+# Selection rules for each pin (un-dated SGLang tags, vLLM CUDA/ROCm
+# commit parity, AITER higher-version-wins) and the full bump procedure
+# live in docs/build-and-deploy.md under "Base image and AITER pin
+# policy". Read it before editing these values.
+AITER_VERSION="cdcfa833bdf554ca75594c90dde4316ea9b50199"   # v0.1.13
+SGLANG_VERSION="127b9e3283f7c2a43234b852ff5c9f1796d53624"  # v0.5.12
 TRTLLM_VERSION="v1.3.0rc14"
-VLLM_VERSION="v0.20.2"
+VLLM_VERSION="ad7125a431e176d4161099480a66f0169609a690"  # v0.21.0
 # =============================================================================
 
 cd "$(dirname "$0")/.."
