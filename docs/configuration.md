@@ -17,7 +17,7 @@ There are two reasons something is an env var rather than a flag:
 | Read by | `vllm_shim.backend.registry.select` (called from supervisor and middleware) |
 | Effect | Selects which `Backend` subclass to instantiate. |
 
-Valid values are `sglang` and `trtllm`; anything else raises `ValueError("Unknown backend: ...")`. See `docs/backends.md`.
+Valid values are `sglang`, `trtllm`, and `vllm`; anything else raises `ValueError("Unknown backend: ...")`. See `docs/backends.md`.
 
 ### `SGLANG_TOOL_CALL_PARSER`
 
@@ -87,6 +87,26 @@ Set automatically by the supervisor (computed as `--port + 2`). The middleware b
 | Read by | `vllm_shim.backend.trtllm.launcher.TRTLLMLauncher.build_command` |
 | Effect | If set, appends `--reasoning_parser <value>` to the launcher argv. TRT-LLM-only feature; SGLang has no equivalent. |
 
+### vLLM env vars
+
+### `VLLM_TOOL_CALL_PARSER`
+
+| | |
+|---|---|
+| Default | `qwen3_coder` |
+| Read by | `vllm_shim.backend.vllm.launcher.VLLMLauncher.build_command` |
+| Effect | Sets vLLM's `--tool-call-parser`. The default matches `SGLANG_TOOL_CALL_PARSER` and `TRTLLM_TOOL_PARSER` for cross-backend consistency on Qwen3 deployments. |
+
+### `VLLM_BACKEND_PYTHON`
+
+| | |
+|---|---|
+| Default | `/usr/bin/python3` |
+| Read by | `vllm_shim.backend.vllm.launcher.VLLMLauncher.build_command` |
+| Effect | Absolute path to the Python interpreter the launcher uses to invoke `python -m vllm.entrypoints.openai.api_server`. |
+
+The launcher cannot use `shutil.which("vllm")` like the SGLang launcher does, because PATH resolves `vllm` to the shim's own hijack script. It also cannot use the shim's own interpreter, because that interpreter would resolve `vllm.entrypoints.openai.api_server` against the `vllm-entrypoints` stub package and bounce back into the shim. The Dockerfiles install vllm-shim into a separate `/opt/shim` venv and point `VLLM_BACKEND_PYTHON` at the base image's interpreter (where real vLLM is installed). Override this env var when the upstream image moves its interpreter.
+
 ### `VLLM_SHIM_LOG`
 
 | | |
@@ -123,6 +143,7 @@ What gets translated:
 
 - **SGLang** (`vllm_shim.backend.sglang.env.ENV_MAP`): suffix-aligned pairs where SGLang and vLLM agree on the underlying concept - `VLLM_HOST_IP`, `VLLM_DP_RANK`, `VLLM_PORT` (the base port for internal service-port allocation, not the listen port - both engines use this for the same thing), `VLLM_NCCL_SO_PATH`, `VLLM_LOGGING_CONFIG_PATH`, `VLLM_PP_LAYER_PARTITION`, `VLLM_USE_MODELSCOPE`, `VLLM_SKIP_P2P_CHECK`, `VLLM_RINGBUFFER_WARNING_INTERVAL`, `VLLM_CPU_OMP_THREADS_BIND` - plus four ROCm renames (`VLLM_ROCM_USE_AITER` and the three `VLLM_ROCM_QUICK_REDUCE_*` aliases that map to the un-prefixed upstream names AMD's quickreduce library reads).
 - **TRT-LLM** (`vllm_shim.backend.trtllm.env.ENV_MAP`): five renames - `VLLM_ALLOW_LONG_MAX_MODEL_LEN`, `VLLM_NO_USAGE_STATS`, `VLLM_USAGE_STATS_SERVER`, `VLLM_RAY_BUNDLE_INDICES`, `VLLM_RAY_PER_WORKER_GPUS` - all mapped to the matching `TLLM_*` / `TRTLLM_*` names. TRT-LLM has no ROCm support, so no ROCm vars apply.
+- **vLLM** (`vllm_shim.backend.vllm.env.ENV_MAP`): empty. vLLM consumes `VLLM_*` env vars natively, so there is nothing to rename.
 
 Notable non-translations:
 

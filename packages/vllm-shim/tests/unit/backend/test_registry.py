@@ -4,6 +4,7 @@ import pytest
 from vllm_shim.backend import registry
 from vllm_shim.backend.sglang.backend import SGLangBackend
 from vllm_shim.backend.trtllm.backend import TRTLLMBackend
+from vllm_shim.backend.vllm.backend import VLLMBackend
 
 
 def test_default_is_sglang(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -20,6 +21,11 @@ def test_explicit_sglang_env(monkeypatch) -> None:  # type: ignore[no-untyped-de
 def test_explicit_trtllm_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("VLLM_SHIM_BACKEND", "trtllm")
     assert isinstance(registry.select(), TRTLLMBackend)
+
+
+def test_explicit_vllm_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("VLLM_SHIM_BACKEND", "vllm")
+    assert isinstance(registry.select(), VLLMBackend)
 
 
 def test_unknown_raises(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -1,9 +1,9 @@
 # Argument translation
 
-The shim accepts vLLM's CLI grammar (`vllm serve <model> [flags]`) and produces the selected backend's CLI grammar (`sglang serve --model-path <model> [flags]` for SGLang, `trtllm-serve <model> [flags]` for TRT-LLM). Two stages do this:
+The shim accepts vLLM's CLI grammar (`vllm serve <model> [flags]`) and produces the selected backend's CLI grammar (`sglang serve --model-path <model> [flags]` for SGLang, `trtllm-serve <model> [flags]` for TRT-LLM, the same vLLM CLI for the vLLM backend). Two stages do this:
 
 1. **`ArgParser`** (`packages/vllm-shim/src/vllm_shim/cli/parser.py`): extracts what the supervisor itself needs and packages the rest verbatim. Backend-agnostic.
-2. **`<Backend>ArgTranslator`**: rewrites flags into the backend's vocabulary. `SGLangArgTranslator` (`vllm_shim.backend.sglang.args`) and `TRTLLMArgTranslator` (`vllm_shim.backend.trtllm.args`) are the two implementations.
+2. **`<Backend>ArgTranslator`**: rewrites flags into the backend's vocabulary. `SGLangArgTranslator` (`vllm_shim.backend.sglang.args`), `TRTLLMArgTranslator` (`vllm_shim.backend.trtllm.args`), and `VLLMArgTranslator` (`vllm_shim.backend.vllm.args`) are the three implementations.
 
 Splitting them this way keeps the supervisor backend-agnostic: the parser knows nothing about either engine, and each translator is just a `Backend.args` slot that another backend could swap out.
 
@@ -161,3 +161,9 @@ One semantic mismatch worth flagging: `--gpu-memory-utilization` maps to `--kv_c
 Many vLLM flags (`--seed`, `--enable-prefix-caching`, `--no-enable-prefix-caching`, `--enforce-eager`, `--max-cpu-loras`, and others) map cleanly to entries in TRT-LLM's `--config <yaml>` extra-llm-api-options surface, but expanding YAML in the shim would require an ABC change or break the translator's pure-function property. Operators who need any of them pass `--config their.yaml` directly through the shim's pass-through; the YAML can carry whatever extra knobs `trtllm-serve`'s LLM API supports.
 
 Coverage parity with the SGLang map: every vLLM flag (engine-level and frontend-level, in both dash and underscore form, plus the short aliases) has an explicit decision in `vllm_shim.backend.trtllm.args.ARG_MAP`. Source of truth for the trtllm-serve flag set is the click options in `repos/trtllm/tensorrt_llm/commands/serve.py`. The same `strip_optimization_level` pre-processor handles `-O…` shorthands; speculative decoding has no `trtllm-serve` CLI flag, so `--speculative-config` is dropped (operators wanting speculative decoding configure it via `--config their.yaml`).
+
+## vLLM ARG_MAP
+
+The vLLM backend uses an empty `ARG_MAP` in `vllm_shim.backend.vllm.args`: every passthrough flag is already a vLLM flag and reaches vLLM unchanged. The translator also does NOT call `strip_optimization_level` (vLLM's `FlexibleArgumentParser` accepts `-O…` natively) and does NOT split `--speculative-config` into flat flags (vLLM consumes the JSON form directly).
+
+Keeping the identity-shaped translator behind the same `(translated, dropped)` return contract means the entrypoint, the launch-info dump, and the registry need no special casing for the vLLM backend.

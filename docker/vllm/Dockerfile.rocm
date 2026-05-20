@@ -1,0 +1,38 @@
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.21.0
+
+FROM ${BASE_IMAGE}
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.11 /uv /uvx /bin/
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends haproxy && \
+    rm -rf /var/lib/apt/lists/*
+
+# vllm-shim lives in its own 3.12 venv so the vllm-entrypoints stub never
+# lands in the base image's Python (which is where real vLLM is installed).
+# If both shared an interpreter, importing vllm.entrypoints.openai.api_server
+# would resolve to the stub and bounce back into the shim entrypoint.
+RUN uv venv /opt/shim --python 3.12
+
+COPY pyproject.toml uv.lock /src/
+COPY packages /src/packages
+RUN uv pip install --no-cache --python /opt/shim/bin/python \
+        /src/packages/vllm-shim \
+        /src/packages/vllm-entrypoints
+
+# PATH ordering: /opt/shim/bin first so `vllm` resolves to our shim
+# entrypoint; real vLLM lives in the base image's Python and the launcher
+# reaches it via the absolute interpreter path in VLLM_BACKEND_PYTHON.
+# AITER capture/restore activates automatically via probe_rocm() in the
+# entrypoint; AMD's vLLM build uses AITER kernels, so the same capture
+# path that helps SGLang on ROCm helps vLLM on ROCm.
+ENV PATH="/opt/shim/bin:${PATH}"
+ENV VLLM_SHIM_BACKEND="vllm"
+ENV VLLM_BACKEND_PYTHON="/usr/bin/python3"
+
+# Clear the base image's ENTRYPOINT (["vllm", "serve"]). The shim's
+# console script is on PATH now, so callers can invoke `vllm serve ...`
+# directly via CMD. Leaving the inherited ENTRYPOINT in place would
+# prepend a second `vllm serve` to every invocation, making the literal
+# word "vllm" become the model positional.
+ENTRYPOINT []

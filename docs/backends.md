@@ -1,8 +1,10 @@
 # Backends
 
-A "backend" in this codebase is everything that's specific to a particular inference engine: how its CLI is shaped, how its metrics are named, how its API quirks differ from vLLM's. Today the implemented backends are SGLang and TensorRT-LLM, with the abstraction structured to admit further engines (e.g., LMDeploy) as contained changes.
+A "backend" in this codebase is everything that's specific to a particular inference engine: how its CLI is shaped, how its metrics are named, how its API quirks differ from vLLM's. Today the implemented backends are SGLang, TensorRT-LLM, and vLLM itself, with the abstraction structured to admit further engines (e.g., LMDeploy) as contained changes.
 
-The contract is in `packages/vllm-shim/src/vllm_shim/backend/base/`. The dispatch is in `vllm_shim.backend.registry`. Concrete implementations are `vllm_shim.backend.sglang` and `vllm_shim.backend.trtllm`.
+The contract is in `packages/vllm-shim/src/vllm_shim/backend/base/`. The dispatch is in `vllm_shim.backend.registry`. Concrete implementations are `vllm_shim.backend.sglang`, `vllm_shim.backend.trtllm`, and `vllm_shim.backend.vllm`.
+
+The vLLM backend exists because the shim's value-add (haproxy 503-during-startup, error-dump middleware, model resolver with `--served-model-name` injection, AITER capture/restore on ROCm, the launch-info dump, the per-tenant config knobs) still applies when the underlying engine is vLLM. Its translators are intentionally identity-shaped: `ARG_MAP` is empty, `ENV_MAP` is empty, the metrics translator is a pass-through, and the filter tuple is empty, because vLLM *is* the input CLI's target.
 
 ## The `Backend` ABC
 
@@ -51,6 +53,7 @@ All six are intentionally stateless or self-contained. The supervisor and middle
 _BACKENDS: dict[str, type[Backend]] = {
     "sglang": SGLangBackend,
     "trtllm": TRTLLMBackend,
+    "vllm": VLLMBackend,
 }
 
 def select() -> Backend:

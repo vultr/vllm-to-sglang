@@ -39,7 +39,7 @@ VLLM_SHIM_BACKEND_HOST=localhost VLLM_SHIM_BACKEND_PORT=9999 VLLM_SHIM_MIDDLEWAR
 Three processes run inside one container, all children of `vllm_shim.cli.entrypoint.main`:
 
 ```
-client :N -> haproxy -> :N+2 middleware (FastAPI) -> :N+1 SGLang/TRT-LLM
+client :N -> haproxy -> :N+2 middleware (FastAPI) -> :N+1 SGLang/TRT-LLM/vLLM
 ```
 
 - `N` is the public `--port` (default 8000). The other two ports are derived by `+1` and `+2` and are loopback-only. The offsets live in `PortAllocation.from_listen` (`vllm_shim.values.port_allocation`).
@@ -60,7 +60,7 @@ A `Backend` (`vllm_shim.backend.base.backend`) is a contract object holding six 
 | `filters`     | `tuple[RequestFilter, ...]` | Body-rewriting filters that run in declared order. |
 | `parallelism` | `ParallelismExtractor` | Reads tp/ep/pp out of the post-translation argv. Used by the AITER shape-capture path; see `docs/aiter.md`. |
 
-Concrete backends live at `vllm_shim.backend.sglang` and `vllm_shim.backend.trtllm`. The registry (`vllm_shim.backend.registry`) is a single `dict` selected by `VLLM_SHIM_BACKEND` env (default `sglang`); to add a backend, edit that dict, do not introduce plugin discovery. The supervisor and middleware are separate processes, so each constructs its own `Backend` instance from the same env. See `docs/backends.md`.
+Concrete backends live at `vllm_shim.backend.sglang`, `vllm_shim.backend.trtllm`, and `vllm_shim.backend.vllm`. The registry (`vllm_shim.backend.registry`) is a single `dict` selected by `VLLM_SHIM_BACKEND` env (default `sglang`); to add a backend, edit that dict, do not introduce plugin discovery. The supervisor and middleware are separate processes, so each constructs its own `Backend` instance from the same env. See `docs/backends.md`.
 
 The backend layer must not import from `vllm_shim.middleware` or `vllm_shim.cli`; it may depend on `vllm_shim.values`. This rule keeps the architecture diagram honest.
 
@@ -108,7 +108,7 @@ The shim has no config file. Behavior is driven by CLI args (the `vllm serve` in
 
 | Env var | Default | Effect |
 |---|---|---|
-| `VLLM_SHIM_BACKEND`        | `sglang`         | `sglang` or `trtllm`. |
+| `VLLM_SHIM_BACKEND`        | `sglang`         | `sglang`, `trtllm`, or `vllm`. |
 | `VLLM_SHIM_HOME`           | `~/.vllm-shim`   | Root for the shim's persistent state (AITER capture + tuned configs). Point at a PV in production. |
 | `VLLM_SHIM_LOG`            | `/tmp/vllm-shim.log` | Where 4xx/5xx error dumps are appended. Read once at module import. |
 | `VLLM_SHIM_TUNE_AT_STARTUP_SECONDS` | unset (off) | When set to a positive integer, the entrypoint runs `vllm-shim-tune` between restore and backend spawn, with that many seconds as a hard wall-clock budget. Single-GPU deployments use this to fold tuning into pod restarts. See `docs/aiter.md`. |
@@ -118,6 +118,8 @@ The shim has no config file. Behavior is driven by CLI args (the `vllm serve` in
 | `TRTLLM_BACKEND`           | `pytorch`        | `pytorch`, `tensorrt`, or `_autodeploy`. |
 | `TRTLLM_TOOL_PARSER`       | `qwen3_coder`    | Forwarded to `trtllm-serve --tool_parser`. |
 | `TRTLLM_REASONING_PARSER`  | unset            | If set, appends `--reasoning_parser <value>`. |
+| `VLLM_TOOL_CALL_PARSER`    | `qwen3_coder`    | Forwarded to vLLM's `--tool-call-parser`. |
+| `VLLM_BACKEND_PYTHON`      | `/usr/bin/python3` | Absolute path to the interpreter the vLLM launcher invokes; must point at the base image's Python (not the shim's `/opt/shim` venv). |
 
 Some constants are deliberately code-only (port offsets, shutdown grace, metrics cache TTL, httpx timeouts, haproxy timeouts, error-dump truncation, `STRIP_PARAMS`). Promoting one to env commits the project to a backwards-compatible name. See `docs/configuration.md`.
 

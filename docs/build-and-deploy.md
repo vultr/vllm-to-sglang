@@ -18,6 +18,8 @@ Today:
 docker/sglang/Dockerfile.cuda
 docker/sglang/Dockerfile.rocm
 docker/trtllm/Dockerfile.cuda
+docker/vllm/Dockerfile.cuda
+docker/vllm/Dockerfile.rocm
 ```
 
 Adding a backend or platform means adding a Dockerfile at the right path. Jenkins does the rest.
@@ -103,6 +105,8 @@ Three things to note:
 - **vllm-shim lives in a separate 3.12 venv at `/opt/shim`.** The launcher spawns SGLang via the `sglang` console script (resolved via PATH); the script's shebang routes execution into `/opt/venv/bin/python`, so the two interpreters never need to share a `sys.path`. See `docs/backends.md` for the launcher fallback that makes this work.
 - **PATH ordering is load-bearing.** `/opt/shim/bin` first ensures `vllm` resolves to our entrypoint; `/opt/venv/bin` next ensures `sglang` resolves to upstream's wrapper.
 - **Local patches against AITER and SGLang.** The Dockerfile.rocm also COPYs `patches/` and `scripts/` into the image and runs `scripts/apply-patches.sh aiter rocm /sgl-workspace/aiter` and `scripts/apply-patches.sh sglang rocm /sgl-workspace/sglang` *before* the `uv pip install` step, so the installed packages reflect our local fixes. See `docs/patches.md` for the layout and the dev round-trip via `scripts/rebuild-patches.sh`.
+
+**`docker/vllm/Dockerfile.cuda` and `docker/vllm/Dockerfile.rocm`** use the same `/opt/shim` venv isolation pattern as the SGLang ROCm image, but for a different reason. The `vllm-entrypoints` stub package is what intercepts `python -m vllm.X` invocations; if it shared an interpreter with real vLLM, the stub would shadow the real package and the launcher's `python -m vllm.entrypoints.openai.api_server` would bounce back into the shim. Installing vllm-shim and `vllm-entrypoints` into a separate `/opt/shim` 3.12 venv keeps the stub off real vLLM's `sys.path`. The launcher reaches real vLLM via `VLLM_BACKEND_PYTHON` (default `/usr/bin/python3`), pointing at the base image's interpreter where vLLM is installed. Both Dockerfiles base on `vllm/vllm-openai-*` images and add no patches today.
 
 ## Build context
 
@@ -204,6 +208,12 @@ docker compose -f docker/trtllm/compose.cuda.yaml up
 
 # ROCm + SGLang
 docker compose -f docker/sglang/compose.rocm.yaml up
+
+# CUDA + vLLM
+docker compose -f docker/vllm/compose.cuda.yaml up
+
+# ROCm + vLLM
+docker compose -f docker/vllm/compose.rocm.yaml up
 ```
 
 Each compose file builds the image, requests a GPU (NVIDIA via `deploy.resources`, AMD via `/dev/kfd` + `/dev/dri` device mounts and the `video`/`render` groups), mounts the host's HuggingFace cache at `/root/.cache/huggingface`, sets `VLLM_SHIM_BACKEND` correctly, and runs `vllm serve ${MODEL:-Qwen/Qwen2.5-0.5B-Instruct} --port 8000`. Override the model with `MODEL=...` in the environment.
