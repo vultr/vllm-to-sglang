@@ -197,7 +197,21 @@ With cuda graphs on, FP8 wins decode by ~2x at single-stream and ~16% at batch 8
 
 - With graphs **off**, both stacks bottleneck on Python+ROCm kernel-launch overhead at ~9 tok/s. The bandwidth advantage of MXFP4's halved weight bytes is the only differentiator, and it shows as a small win.
 - With graphs **on**, launch overhead disappears and compute becomes the bottleneck. FP8 dispatches to native FP8 MFMA on gfx942; MXFP4 has to unpack to BF16 before dispatching to BF16 MFMA. The unpack overhead plus the BF16 dispatch is measurably slower than native FP8 at our concurrency.
-- The batch 8 ratio (0.84x) is closer than single-stream (0.50x) because at higher request count more tokens flow per layer and HBM pressure starts to matter again. The crossover where MXFP4 catches up or wins is somewhere above the `--max-running-requests=10` envelope used here; not measured.
+- At higher concurrency more tokens flow per layer and HBM pressure starts to matter; we ran a sweep up to concurrency 64 (with `--max-running-requests=64` and `--cuda-graph-max-bs=64`) to look for the crossover. None exists in the measured range: FP8 wins at every point and the ratio asymptotes to ~0.69x.
+
+**Concurrency sweep** (64-in / 512-out, warm, aggregate decode tok/s):
+
+| concurrency | MXFP4 agg | FP8 agg | MXFP4 / FP8 |
+|---|---|---|---|
+|  1 |    31.10 |    61.94 | 0.50x |
+|  8 |   224.00 |   284.69 | 0.79x |
+| 16 |   377.37 |   505.25 | 0.75x |
+| 24 |   508.48 |   730.67 | 0.70x |
+| 32 |   646.01 |   952.13 | 0.68x |
+| 48 |   834.71 |  1220.07 | 0.68x |
+| 64 |  1050.86 |  1518.03 | 0.69x |
+
+MXFP4 closes about half the single-stream gap as concurrency grows (0.50x to 0.69x), then plateaus. Per-request decode drops faster for MXFP4 (31.10 to 16.55 tok/s, 0.53x) than for FP8 (61.94 to 23.90 tok/s, 0.39x) over the sweep, but FP8 starts so far ahead that the aggregate stays ahead at every point. The theoretical crossover where MXFP4's halved weight bandwidth would dominate over native FP8 MFMA may exist at much higher concurrency or much longer per-token attention work, but it is not in the operating envelope of this server config.
 
 Memory is where MXFP4 actually pays off, and the bench cannot show that directly. Weight footprint is ~50% of FP8's, which is what makes the full 2^20-token context fit at TP=8 on MI300X under the same `--mem-fraction-static=0.85` envelope where upstream FP8 cannot. The choice between MXFP4 and FP8 on this hardware is therefore "more KV pool / longer max context" vs "faster per-token decode," not a free win for either side.
 
