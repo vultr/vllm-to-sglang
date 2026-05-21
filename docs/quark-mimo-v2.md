@@ -197,6 +197,15 @@ The absolute decode rates are low (~9 tok/s) because `--disable-cuda-graph` is m
 
 Memory result is the headline that the bench cannot show directly: MXFP4 weight footprint is ~50% of FP8's. That gap is what makes the 1,048,575-token context fit at TP=8 on MI300X under the same `--mem-fraction-static=0.85` envelope where upstream FP8 cannot.
 
+Measured at boot under identical flags (`--mem-fraction-static=0.85`, `--kv-cache-dtype=auto` resolving to bf16, TP=8):
+
+| stack | full-attention pool | SWA pool | `max_total_num_tokens` | post-alloc headroom / rank |
+|---|---|---|---|---|
+| upstream FP8       |   760,391 tokens | 950,489 tokens   | **950,489**   | 27.16 GB |
+| Quark MXFP4        | 1,991,700 tokens | 2,489,625 tokens | **2,489,625** | 27.12 GB |
+
+MXFP4 buys +1.54M tokens of pool (2.62x larger) at the same memory budget. The post-allocation headroom is essentially unchanged across the two stacks, which confirms the savings went into KV rather than into wasted slack: each rank's full-attention KV grew from 27.20 GB to 71.23 GB and SWA KV from 5.67 GB to 14.84 GB, accounting for ~53 GB / rank that lines up with the weight-byte delta on disk (962 GB FP8 vs 538 GB MXFP4, ~424 GB / 8 ranks ≈ 53 GB / rank).
+
 The bench harness is the one at `/workspace/bench/bench.py` in the dev environment (not in this repo); raw per-run JSON is written to its `results/` directory. The `*-warm.json` outputs are the source for the tables above; cold-pass files exist alongside for the curious.
 
 ## Operational gotcha: vllm-shim HTTP-bridge timeout on huge prompts
