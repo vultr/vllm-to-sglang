@@ -170,6 +170,35 @@ The 12K and 52K tests run in seconds. The 1M test prefilled over ~6 minutes (534
 
 The same battery was run on the per-channel-FP8 recipe earlier in the same session with equivalent results at the smaller context lengths; the 1M test was not re-run for FP8 because the recipe difference (`*.self_attn.*` exclude) was already shared and the 12K/52K validation isolates the recipe correctness.
 
+## Performance: MXFP4 vs upstream block-FP8
+
+Benchmarked on the same 8x MI300X stack on 2026-05-21 using `bench/bench.py` against `/v1/completions` with `stream=true`, `ignore_eos=true`, `temperature=0`, and the production serving config (TP=8, `--attention-backend=triton`, `--disable-cuda-graph`, `--max-running-requests=10`). Both stacks were JIT-warmed before each measurement; first-cold-pass numbers were discarded after observing JIT compile costs of 1-4 seconds dominating the small-context TTFT.
+
+**Decode** (concurrency 1 to 8, 512 output tokens):
+
+| scenario | MXFP4 tok/s | FP8 tok/s | MXFP4 / FP8 |
+|---|---|---|---|
+| single stream (conc=1, 64-in / 512-out) | 9.30 | 8.73 | 1.07x |
+| batch 8 per-request | 9.16 | 8.56 | 1.07x |
+| batch 8 aggregate | 72.94 | 68.35 | 1.07x |
+| 32K context, 256 output | 9.03 | 8.70 | 1.04x |
+
+**Prefill TTFT** (concurrency 1, 32 output tokens, warm kernels):
+
+| context tokens | MXFP4 TTFT | FP8 TTFT | MXFP4 / FP8 |
+|---|---|---|---|
+| 2K  | 444 ms | 454 ms | 0.98x |
+| 8K  | 469 ms | 487 ms | 0.96x |
+| 32K | 540 ms | 550 ms | 0.98x |
+
+Decode shows a consistent 4-7% MXFP4 advantage, matching the bandwidth-bound thesis: each layer streams half the weight bytes per token, and the FP4-to-BF16 unpack happens in compute that would otherwise be idle. Prefill is tied within run-to-run noise. The prior expectation that MXFP4 prefill would be neutral-to-slower on gfx942 (no FP4 MFMA, software-emulated unpack) holds in the weak sense (no penalty) but not the strong sense (no measurable cost either).
+
+The absolute decode rates are low (~9 tok/s) because `--disable-cuda-graph` is mandatory for this build (see the CUDA-graph 2^20 cliff note). Re-enabling cuda graphs should lift both stacks proportionally; the ratio between them should not change materially since the bottleneck is HBM bandwidth, not graph launch overhead.
+
+Memory result is the headline that the bench cannot show directly: MXFP4 weight footprint is ~50% of FP8's. That gap is what makes the 1,048,575-token context fit at TP=8 on MI300X under the same `--mem-fraction-static=0.85` envelope where upstream FP8 cannot.
+
+The bench harness is the one at `/workspace/bench/bench.py` in the dev environment (not in this repo); raw per-run JSON is written to its `results/` directory. The `*-warm.json` outputs are the source for the tables above; cold-pass files exist alongside for the curious.
+
 ## Operational gotcha: vllm-shim HTTP-bridge timeout on huge prompts
 
 The shim runs `client -> haproxy -> middleware (FastAPI) -> SGLang` with the haproxy and httpx defaults documented in `docs/middleware.md` and `docs/haproxy.md`. On a 1M-token completion request with `stream=false`, the upstream connection sits idle (no bytes returned) for the entire prefill window. We hit a **504 Gateway Time-out** at ~12 minutes on the non-streaming retry, well before SGLang itself was done.
