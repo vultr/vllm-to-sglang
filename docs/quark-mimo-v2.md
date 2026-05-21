@@ -135,9 +135,9 @@ command:
   - --tp=8
   - --trust-remote-code
   - --attention-backend=triton
-  - --context-length=1048575
+  - --context-length=1048576
   - --mem-fraction-static=0.85
-  - --disable-cuda-graph
+  - --cuda-graph-max-bs=10
   - --max-running-requests=10
   - --chunked-prefill-size=65536
   - --kv-cache-dtype=auto
@@ -147,11 +147,13 @@ command:
   - --watchdog-timeout=3600
 ```
 
-Three of these are non-negotiable for MiMo on this hardware, documented in adjacent project notes:
+One of these is non-negotiable for MiMo on this hardware, documented in an adjacent project note:
 
 - `--attention-backend=triton`: `aiter` MHA asserts at runtime for MiMo's asymmetric K/V head dims (K=192, V=128). Must stay on Triton until aiter MHA is patched.
-- `--context-length=1048575`, not 1048576: a CUDA-graph code path poisons something at the 20-bit boundary. Use exactly 1048575.
-- `--disable-cuda-graph`: required pending the same 2^20 boundary fix, and currently also required because `--cuda-graph-max-bs=10` is set but the graph compile path is otherwise unstable in this build.
+
+A second flag was historically required and is no longer:
+
+- `--context-length=1048576` (the full 2^20) plus cuda graphs enabled: validated coherent on both FP8 and MXFP4 in the current SGLang + aiter build (2026-05-21). A prior bisect on the 2026-05-19 build had captured graphs producing garbage when `max_context_len >= 2^20`, which we worked around by `--context-length=1048575` and `--disable-cuda-graph`. The current build no longer reproduces the cliff; both flags can be dropped. See the perf section below for the 3.35x decode speedup that comes from re-enabling graphs.
 
 The `--watchdog-timeout=3600` is SGLang's internal watchdog only; it does not affect the HTTP-bridge timeout discussed below.
 
@@ -193,9 +195,9 @@ Benchmarked on the same 8x MI300X stack on 2026-05-21 using `bench/bench.py` aga
 
 Decode shows a consistent 4-7% MXFP4 advantage, matching the bandwidth-bound thesis: each layer streams half the weight bytes per token, and the FP4-to-BF16 unpack happens in compute that would otherwise be idle. Prefill is tied within run-to-run noise. The prior expectation that MXFP4 prefill would be neutral-to-slower on gfx942 (no FP4 MFMA, software-emulated unpack) holds in the weak sense (no penalty) but not the strong sense (no measurable cost either).
 
-The absolute decode rates are low (~9 tok/s) because `--disable-cuda-graph` is mandatory for this build (see the CUDA-graph 2^20 cliff note). Re-enabling cuda graphs should lift both stacks proportionally; the ratio between them should not change materially since the bottleneck is HBM bandwidth, not graph launch overhead.
+The numbers in the tables above were captured with `--disable-cuda-graph` (~9 tok/s ceiling) because that flag was still on the production compose at the time. Re-running the MXFP4 stack with cuda graphs enabled and `--context-length=1048576` lifts single-stream decode from 9.30 to 31.12 tok/s (3.35x) and batch-8 aggregate from 72.94 to 224.32 tok/s (3.08x). The MXFP4-vs-FP8 ratio is expected to be roughly preserved with graphs on since the bottleneck is HBM bandwidth, not graph launch overhead; a fresh FP8 re-bench under graphs is the next data point but not yet captured.
 
-Memory result is the headline that the bench cannot show directly: MXFP4 weight footprint is ~50% of FP8's. That gap is what makes the 1,048,575-token context fit at TP=8 on MI300X under the same `--mem-fraction-static=0.85` envelope where upstream FP8 cannot.
+Memory result is the headline that the bench cannot show directly: MXFP4 weight footprint is ~50% of FP8's. That gap is what makes the full 2^20-token context fit at TP=8 on MI300X under the same `--mem-fraction-static=0.85` envelope where upstream FP8 cannot.
 
 Measured at boot under identical flags (`--mem-fraction-static=0.85`, `--kv-cache-dtype=auto` resolving to bf16, TP=8):
 
