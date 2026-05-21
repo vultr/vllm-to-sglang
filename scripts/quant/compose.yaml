@@ -1,0 +1,60 @@
+# Harness for the Quark quantization recipes described in
+# `docs/quark-mimo-v2.md`. Each service runs one recipe and exits.
+#
+# Build the image once from the repo root (the build context must be `.` so
+# the `COPY scripts/quant/*.py` in the Dockerfile resolves):
+#
+#   docker compose -f scripts/quant/compose.yaml build
+#
+# Then drive each stage on demand:
+#
+#   docker compose -f scripts/quant/compose.yaml run --rm stage-dequant
+#   docker compose -f scripts/quant/compose.yaml run --rm file2file-fp8
+#   docker compose -f scripts/quant/compose.yaml run --rm file2file-mxfp4
+#
+# Each recipe reads from / writes to the operator's HF cache, mounted at
+# `/root/.cache/huggingface`. The named volumes for torch_extensions and triton
+# caches accelerate warm re-runs but are not required for correctness.
+
+x-quark-base: &quark-base
+  build:
+    context: ../..
+    dockerfile: scripts/quant/Dockerfile
+  image: vllm-shim-quark:dev
+  ipc: host
+  shm_size: "64gb"
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - video
+    - render
+  cap_add:
+    - SYS_PTRACE
+  security_opt:
+    - seccomp=unconfined
+  environment:
+    OMP_NUM_THREADS: "16"
+    PYTORCH_ALLOC_CONF: "expandable_segments:True"
+    TORCH_BLAS_PREFER_HIPBLASLT: "0"
+  volumes:
+    - ~/.cache/huggingface:/root/.cache/huggingface
+    - quark-torch-extensions:/root/.cache/torch_extensions
+    - quark-triton:/root/.cache/triton
+
+services:
+  stage-dequant:
+    <<: *quark-base
+    command: ["/opt/quark-recipes/stage_dequant.py"]
+
+  file2file-fp8:
+    <<: *quark-base
+    command: ["/opt/quark-recipes/file2file_fp8.py"]
+
+  file2file-mxfp4:
+    <<: *quark-base
+    command: ["/opt/quark-recipes/file2file_mxfp4.py"]
+
+volumes:
+  quark-torch-extensions:
+  quark-triton:

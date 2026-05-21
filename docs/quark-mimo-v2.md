@@ -34,7 +34,7 @@ Discriminator: compare `scale.shape[0]` against `ceil(weight.shape[0] / BLOCK)`.
 
 For every non-fused projection in MiMo (`o_proj`, dense MLP, MoE expert `gate/up/down`) the per-rank chunk size is a clean multiple of 128, so global and per-rank are mathematically equivalent. **Only fused `qkv_proj` requires the special case.** A naive dequant tool that always assumes the global layout inflates Q weights by 5x to 10x rank-dependently, while preserving the global amax. That makes the bug invisible to "compare amaxes" sanity checks and breaks the model end-to-end without a single tensor-level red flag.
 
-The fix lives in `/workspace/quant/stage_dequant.py` in the `dequant()` function, which autodetects the layout and walks per-rank when needed.
+The fix lives in `scripts/quant/stage_dequant.py` in the `dequant()` function, which autodetects the layout and walks per-rank when needed.
 
 ### Bug 2: Quark per-channel FP8 is too lossy for fused `qkv_proj`
 
@@ -52,16 +52,15 @@ MoE expert `gate/up/down` projections have more uniform row distributions and to
 Upstream FP8 HF release
         │
         ▼
-1. /workspace/quant/stage_dequant.py    -> BF16 staging snapshot
+1. scripts/quant/stage_dequant.py       -> BF16 staging snapshot
    per-rank dequant for fused qkv_proj, global for everything else;
    strips quantization_config from config.json
 
         │
         ▼
-2. /workspace/quant/file2file_fp8.py    -> Quark per-channel FP8 snapshot
+2. scripts/quant/file2file_fp8.py       -> Quark per-channel FP8 snapshot
    or                                      (mlp.experts.N.{gate,up,down}_proj only)
-   /workspace/quant/file2file_bf16.py   -> Quark MXFP4 snapshot
-   (script is misnamed; it emits OCP_MXFP4 not bf16)
+   scripts/quant/file2file_mxfp4.py     -> Quark MXFP4 snapshot
 
         │
         ▼
@@ -69,6 +68,11 @@ Upstream FP8 HF release
    under this image, stock Quark dispatch (no bind-mounted patches needed
    for the quantization path itself)
 ```
+
+The recipes are bundled into an image by `scripts/quant/Dockerfile` (the shim
+image with `amd-quark` + ROCm 6.4 `torch` layered on top) and driven by
+`scripts/quant/compose.yaml`, one service per stage. See
+`scripts/quant/README.md` for the operator-facing commands.
 
 Stage 2 produces snapshots under the local HF cache:
 
@@ -183,9 +187,10 @@ We did not adjust the haproxy or middleware timeouts to "fix" this; the streamin
 
 | Concern | Path |
 |---|---|
-| Per-rank dequant for fused qkv_proj | `/workspace/quant/stage_dequant.py` (`dequant()`) |
-| FP8 W8A8 per-channel recipe | `/workspace/quant/file2file_fp8.py` |
-| MXFP4 W4A4 recipe (misnamed file) | `/workspace/quant/file2file_bf16.py` |
+| Per-rank dequant for fused qkv_proj | `scripts/quant/stage_dequant.py` (`dequant()`) |
+| FP8 W8A8 per-channel recipe | `scripts/quant/file2file_fp8.py` |
+| MXFP4 W4A4 recipe | `scripts/quant/file2file_mxfp4.py` |
+| Recipe image and one-shot harness | `scripts/quant/Dockerfile`, `scripts/quant/compose.yaml` |
 | SGLang Quark dispatch gates | `python/sglang/srt/layers/quantization/quark/quark.py` (`QuarkConfig._is_mx_fp4`, `_is_fp8_w8a8`) |
 | Block-FP8 per-rank scale allocation | `python/sglang/srt/layers/quantization/fp8.py` (`BlockQuantScaleParameter`) |
 | MiMo model adapter (TP, MoE wiring, layer probes) | `python/sglang/srt/models/mimo_v2.py` |
