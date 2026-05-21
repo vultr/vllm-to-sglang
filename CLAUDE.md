@@ -135,4 +135,4 @@ Local patches against AITER and SGLang live at the repo root under `patches/<rep
 
 ## Where to read more
 
-Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `patches.md`, `rocm-perf.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.
+Topic docs under `docs/`: `aiter.md`, `architecture.md`, `argument-translation.md`, `backends.md`, `build-and-deploy.md`, `configuration.md`, `development.md`, `entrypoints.md`, `haproxy.md`, `metrics.md`, `middleware.md`, `patches.md`, `quark-mimo-v2.md`, `rocm-perf.md`, `supervisor.md`. They are the authoritative reference for each layer; this file points at them.
