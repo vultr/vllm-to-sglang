@@ -224,6 +224,32 @@ Measured at boot under identical flags (`--mem-fraction-static=0.85`, `--kv-cach
 
 MXFP4 buys +1.54M tokens of pool (2.62x larger) at the same memory budget. The post-allocation headroom is essentially unchanged across the two stacks, which confirms the savings went into KV rather than into wasted slack: each rank's full-attention KV grew from 27.20 GB to 71.23 GB and SWA KV from 5.67 GB to 14.84 GB, accounting for ~53 GB / rank that lines up with the weight-byte delta on disk (962 GB FP8 vs 538 GB MXFP4, ~424 GB / 8 ranks ≈ 53 GB / rank).
 
+### Stacking with fp8 KV
+
+Switching `--kv-cache-dtype=fp8_e4m3` doubles the KV pool on both stacks (each KV cell halves from bf16 to fp8). MiMo ships without per-channel KV scaling factors, so SGLang logs `Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0` once per rank and falls back to scale=1.0. The empirical effect on the same coherence battery:
+
+| stack | KV dtype | `max_total_num_tokens` | short prompts | 12K needle | 52K needle |
+|---|---|---|---|---|---|
+| FP8   | bf16     |   950,489 | clean         | ✓ | ✓ |
+| FP8   | fp8_e4m3 | 1,900,979 (2.00x) | clean         | ✓ | ✓ |
+| MXFP4 | bf16     | 2,489,625 | clean         | ✓ | ✓ |
+| MXFP4 | fp8_e4m3 | 4,979,250 (2.00x) | "2+2=" loops  | ✓ | ✓ |
+
+For FP8 weights the doubling is clean across this battery. For MXFP4 weights the same flag stacks two lossy quantizations and surfaces a visible regression on at least one short-prompt case (the "2+2=" continuation degenerates into "4, 2+2=4, 2+2=4, 2+2") while the needle tests still pass. The accuracy floor at adversarial long context is not measured for either stack; for production accuracy work, a Quark or SGLang-tooling KV-scale calibration pass is recommended rather than relying on scale=1.0 silently working.
+
+Decode throughput cost of fp8 KV (warm, conc 1 / 8 / 32, aggregate tok/s):
+
+| stack | bf16 KV | fp8 KV | fp8 KV / bf16 KV |
+|---|---|---|---|
+| MXFP4 c=1  |  30.75 |  29.63 | 0.96x |
+| MXFP4 c=8  | 224.00 | 209.35 | 0.93x |
+| MXFP4 c=32 | 646.01 | 598.43 | 0.93x |
+| FP8 c=1    |  60.87 |  57.29 | 0.94x |
+| FP8 c=8    | 284.69 | 267.26 | 0.94x |
+| FP8 c=32   | 952.13 | 879.08 | 0.92x |
+
+fp8 KV costs ~5-8% decode throughput in exchange for 2x pool. The slowdown is the fp8-to-bf16 dequant on every KV read; the bandwidth saving from halved KV bytes doesn't quite cover it at our concurrency.
+
 The bench harness is the one at `/workspace/bench/bench.py` in the dev environment (not in this repo); raw per-run JSON is written to its `results/` directory. The `*-warm.json` outputs are the source for the tables above; cold-pass files exist alongside for the curious.
 
 ## Operational gotcha: vllm-shim HTTP-bridge timeout on huge prompts
