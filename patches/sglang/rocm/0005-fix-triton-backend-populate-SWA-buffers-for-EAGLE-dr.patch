@@ -1,0 +1,120 @@
+From a90238de32e5e34ad6626d12e44f2a43da982bdc Mon Sep 17 00:00:00 2001
+From: Matt Harris <mharris@vultr.com>
+Date: Fri, 22 May 2026 01:00:02 +0000
+Subject: [PATCH 5/5] fix(triton-backend): populate SWA buffers for EAGLE
+ draft-extend mode
+
+The Triton attention backend's draft-extend init paths (regular,
+cuda-graph capture, and cuda-graph replay) never populate
+`forward_metadata.window_kv_indices` or the related window_kv_* fields.
+That works for pure full-attention or pure SWA models, but breaks for
+hybrid-SWA architectures like MiMoV2: its MTP block uses SWA, so when
+the EAGLE draft worker forwards through it, `forward_extend` pulls
+`window_kv_indices=None` and the Triton compile fails to resolve
+`None.type` against a `tl.load(kv_indices + ...)` call.
+
+Mirror the target_verify branches' SWA setup in the three draft-extend
+sites so the captured/replayed/regular forward paths supply valid
+window_kv_* buffers when sliding_window_size > 0.
+
+Repro before this change (MiMoV2 + --speculative-algorithm=EAGLE +
+--attention-backend=triton): CompilationError at extend_attention.py,
+"AttributeError: 'NoneType' object has no attribute 'type'" in the
+SLIDING_WINDOW_SIZE > 0 branch. After this change MiMo+MTP serves
+coherently at 99.6% spec accept rate with num_steps=1, num_draft_tokens=2.
+---
+ .../srt/layers/attention/triton_backend.py    | 61 ++++++++++++++++++-
+ 1 file changed, 60 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
+index f6d27e9c3..70d02313f 100644
+--- a/python/sglang/srt/layers/attention/triton_backend.py
++++ b/python/sglang/srt/layers/attention/triton_backend.py
+@@ -430,6 +430,29 @@ class TritonAttnBackend(AttentionBackend):
+             num_kv_splits = None
+             attn_logits = None
+             attn_lse = None
++
++            # Hybrid-SWA models (e.g. MiMoV2) route their MTP block through an
++            # SWA-attention layer, so the draft-extend forward needs the same
++            # window_kv_* buffers as target_verify. Without this the SWA branch
++            # in forward_extend pulls window_kv_indices=None and Triton fails
++            # to compile the load against a NoneType pointer.
++            if self.sliding_window_size is not None and self.sliding_window_size > 0:
++                bs = len(forward_batch.req_pool_indices)
++                (
++                    window_kv_indptr,
++                    window_kv_indices,
++                    window_kv_lens,
++                    window_kv_offsets,
++                ) = update_sliding_window_buffer(
++                    self.window_kv_indptr,
++                    self.req_to_token,
++                    self.sliding_window_size,
++                    forward_batch.seq_lens,
++                    forward_batch.req_pool_indices,
++                    bs,
++                    self.device,
++                    self.token_to_kv_pool_allocator,
++                )
+         else:
+             kv_indptr[1 : bs + 1] = torch.cumsum(
+                 forward_batch.extend_prefix_lens, dim=0
+@@ -711,6 +734,25 @@ class TritonAttnBackend(AttentionBackend):
+                 kv_indices,
+                 self.req_to_token.stride(0),
+             )
++
++            # Hybrid-SWA models (e.g. MiMoV2) route their MTP block through an
++            # SWA-attention layer, so the captured draft-extend forward needs
++            # window_kv_* buffers populated alongside the full-attention ones.
++            if self.sliding_window_size is not None and self.sliding_window_size > 0:
++                window_kv_indices = self.cuda_graph_window_kv_indices
++                window_kv_indptr, window_kv_indices, _, _ = (
++                    update_sliding_window_buffer_cuda_graph(
++                        self.window_kv_indptr,
++                        window_kv_indices,
++                        self.req_to_token,
++                        self.sliding_window_size,
++                        seq_lens[:bs],
++                        req_pool_indices,
++                        bs,
++                        self.token_to_kv_pool_allocator,
++                    )
++                )
++
+             custom_mask = None
+             mask_indptr = None
+             max_extend_len = num_tokens_per_bs
+@@ -859,13 +901,30 @@ class TritonAttnBackend(AttentionBackend):
+             kv_indices = self.cuda_graph_kv_indices
+             create_flashinfer_kv_indices_triton[(bs,)](
+                 self.req_to_token,
+-                req_pool_indices,
++                req_pool_indices[:bs],
+                 seq_lens,
+                 kv_indptr,
+                 None,
+                 kv_indices,
+                 self.req_to_token.stride(0),
+             )
++
++            # Hybrid-SWA models (e.g. MiMoV2): refresh the SWA buffers that the
++            # capture path also populates, so the replayed graph reads valid
++            # window_kv_indices when the draft model forwards through an SWA
++            # layer.
++            if self.sliding_window_size is not None and self.sliding_window_size > 0:
++                window_kv_indices = self.cuda_graph_window_kv_indices
++                update_sliding_window_buffer_cuda_graph(
++                    self.window_kv_indptr,
++                    window_kv_indices,
++                    self.req_to_token,
++                    self.sliding_window_size,
++                    seq_lens[:bs],
++                    req_pool_indices[:bs],
++                    bs,
++                    self.token_to_kv_pool_allocator,
++                )
+         else:
+             raise ValueError(
+                 f"Invalid forward mode: {forward_mode=} for CUDA Graph replay."
