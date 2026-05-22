@@ -252,6 +252,28 @@ fp8 KV costs ~5-8% decode throughput in exchange for 2x pool. The slowdown is th
 
 The bench harness is the one at `/workspace/bench/bench.py` in the dev environment (not in this repo); raw per-run JSON is written to its `results/` directory. The `*-warm.json` outputs are the source for the tables above; cold-pass files exist alongside for the curious.
 
+### EAGLE / MTP speculative decoding
+
+MiMoV2 ships an MTP head. Enabling it through SGLang takes three flag changes plus one patch:
+
+1. `--speculative-algorithm=EAGLE` on the MiMoV2 path auto-flips `enable_multi_layer_eagle=True` (in `python/sglang/srt/server_args.py`); the MTP block is loaded as a single-layer EAGLE draft via the `MiMoV2MTP` adapter in `python/sglang/srt/models/mimo_v2_nextn.py`.
+2. `--speculative-num-steps=1 --speculative-eagle-topk=1 --speculative-num-draft-tokens=2` is the right starting config; longer chains (`num_steps=3`) crater acceptance because the chained probability collapses.
+3. `--speculative-attention-mode=decode` is set on the production compose; the alternative (`prefill`) was not retested after the SWA fix below and may also work.
+
+The patch landed at `patches/sglang/rocm/0005-fix-triton-backend-populate-SWA-buffers-for-EAGLE-dr.patch`: SGLang's Triton attention backend never populated `forward_metadata.window_kv_*` buffers in any of its three draft-extend init paths. Pure-full-attention and pure-SWA models work fine, but **MiMoV2 is hybrid-SWA** and the `MiMoV2MTPLayer` constructs its attention with `sliding_window_size=config.sliding_window_size`. So the moment the EAGLE draft worker forwards through the MTP block, `forward_extend` reads `forward_metadata.window_kv_indices=None`, and the Triton compile fails to resolve `None.type` against a `tl.load(kv_indices + ...)` call. The patch mirrors the `target_verify` SWA setup into all three `is_draft_extend` branches.
+
+Measured impact on FP8 (cuda graphs ON, ctx=1048576, max-running=64, warm; aggregate decode tok/s):
+
+| concurrency | no MTP | + MTP (n=1) | speedup |
+|---|---|---|---|
+|  1 |    62.02 |    70.93 | 1.14x |
+|  8 |   284.69 |   451.24 | **1.59x** |
+| 32 |   952.13 |  1303.02 | **1.37x** |
+
+Spec accept rate is 0.996 with `accept_length=1.99` out of 2 — essentially every draft is accepted, so the bonus token is reliable. The `num_steps=3, num_draft_tokens=4` configuration we tried first dropped acceptance to 0.15 and actively hurt aggregate throughput at concurrency 32 (725 vs 952 tok/s baseline), confirming that the MTP head is well-trained for 1-step lookahead and not for longer chains.
+
+MTP on the **MXFP4** snapshot does not yet work: the current Quark recipe excludes `*.mtp.*` and `model.mtp.*` from quantization, so the MTP block's internal weights are bf16 on disk. SGLang's draft loader instantiates the MTP module against the global `quark` config, which expects MXFP4-packed Linear params; the shape mismatch trips the loader assertion. The fix is to re-run `file2file_mxfp4.py` with the MTP excludes removed so the MTP block becomes MXFP4 like the rest of the MoE experts; not done yet.
+
 ## Operational gotcha: vllm-shim HTTP-bridge timeout on huge prompts
 
 The shim runs `client -> haproxy -> middleware (FastAPI) -> SGLang` with the haproxy and httpx defaults documented in `docs/middleware.md` and `docs/haproxy.md`. On a 1M-token completion request with `stream=false`, the upstream connection sits idle (no bytes returned) for the entire prefill window. We hit a **504 Gateway Time-out** at ~12 minutes on the non-streaming retry, well before SGLang itself was done.
