@@ -270,7 +270,7 @@ Measured impact on FP8 (cuda graphs ON, ctx=1048576, max-running=64, warm; aggre
 |  8 |   284.69 |   451.24 | **1.59x** |
 | 32 |   952.13 |  1303.02 | **1.37x** |
 
-Spec accept rate is 0.996 with `accept_length=1.99` out of 2 — essentially every draft is accepted, so the bonus token is reliable. The `num_steps=3, num_draft_tokens=4` configuration we tried first dropped acceptance to 0.15 and actively hurt aggregate throughput at concurrency 32 (725 vs 952 tok/s baseline), confirming that the MTP head is well-trained for 1-step lookahead and not for longer chains.
+Spec accept rate is 0.996 with `accept_length=1.99` out of 2, essentially every draft accepted, so the bonus token is reliable. The `num_steps=3, num_draft_tokens=4` configuration we tried first dropped acceptance to 0.15 and actively hurt aggregate throughput at concurrency 32 (725 vs 952 tok/s baseline), confirming that the MTP head is well-trained for 1-step lookahead and not for longer chains.
 
 MTP on the **MXFP4** snapshot does not yet work: the current Quark recipe excludes `*.mtp.*` and `model.mtp.*` from quantization, so the MTP block's internal weights are bf16 on disk. SGLang's draft loader instantiates the MTP module against the global `quark` config, which expects MXFP4-packed Linear params; the shape mismatch trips the loader assertion. The fix is to re-run `file2file_mxfp4.py` with the MTP excludes removed so the MTP block becomes MXFP4 like the rest of the MoE experts; not done yet.
 
