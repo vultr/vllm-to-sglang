@@ -31,7 +31,7 @@ BF16_SNAPSHOT_DIR = (
     "/root/.cache/huggingface/hub/models--XiaomiMiMo--MiMo-V2.5-Pro-BF16/snapshots/bf16"
 )
 MODEL_ID_OUT = "XiaomiMiMo/MiMo-V2.5-Pro-MXFP4"
-SNAPSHOT_OUT = "mxfp4-bf16qkv"
+SNAPSHOT_OUT = "mxfp4-bf16qkv-mtp"
 
 HF_HOME = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
 
@@ -69,9 +69,9 @@ def build_quant_config() -> QConfig:
             "*.mlp.gate_proj",
             "*.mlp.up_proj",
             "*.mlp.down_proj",
-            # MTP head stays BF16, symmetric with attention/router.
-            "*.mtp.*",
-            "model.mtp.*",
+            # Embedding inside the MTP block must stay BF16; embeddings can't
+            # be MXFP4 (they're lookup tables, not Linear matmuls).
+            "model.mtp.embed_tokens",
         ],
     )
 
