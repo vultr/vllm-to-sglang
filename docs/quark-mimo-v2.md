@@ -260,7 +260,16 @@ MiMoV2 ships an MTP head. Enabling it through SGLang takes three flag changes pl
 2. `--speculative-num-steps=1 --speculative-eagle-topk=1 --speculative-num-draft-tokens=2` is the right starting config; longer chains (`num_steps=3`) crater acceptance because the chained probability collapses.
 3. `--speculative-attention-mode=decode` is set on the production compose; the alternative (`prefill`) was not retested after the SWA fix below and may also work.
 
-The patch landed at `patches/sglang/rocm/0005-fix-triton-backend-populate-SWA-buffers-for-EAGLE-dr.patch`: SGLang's Triton attention backend never populated `forward_metadata.window_kv_*` buffers in any of its three draft-extend init paths. Pure-full-attention and pure-SWA models work fine, but **MiMoV2 is hybrid-SWA** and the `MiMoV2MTPLayer` constructs its attention with `sliding_window_size=config.sliding_window_size`. So the moment the EAGLE draft worker forwards through the MTP block, `forward_extend` reads `forward_metadata.window_kv_indices=None`, and the Triton compile fails to resolve `None.type` against a `tl.load(kv_indices + ...)` call. The patch mirrors the `target_verify` SWA setup into all three `is_draft_extend` branches.
+The patch landed at `patches/sglang/rocm/0004-fix-triton-backend-populate-SWA-buffers-for-EAGLE-dr.patch`: SGLang's Triton attention backend never populated `forward_metadata.window_kv_*` buffers in any of its three draft-extend init paths. Pure-full-attention and pure-SWA models work fine, but **MiMoV2 is hybrid-SWA** and the `MiMoV2MTPLayer` constructs its attention with `sliding_window_size=config.sliding_window_size`. So the moment the EAGLE draft worker forwards through the MTP block, `forward_extend` reads `forward_metadata.window_kv_indices=None`, and the Triton compile fails to resolve `None.type` against a `tl.load(kv_indices + ...)` call. The patch mirrors the `target_verify` SWA setup into all three `is_draft_extend` branches.
+
+To verify the deployed image actually has the patch baked in, grep the running container:
+
+```bash
+docker exec <container> grep -c "Hybrid-SWA models" \
+  /sgl-workspace/sglang/python/sglang/srt/layers/attention/triton_backend.py
+```
+
+Expect `3` (one comment per modified site: non-graph init, cuda-graph capture, cuda-graph replay). If it returns `0`, the image predates this patch and EAGLE-on-MiMo will crash with `AttributeError("'NoneType' object has no attribute 'type'")` during draft-extend CUDA graph capture, regardless of which `--speculative-*` flags are set.
 
 Measured impact on FP8 (cuda graphs ON, ctx=1048576, max-running=64, warm; aggregate decode tok/s):
 
