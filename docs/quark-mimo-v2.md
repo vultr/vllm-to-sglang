@@ -237,6 +237,25 @@ Switching `--kv-cache-dtype=fp8_e4m3` doubles the KV pool on both stacks (each K
 
 For FP8 weights the doubling is clean across this battery. For MXFP4 weights the same flag stacks two lossy quantizations and surfaces a visible regression on at least one short-prompt case (the "2+2=" continuation degenerates into "4, 2+2=4, 2+2=4, 2+2") while the needle tests still pass. The accuracy floor at adversarial long context is not measured for either stack; for production accuracy work, a Quark or SGLang-tooling KV-scale calibration pass is recommended rather than relying on scale=1.0 silently working.
 
+**Re-test on `mxfp4-attnfp8-mtp` (2026-05-26):** The bare-arithmetic regression was probed on the newer AttnFP8-MTP snapshot against both KV dtypes using `evals/probes/probe_short_kv.py` (a 30-prompt matrix covering bare arithmetic, framed Q/A, short facts, very short, longer-structured, at greedy and T=0.7). Headline finding: **the "2+2=" lock-in appears at bf16 KV too on this snapshot**, often more rigidly than under fp8_e4m3 (greedy `"2+2="` → `"4, 2+2=4, 2+2=4, 2+2=4..."` at bf16; under fp8_e4m3 it drifts into `"4, 2*2=4, 2^2=4, 2!=2, 2=2..."` with semantic slips but less exact repetition). Longer or structured prompts are clean at both dtypes. Reading: this is **base-model degenerate-tail behavior on bare numeric prompts**, not a KV-quant artifact, so the original recommendation to keep MXFP4 at bf16 KV solely to avoid this loop does not survive. The doc-level rule changes to: on the AttnFP8-MTP snapshot, `fp8_e4m3` KV is viable; pick KV dtype on the throughput / pool-size tradeoff, not on this regression. Sampling-side suppression (`presence_penalty`, `repetition_penalty`, `no_repeat_ngram_size`) is the cheap fix if downstream consumers do not truncate.
+
+**Throughput re-measure on `mxfp4-attnfp8-mtp` (2026-05-26, MTP on, TP=8, ctx=1048576):** out tok/s on sglang `bench_serving`, four-stage sweep. FP8 column is from the same hardware/flags on `XiaomiMiMo/MiMo-V2.5-Pro` with `kv-cache-dtype=fp8_e4m3, max-running=16, max-bs=16, chunked-prefill=65536`. Three MXFP4 configs are charted: the original bs=16 / bf16 KV / chunked=65536, the same bs=16 with fp8 KV, and a wider config (bs=32 / max-running=32 / chunked=131072 / fp8 KV) that takes the headroom MXFP4 frees.
+
+| stage | FP8 ref | MXFP4 bs=16 bf16KV | MXFP4 bs=16 fp8KV | MXFP4 bs=32 fp8KV | bs=32 / FP8 |
+|---|---|---|---|---|---|
+| peak_inf (1024 -> 512, 300 prompts, conc ~155) | 498.55 | 340.43 | 311.95 | **425.34** | 0.85x |
+| c1_1024x512 (single-stream) | 66.82 | 53.63 | 51.74 | 51.96 | 0.78x |
+| c32_1024x512 | 532.80 | 411.13 | 395.89 | **569.78** | **1.07x** |
+| c32_4096x1024 | 500.25 | 387.17 | 389.10 | **521.90** | **1.04x** |
+
+TTFT (mean, ms) on the same four stages, bs=16 fp8KV vs bs=32 fp8KV: c32_1024x512 9340 -> 513 (18x faster), c32_4096x1024 17374 -> 1619 (10.7x faster). The 131072-token chunked prefill collapses 4096-token prompts into a single chunk and 1024-token prompts into part of one, so prefill cost is paid almost immediately instead of being scheduled against ongoing decode batches.
+
+KV-dtype interaction on the bs=16 column: short/medium-context stages favor bf16 KV by 4-8% (the fp8-to-bf16 dequant on every KV read costs more than the halved KV bandwidth saves at that pool size), long-context breaks even. The bs=16 column understates MXFP4: it bottlenecked on cuda-graph batch width rather than weight bandwidth, so FP8 won. Once batch goes to 32 the weight-bandwidth saving cashes in and MXFP4 overtakes FP8 on every multi-concurrent stage. Single-stream (c1) is unchanged across configs because there is no batch headroom to spend.
+
+Pool sizes at boot on the AttnFP8-MTP snapshot: bs=16 bf16 KV gives `max_total_num_tokens = 1,864,735` with `available_gpu_mem ~ 21.63 GB/rank`; bs=32 fp8 KV gives `max_total_num_tokens = 2,626,102` with `available_gpu_mem ~ 17.75 GB/rank`. The fp8 KV doubling does not materialize at device pool level when bs/chunked-prefill widen at the same time, because the wider graphs and bigger prefill chunk consume ~4 GB/rank of activation HBM that would otherwise have gone to KV. Host hierarchical KV: bs=16 bf16 holds 200.50 GB/rank target + 2.86 GB/rank draft; bs=32 fp8 holds 141.18 GB/rank target + 2.02 GB/rank draft.
+
+**Deployment recommendation:** for our concurrency profile, ship the wider config (`--cuda-graph-max-bs=32 --max-running-requests=32 --chunked-prefill-size=131072 --kv-cache-dtype=fp8_e4m3`). It dominates the bs=16 setups on every multi-concurrent stage, equals on single-stream, and the 17.75 GB/rank post-allocation headroom is enough margin to keep operating safely. The earlier "MXFP4 trails FP8 by 25%" finding was a bs=16-era artifact; at bs=32 MXFP4 leads on the realistic burst stages.
+
 Decode throughput cost of fp8 KV (warm, conc 1 / 8 / 32, aggregate tok/s):
 
 | stack | bf16 KV | fp8 KV | fp8 KV / bf16 KV |
