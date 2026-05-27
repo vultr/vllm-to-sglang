@@ -1,30 +1,47 @@
-From afbdb240efd581ea7d95971c8c400f2c4899ab21 Mon Sep 17 00:00:00 2001
+From 2c7b9723e48c8564557f58bad3e9d29eae410930 Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Fri, 22 May 2026 01:00:02 +0000
-Subject: [PATCH 4/6] fix(triton-backend): populate SWA buffers for EAGLE
- draft-extend mode
+Subject: [PATCH 4/6] fix(eagle-draft): SWA buffer + translate-loc guards for
+ hybrid-SWA EAGLE on MiMoV2
 
-The Triton attention backend's draft-extend init paths (regular,
-cuda-graph capture, and cuda-graph replay) never populate
-`forward_metadata.window_kv_indices` or the related window_kv_* fields.
-That works for pure full-attention or pure SWA models, but breaks for
-hybrid-SWA architectures like MiMoV2: its MTP block uses SWA, so when
-the EAGLE draft worker forwards through it, `forward_extend` pulls
-`window_kv_indices=None` and the Triton compile fails to resolve
-`None.type` against a `tl.load(kv_indices + ...)` call.
+Two related fixes for running EAGLE speculative decoding on
+hybrid-SWA target models (MiMoV2 ships an MTP block whose attention
+uses a sliding window), both required for the draft worker to
+forward through that MTP layer without crashing:
 
-Mirror the target_verify branches' SWA setup in the three draft-extend
-sites so the captured/replayed/regular forward paths supply valid
-window_kv_* buffers when sliding_window_size > 0.
+1. python/sglang/srt/layers/attention/triton_backend.py
 
-Repro before this change (MiMoV2 + --speculative-algorithm=EAGLE +
---attention-backend=triton): CompilationError at extend_attention.py,
-"AttributeError: 'NoneType' object has no attribute 'type'" in the
-SLIDING_WINDOW_SIZE > 0 branch. After this change MiMo+MTP serves
-coherently at 99.6% spec accept rate with num_steps=1, num_draft_tokens=2.
+   The Triton attention backend's draft-extend init paths (regular,
+   cuda-graph capture, and cuda-graph replay) never populate
+   forward_metadata.window_kv_indices or the related window_kv_*
+   fields. That works for pure full-attention or pure SWA models, but
+   breaks for hybrid-SWA architectures like MiMoV2: when the EAGLE
+   draft worker forwards through its SWA MTP block, forward_extend
+   pulls window_kv_indices=None and the Triton compile fails to
+   resolve None.type against a tl.load(kv_indices + ...) call. This
+   patch mirrors the target_verify SWA setup into all three
+   is_draft_extend branches.
+
+2. python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
+
+   The multi-step draft-extend chain (--speculative-num-steps>=2)
+   unconditionally calls
+   self.model_runner.token_to_kv_pool.translate_loc_from_full_to_swa(
+   next_buffers.out_cache_loc) inside the next-buffer copy. For
+   MiMoV2 the draft model_runner's pool is MHATokenToKVPool, which
+   does not expose that method, so the chain init raises
+   AttributeError: 'MHATokenToKVPool' object has no attribute
+   'translate_loc_from_full_to_swa' during cuda graph capture and
+   the scheduler aborts before serving any request. With
+   --speculative-num-steps=1 the chain branch was never entered so
+   the bug only surfaces once multi-step EAGLE is enabled. Guard the
+   translation behind hasattr; the SWA cache locator is unused on
+   the non-SWA draft path, and the buffer remains at its capture-
+   time init value.
 ---
  .../srt/layers/attention/triton_backend.py    | 61 ++++++++++++++++++-
- 1 file changed, 60 insertions(+), 1 deletion(-)
+ ...er_eagle_draft_extend_cuda_graph_runner.py | 17 ++++--
+ 2 files changed, 73 insertions(+), 5 deletions(-)
 
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
 index f6d27e9..70d0231 100644
@@ -118,3 +135,32 @@ index f6d27e9..70d0231 100644
          else:
              raise ValueError(
                  f"Invalid forward mode: {forward_mode=} for CUDA Graph replay."
+diff --git a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
+index 732bc3e..3725f20 100644
+--- a/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
++++ b/python/sglang/srt/speculative/multi_layer_eagle_draft_extend_cuda_graph_runner.py
+@@ -494,11 +494,20 @@ class MultiLayerEagleDraftExtendCudaGraphRunner:
+                     forward_batch.req_to_token_pool.req_to_token,
+                     self.eagle_worker.req_to_hidden_states_pool,
+                 )
+-                next_buffers.swa_out_cache_loc.copy_(
+-                    self.model_runner.token_to_kv_pool.translate_loc_from_full_to_swa(
+-                        next_buffers.out_cache_loc
++                # Hybrid-SWA target models (e.g. MiMoV2) instantiate the EAGLE
++                # draft worker against a plain MHATokenToKVPool, which has no
++                # SWA index space. Skip the translation when the draft pool
++                # does not support it; swa_out_cache_loc stays at its capture-
++                # time init and is unused on the non-SWA path.
++                if hasattr(
++                    self.model_runner.token_to_kv_pool,
++                    "translate_loc_from_full_to_swa",
++                ):
++                    next_buffers.swa_out_cache_loc.copy_(
++                        self.model_runner.token_to_kv_pool.translate_loc_from_full_to_swa(
++                            next_buffers.out_cache_loc
++                        )
+                     )
+-                )
+ 
+             forward_batch.out_cache_loc = output_cache_loc_backup
+             forward_batch.spec_info.hidden_states = hidden_states_backup

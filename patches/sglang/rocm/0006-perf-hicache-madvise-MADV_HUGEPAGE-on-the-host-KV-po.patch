@@ -1,4 +1,4 @@
-From d4b4cacc66cfd27eae1f9abe56476fd6a1e159fd Mon Sep 17 00:00:00 2001
+From 88bee8b4a1b1fb58e6a3b5757385a8c1ade4c602 Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Tue, 26 May 2026 22:30:00 +0000
 Subject: [PATCH 6/6] perf(hicache): madvise(MADV_HUGEPAGE) on the host KV pool
