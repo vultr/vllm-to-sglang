@@ -302,6 +302,29 @@ Spec accept rate is 0.996 with `accept_length=1.99` out of 2, essentially every 
 
 MTP on the **MXFP4** snapshot does not yet work: the current Quark recipe excludes `*.mtp.*` and `model.mtp.*` from quantization, so the MTP block's internal weights are bf16 on disk. SGLang's draft loader instantiates the MTP module against the global `quark` config, which expects MXFP4-packed Linear params; the shape mismatch trips the loader assertion. The fix is to re-run `file2file_mxfp4.py` with the MTP excludes removed so the MTP block becomes MXFP4 like the rest of the MoE experts; not done yet.
 
+### HiCache write_through GPU fault on long cumulative load (workaround: write_back)
+
+Enabling `--enable-hierarchical-cache` with the SGLang default `write_policy=write_through` deterministically faults at ~5M cumulative tokens of HiCache writes (request #10 of a 200K to 950K x 3-depth sweep on MiMo-V2.5-Pro MXFP4 + MLA + fp8 KV). All 8 TP ranks fault simultaneously with addresses clustered at consistent low bits, e.g.
+
+```
+Memory access fault by GPU node-2 (Agent handle: 0x...) on address 0x...237000. Reason: Unknown.
+Memory access fault by GPU node-3 (Agent handle: 0x...) on address 0x...237000. Reason: Unknown.
+...
+Fatal Python error: Aborted
+  File "/sgl-workspace/sglang/python/sglang/srt/managers/schedule_batch.py", line 2404 in maybe_wait_verify_done
+Subprocess scheduler_0 (pid=...) crashed with exit code -6.
+```
+
+The fault is in the eager device-to-host DMA hot path that `write_through` runs on every newly cached node during prefill. It is NOT a transparent-hugepage / IOMMU stale-PTE interaction (`SGLANG_HICACHE_HUGEPAGE_HINT=0` and explicit `MADV_NOHUGEPAGE` after `cudaHostRegister` reproduce at the same threshold). The Python traceback points into the spec-v2 verify wait, but that is only where the host thread synchronises on the fault; the failing write is queued earlier on `write_stream` in `cache_controller.start_writing`.
+
+Workaround: add `--hicache-write-policy=write_back` to the compose. This defers host writes off the prefill hot path and sidesteps the bug entirely. Validation under the workaround: a needle-in-a-haystack sweep at 200K, 400K, 600K, 800K, 950K prompt tokens x 3 needle depths (15 requests, ~9M cumulative prompt tokens) completed without crash; retrieval scoring matched the no-hicache baseline (one cutoff miss at 400K depth=0.9 attributable to a model-output truncation, not to hicache).
+
+Boot times observed on this stack: ~13 to 16 min with `SGLANG_HICACHE_HUGEPAGE_HINT=1` (the THP hint added by `patches/sglang/rocm/0006-perf-hicache-madvise-MADV_HUGEPAGE-on-the-host-KV-po.patch`), ~90 min without. The hint is safe to leave on; the write_through bug was orthogonal to THP.
+
+Spec accept rate, decode throughput, and prefix-cache behaviour under `write_back` matched `write_through` for the workloads we measured; the difference is purely that the host backup happens asynchronously after the verify rather than in the prefill critical path.
+
+Upstream SGLang has not been notified yet; this is a real bug in `cache_controller.py` / `memory_pool_host.py` on the MLA + fp8 KV + ROCm path that warrants a report. `write_back` is a production-safe workaround, not a fix.
+
 ## Operational gotcha: vllm-shim HTTP-bridge timeout on huge prompts
 
 The shim runs `client -> haproxy -> middleware (FastAPI) -> SGLang` with the haproxy and httpx defaults documented in `docs/middleware.md` and `docs/haproxy.md`. On a 1M-token completion request with `stream=false`, the upstream connection sits idle (no bytes returned) for the entire prefill window. We hit a **504 Gateway Time-out** at ~12 minutes on the non-streaming retry, well before SGLang itself was done.
