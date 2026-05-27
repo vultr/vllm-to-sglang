@@ -1,7 +1,7 @@
-From caa460430f1abbabad55d08702843d03fd510e28 Mon Sep 17 00:00:00 2001
+From 25453b13f1685193e7552d1ebf49dd97e4ecbc0c Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Sun, 24 May 2026 23:33:40 +0000
-Subject: [PATCH 5/5] fix(mimo_v2_nextn): route eh_proj through
+Subject: [PATCH 5/6] fix(mimo_v2_nextn): route eh_proj through
  ReplicatedLinear under Quark and align MTP block prefix
 
 When MiMoV2's MTP head loads a Quark-quantized checkpoint, the plain
@@ -16,7 +16,7 @@ matches the on-disk Quark checkpoint layout for the MTP head.
  1 file changed, 24 insertions(+), 10 deletions(-)
 
 diff --git a/python/sglang/srt/models/mimo_v2_nextn.py b/python/sglang/srt/models/mimo_v2_nextn.py
-index 737d8ec7d..d38633a03 100644
+index 737d8ec..d38633a 100644
 --- a/python/sglang/srt/models/mimo_v2_nextn.py
 +++ b/python/sglang/srt/models/mimo_v2_nextn.py
 @@ -32,6 +32,7 @@ from sglang.srt.layers.dp_attention import (

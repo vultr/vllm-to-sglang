@@ -1,7 +1,7 @@
-From 40cfe9732373e3d71f6a6322013a28430637859e Mon Sep 17 00:00:00 2001
+From 9acde38e21c8eb8873fa686b3da8a3b0b68e5b7e Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Mon, 18 May 2026 18:16:23 +0000
-Subject: [PATCH 3/5] fix(parallel_state): route _ATTN_TP via PyNCCL so
+Subject: [PATCH 3/6] fix(parallel_state): route _ATTN_TP via PyNCCL so
  DP-attention captures cleanly on ROCm
 
 Under DP attention, the in-decode collectives on _ATTN_TP must be
@@ -27,7 +27,7 @@ attention is meant to deliver.
  1 file changed, 16 insertions(+), 2 deletions(-)
 
 diff --git a/python/sglang/srt/distributed/parallel_state.py b/python/sglang/srt/distributed/parallel_state.py
-index 863f5f1a7..3ca91de2a 100644
+index 863f5f1..3ca91de 100644
 --- a/python/sglang/srt/distributed/parallel_state.py
 +++ b/python/sglang/srt/distributed/parallel_state.py
 @@ -1567,7 +1567,13 @@ def graph_capture(stream: Optional[torch.cuda.Stream] = None):

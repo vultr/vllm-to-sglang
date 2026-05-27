@@ -1,7 +1,7 @@
-From a6950395f61e0a324d8a3d062f6a63401aa492bf Mon Sep 17 00:00:00 2001
+From afbdb240efd581ea7d95971c8c400f2c4899ab21 Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Fri, 22 May 2026 01:00:02 +0000
-Subject: [PATCH 4/5] fix(triton-backend): populate SWA buffers for EAGLE
+Subject: [PATCH 4/6] fix(triton-backend): populate SWA buffers for EAGLE
  draft-extend mode
 
 The Triton attention backend's draft-extend init paths (regular,
@@ -27,7 +27,7 @@ coherently at 99.6% spec accept rate with num_steps=1, num_draft_tokens=2.
  1 file changed, 60 insertions(+), 1 deletion(-)
 
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index f6d27e9c3..70d02313f 100644
+index f6d27e9..70d0231 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
 @@ -430,6 +430,29 @@ class TritonAttnBackend(AttentionBackend):

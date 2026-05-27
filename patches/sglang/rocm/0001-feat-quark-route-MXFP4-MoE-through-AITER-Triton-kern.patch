@@ -1,7 +1,7 @@
-From 5fe8a5bd7c66f6fd0fe0a101f46739fb474e7b2b Mon Sep 17 00:00:00 2001
+From 3cdbcce5e46a3e757e7a79a0d3258cd8bbaef1d1 Mon Sep 17 00:00:00 2001
 From: Matt Harris <mharris@vultr.com>
 Date: Mon, 18 May 2026 20:40:14 +0000
-Subject: [PATCH 1/5] feat(quark): route MXFP4 MoE through AITER Triton kernels
+Subject: [PATCH 1/6] feat(quark): route MXFP4 MoE through AITER Triton kernels
  on gfx942
 
 AITER's CK MXFP4 GEMM kernels are compile-time excluded on gfx942
@@ -46,7 +46,7 @@ Not upstreamed.
  create mode 100644 python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
-index fd3629cd7..9448479d8 100644
+index 2640d23..df02088 100644
 --- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
 @@ -35,6 +35,28 @@ if _use_aiter:
@@ -138,7 +138,7 @@ index fd3629cd7..9448479d8 100644
              w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
 diff --git a/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 new file mode 100644
-index 000000000..8f5d054ac
+index 0000000..8f5d054
 --- /dev/null
 +++ b/python/sglang/srt/layers/quantization/quark/schemes/triton_mxfp4_dispatch.py
 @@ -0,0 +1,373 @@

@@ -1,0 +1,101 @@
+From d4b4cacc66cfd27eae1f9abe56476fd6a1e159fd Mon Sep 17 00:00:00 2001
+From: Matt Harris <mharris@vultr.com>
+Date: Tue, 26 May 2026 22:30:00 +0000
+Subject: [PATCH 6/6] perf(hicache): madvise(MADV_HUGEPAGE) on the host KV pool
+ before cudaHostRegister
+
+`alloc_with_host_register` allocates the host-side hierarchical KV pool
+via `torch.empty(..., device='cpu')` and then pins it via
+`cudaHostRegister`. The cudaHostRegister call has to populate every
+backing page (so the device can map it) and build IOMMU page tables for
+all of them. For a 146 GB/rank pool at 4 KB granularity that's ~38
+million page faults and ~38 million PTE entries per rank, plus the
+matching IOMMU bookkeeping in VRAM. On TP=8 with a 1.17 TB aggregate
+pool this dominated boot time by tens of minutes on observed deployments.
+
+THP at the host level only fires for regions that explicitly request
+hugepages on systems running `transparent_hugepage=madvise` (the common
+default). Hinting `MADV_HUGEPAGE` on the pool buffer before pinning lets
+the kernel back the population with 2 MB pages where it can, cutting
+fault count and IOMMU PTE entries by ~500x. madvise is a hint and cannot
+fail destructively; worst case the kernel falls back to 4 KB and boot
+runs at the current speed.
+
+Opt-in via `SGLANG_HICACHE_HUGEPAGE_HINT=1` (default off). When opt-in
+was the default, runtime GPU memory-access faults were observed on ROCm,
+attributed to a THP+IOMMU+cudaHostRegister stale-mapping interaction;
+keep the hint off until the underlying issue is understood.
+---
+ .../sglang/srt/mem_cache/memory_pool_host.py  | 44 +++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/python/sglang/srt/mem_cache/memory_pool_host.py b/python/sglang/srt/mem_cache/memory_pool_host.py
+index c8d3b9a..c06aed9 100644
+--- a/python/sglang/srt/mem_cache/memory_pool_host.py
++++ b/python/sglang/srt/mem_cache/memory_pool_host.py
+@@ -1,7 +1,9 @@
+ from __future__ import annotations
+ 
+ import abc
++import ctypes
+ import logging
++import os
+ import threading
+ from collections import defaultdict
+ from dataclasses import dataclass
+@@ -110,6 +112,45 @@ def get_allocator_from_storage(allocator_type):
+         return HostTensorAllocator()
+ 
+ 
++# Hint the kernel that the host KV pool wants huge pages. On hosts running
++# transparent_hugepage=madvise (the common default) this is the only way
++# to get 2 MB backing pages, which reduces both the host page-fault count
++# during cudaHostRegister and the IOMMU PTE count on the device side by
++# ~500x. madvise(MADV_HUGEPAGE) is a hint; if the kernel can't satisfy it
++# it silently falls back to 4 KB pages. Opt-in via SGLANG_HICACHE_HUGEPAGE_HINT=1
++# because the THP+IOMMU+cudaHostRegister interaction has been observed to
++# produce GPU memory-access faults on ROCm at runtime.
++_MADV_HUGEPAGE = 14  # from <linux/mman.h>; stable on Linux x86_64/arm64.
++_LIBC: Optional[ctypes.CDLL] = None
++
++
++def _madvise_hugepages(buffer: torch.Tensor) -> None:
++    if os.environ.get("SGLANG_HICACHE_HUGEPAGE_HINT", "0") != "1":
++        return
++    if not buffer.is_cpu:
++        return
++    global _LIBC
++    if _LIBC is None:
++        try:
++            _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
++        except OSError:
++            return
++    # madvise requires page-aligned start. torch.empty's data_ptr is cache-line
++    # aligned but not page-aligned; round up to next 4 KB and shrink length.
++    PAGE = 4096
++    ptr = buffer.data_ptr()
++    nbytes = buffer.numel() * buffer.element_size()
++    aligned = (ptr + PAGE - 1) & ~(PAGE - 1)
++    head_skip = aligned - ptr
++    if head_skip >= nbytes:
++        return
++    _LIBC.madvise(
++        ctypes.c_void_p(aligned),
++        ctypes.c_size_t(nbytes - head_skip),
++        ctypes.c_int(_MADV_HUGEPAGE),
++    )
++
++
+ def alloc_with_host_register(
+     dims,
+     dtype: torch.dtype,
+@@ -122,6 +163,9 @@ def alloc_with_host_register(
+     CudaHostRegister only applies when pin_memory=True.
+     """
+     buffer = allocator.allocate(dims, dtype=dtype, device=device)
++    # Hint hugepages before pinning so cudaHostRegister populates the buffer
++    # with 2 MB pages where the kernel can satisfy the hint.
++    _madvise_hugepages(buffer)
+     if pin_memory:
+         torch.cuda.cudart().cudaHostRegister(
+             buffer.data_ptr(), buffer.numel() * buffer.element_size(), 0
