@@ -1,6 +1,6 @@
 # Build and deploy
 
-The shim ships as container images, one per `(backend, platform)` combination. The build is structured around a per-backend matrix that Jenkins discovers automatically.
+The shim ships as container images, one per `(backend, platform)` combination, optionally cross-compiled for a target CPU architecture. The build is structured around a per-backend matrix that Jenkins discovers automatically; CPU architecture is an orthogonal axis controlled by the `ARCH` build parameter.
 
 ## Image matrix
 
@@ -235,16 +235,13 @@ If the resulting set is empty, the pipeline errors out. This protects against si
 ```groovy
 def jobs = env.COMBOS.split(',').collectEntries { combo ->
     ...
+    def archTag      = params.ARCH?.trim() ? "-${params.ARCH.trim()}" : ''
+    def platformFlag = params.ARCH?.trim() ? "--platform linux/${params.ARCH.trim()}" : ''
+    def imageRef     = "${env.REGISTRY_URL}:${params.TAG}-${backend}-${platform}${archTag}"
+    def cacheRef     = "${env.REGISTRY_URL}:${params.TAG}-${backend}-${platform}${archTag}-cache"
+    ...
     docker.withRegistry("https://${env.REGISTRY_HOST}", env.CRED_ID) {
-        sh """
-            docker buildx build \\
-                --file ${dockerfile} \\
-                --tag ${imageRef} \\
-                --cache-from type=registry,ref=${cacheRef} \\
-                --cache-to   type=registry,ref=${cacheRef},mode=min,ignore-error=true \\
-                --push \\
-                .
-        """
+        sh "docker buildx build --file ${dockerfile} ${platformFlag} --tag ${imageRef} ..."
     }
 }
 parallel jobs
@@ -254,7 +251,8 @@ Each `(backend, platform)` becomes a parallel branch. Each branch:
 
 - Authenticates to the Vultr container registry using the `ATL_VCR_VLLM` Jenkins credential.
 - Runs `docker buildx build` with registry-backed cache. `mode=min` stores only the final image's layers (not intermediate stages) and `ignore-error=true` keeps the build green if the cache push itself fails (e.g. transient registry hiccup). This trades cache hit rate on edits to intermediate layers for lower registry-storage cost and noisy-cache-write resilience; if rebuilds start feeling slow because intermediate layers are missing from cache, `mode=max` is the knob to flip.
-- Tags the result `${TAG}-${BACKEND}-${PLATFORM}` and pushes.
+- Tags the result `${TAG}-${BACKEND}-${PLATFORM}${archTag}` and pushes. When `ARCH` is empty (the default), `archTag` is empty and the tag is identical to the previous format.
+- If `ARCH` is set (e.g. `arm64`), passes `--platform linux/arm64` to buildx for cross-compilation and appends `-${ARCH}` to the image tag. The base image must be available for the target architecture; this is the operator's responsibility to verify.
 
 ### Tag scheme
 
@@ -263,10 +261,14 @@ Each `(backend, platform)` becomes a parallel branch. Each branch:
 | `TAG`      | `nightly` | `nightly`, `v1.2.3`, `pr-42` |
 | `BACKEND`  | `''` (all) | `sglang` |
 | `PLATFORM` | `''` (all) | `rocm`, `cuda` |
+| `ARCH`     | `''` (native) | `arm64` |
 
-Final image tag: `atl.vultrcr.com/vllm/vllm-shim:${TAG}-${BACKEND}-${PLATFORM}`.
+Final image tag: `atl.vultrcr.com/vllm/vllm-shim:${TAG}-${BACKEND}-${PLATFORM}${ARCH_SUFFIX}`, where `ARCH_SUFFIX` is `-${ARCH}` when `ARCH` is set, or empty when `ARCH` is empty. Examples:
 
-A separate cache tag `…-${BACKEND}-${PLATFORM}-cache` lives alongside it. Don't garbage-collect cache tags blindly; losing them means full rebuilds on every commit.
+- `ARCH=''`: `nightly-trtllm-cuda` (native build, no arch suffix)
+- `ARCH=arm64`: `nightly-trtllm-cuda-arm64` (cross-compiled for arm64)
+
+A separate cache tag with the same suffix pattern lives alongside each image tag. Don't garbage-collect cache tags blindly; losing them means full rebuilds on every commit.
 
 ## Triggering builds
 
@@ -279,11 +281,11 @@ curl -X POST "https://jenkins.sweetapi.com/job/vllm-shim/buildWithParameters" \
   -d PLATFORM=rocm
 ```
 
-`BACKEND` and `PLATFORM` can be omitted to build the full matrix.
+`BACKEND` and `PLATFORM` can be omitted to build the full matrix. `ARCH` can be set to cross-compile for a target CPU architecture (e.g. `ARCH=arm64`); when omitted, the build targets the agent's native architecture.
 
 ### From the Jenkins UI
 
-The `Build with Parameters` form exposes `BRANCH`, `TAG`, `BACKEND`, `PLATFORM`. Defaults are sensible. For a smoke build of the latest master across both platforms, just hit `Build`.
+The `Build with Parameters` form exposes `BRANCH`, `TAG`, `BACKEND`, `PLATFORM`, `ARCH`. Defaults are sensible. For a smoke build of the latest master across both platforms, just hit `Build`.
 
 ## Local builds
 

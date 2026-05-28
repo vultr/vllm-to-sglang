@@ -6,6 +6,7 @@ pipeline {
         string(name: 'TAG',      defaultValue: 'dev',    description: 'Base tag; final image tag is ${TAG}-${BACKEND}-${PLATFORM}')
         string(name: 'BACKEND',  defaultValue: 'sglang', description: 'Optional filter: build only this backend (e.g. "sglang"). Empty = all backends found under docker/.')
         string(name: 'PLATFORM', defaultValue: 'rocm',   description: 'Optional filter: build only this platform (e.g. "rocm", "cuda"). Empty = all platforms.')
+        string(name: 'ARCH',     defaultValue: 'amd64',  description: 'Optional CPU architecture for buildx (e.g. "arm64"). Empty = native architecture.')
     }
 
     environment {
@@ -48,22 +49,17 @@ pipeline {
                         def parts      = combo.tokenize(':')
                         def backend    = parts[0]
                         def platform   = parts[1]
-                        def dockerfile = "docker/${backend}/Dockerfile.${platform}"
-                        def imageRef   = "${env.REGISTRY_URL}:${params.TAG}-${backend}-${platform}"
-                        def cacheRef   = "${env.REGISTRY_URL}:${params.TAG}-${backend}-${platform}-cache"
+                        def dockerfile   = "docker/${backend}/Dockerfile.${platform}"
+                        def archTag      = params.ARCH?.trim() ? "-${params.ARCH.trim()}" : ''
+                        def platformFlag = params.ARCH?.trim() ? "--platform linux/${params.ARCH.trim()}" : ''
+                        def imageRef     = "${env.REGISTRY_URL}:${params.TAG}-${backend}-${platform}${archTag}"
+                        def cacheRef     = "${env.REGISTRY_URL}:${params.TAG}-${backend}-${platform}${archTag}-cache"
 
-                        ["${backend}/${platform}": {
-                            stage("${backend}/${platform}") {
+                        ["${backend}/${platform}${archTag}": {
+                            stage("${backend}/${platform}${archTag}") {
                                 docker.withRegistry("https://${env.REGISTRY_HOST}", env.CRED_ID) {
-                                    sh """
-                                        docker buildx build \\
-                                            --file ${dockerfile} \\
-                                            --tag ${imageRef} \\
-                                            --cache-from type=registry,ref=${cacheRef} \\
-                                            --cache-to   type=registry,ref=${cacheRef},mode=min,ignore-error=true \\
-                                            --push \\
-                                            .
-                                    """
+                                    def buildCmd = "docker buildx build --file ${dockerfile} ${platformFlag} --tag ${imageRef} --cache-from type=registry,ref=${cacheRef} --cache-to type=registry,ref=${cacheRef},mode=min,ignore-error=true --push ."
+                                    sh buildCmd
                                 }
                             }
                         }]
